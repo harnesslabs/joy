@@ -4,10 +4,10 @@ Source: user-provided master roadmap (Feb 24, 2026) and the decision-complete ex
 
 ## Current Status
 
-- Current phase: Phase 4 compiler discovery & local build engine (next)
-- Active branch: `codex/phase3-fetcher-header-only`
-- Last completed milestone: Phase 3 linker copy-fallback coverage (`9d7a05d`)
-- Current focus: start Phase 4 toolchain discovery (`ninja`, `clang++`/`g++`) and version parsing
+- Current phase: Phase 5 dependency graph & compiled libraries (next)
+- Active branch: `codex/phase4-local-build-engine`
+- Last completed milestone: Phase 4 local build engine (`14aabda`)
+- Current focus: start Phase 5 recipe loader + exact-ref resolver groundwork
 
 ## Locked Decisions
 
@@ -24,7 +24,7 @@ Source: user-provided master roadmap (Feb 24, 2026) and the decision-complete ex
 - [x] Phase 1: CLI foundation & scaffolding
 - [x] Phase 2: manifest parsing & local `.joy` environment
 - [x] Phase 3: fetcher & header-only packages
-- [ ] Phase 4: compiler discovery & local build engine
+- [x] Phase 4: compiler discovery & local build engine
 - [ ] Phase 5: dependency graph & compiled libraries
 - [ ] Phase 6: lockfiles & production polish
 
@@ -41,9 +41,12 @@ Source: user-provided master roadmap (Feb 24, 2026) and the decision-complete ex
 - [x] Phase 3 header linking + `joy add` integration commit (`68f879a`) - `.joy/include/deps/<slug>` install path
 - [x] Phase 3 archive fetch backend + mockito tests (`ba47dfc`)
 - [x] Phase 3 cross-platform symlink/copy fallback assertions (`9d7a05d`) - explicit copy-path coverage
-- [ ] Phase 4 toolchain discovery
-- [ ] Phase 4 ninja build file generation
-- [ ] Phase 4 `joy build`/`joy run` execution
+- [x] Phase 4 toolchain discovery (`14aabda`)
+- [x] Phase 4 ninja build file generation (`14aabda`)
+- [x] Phase 4 `joy build`/`joy run` execution + E2E tests (`14aabda`)
+- [ ] Phase 5 recipes + resolver + DAG
+- [ ] Phase 5 ABI hash + cache build layout
+- [ ] Phase 5 CMake adapter + linking
 
 ## Notes Convention
 
