@@ -118,18 +118,19 @@ fn build_and_run_supports_extra_sources_include_dirs_and_duplicate_basenames() {
   let compiled_sources =
     build_payload["data"]["compiled_sources"].as_array().expect("compiled_sources");
   assert_eq!(compiled_sources.len(), 2);
-  assert!(
-    compiled_sources.iter().any(|v| v.as_str().is_some_and(|s| s.ends_with("/src/main.cpp")))
-  );
-  assert!(
-    compiled_sources.iter().any(|v| v.as_str().is_some_and(|s| s.ends_with("/src/dup/main.cpp")))
-  );
+  let compiled_sources_normalized = compiled_sources
+    .iter()
+    .filter_map(|v| v.as_str().map(|s| s.replace('\\', "/")))
+    .collect::<Vec<_>>();
+  assert!(compiled_sources_normalized.iter().any(|s| s.ends_with("/src/main.cpp")));
+  assert!(compiled_sources_normalized.iter().any(|s| s.ends_with("/src/dup/main.cpp")));
   assert!(
     build_payload["data"]["include_dirs"]
       .as_array()
       .expect("include_dirs")
       .iter()
-      .any(|v| v.as_str().is_some_and(|s| s.ends_with("/include")))
+      .filter_map(|v| v.as_str().map(|s| s.replace('\\', "/")))
+      .any(|s| s.ends_with("/include"))
   );
 
   let obj_dir = temp.path().join(".joy").join("build").join("obj");
