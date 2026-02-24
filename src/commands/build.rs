@@ -1,4 +1,5 @@
 use serde_json::json;
+use std::collections::BTreeSet;
 use std::env;
 use std::fs;
 use std::path::{Path, PathBuf};
@@ -7,6 +8,7 @@ use std::process::Command;
 use crate::cli::BuildArgs;
 use crate::commands::CommandOutput;
 use crate::error::JoyError;
+use crate::install_index::InstallIndex;
 use crate::lockfile;
 use crate::manifest::Manifest;
 use crate::ninja::{BuildProfile, NinjaBuildSpec};
@@ -131,6 +133,7 @@ pub(crate) fn build_project(options: BuildOptions) -> Result<BuildExecution, Joy
     &toolchain,
     BuildProfile::from_release_flag(options.release),
   )?;
+  refresh_install_index(&env_layout, &manifest, &native_link)?;
 
   let spec = NinjaBuildSpec {
     compiler_executable: toolchain.compiler.executable_name.clone(),
@@ -213,6 +216,7 @@ struct NativeLinkInputs {
   link_dirs: Vec<PathBuf>,
   link_libs: Vec<String>,
   built_packages: Vec<String>,
+  installed_lib_files: Vec<PathBuf>,
 }
 
 fn prepare_compiled_dependencies(
@@ -242,6 +246,7 @@ fn prepare_compiled_dependencies(
   let mut link_dirs = Vec::<PathBuf>::new();
   let mut link_libs = Vec::<String>::new();
   let mut built_packages = Vec::<String>::new();
+  let mut installed_lib_files = Vec::<PathBuf>::new();
 
   for pkg in order {
     if pkg.header_only {
@@ -343,9 +348,14 @@ fn prepare_compiled_dependencies(
         link_libs.push(lib);
       }
     }
+    for file in lib_install.installed_files {
+      if !installed_lib_files.contains(&file) {
+        installed_lib_files.push(file);
+      }
+    }
   }
 
-  Ok(NativeLinkInputs { link_dirs, link_libs, built_packages })
+  Ok(NativeLinkInputs { link_dirs, link_libs, built_packages, installed_lib_files })
 }
 
 fn collect_include_dirs(project_include_dir: &Path) -> std::io::Result<Vec<PathBuf>> {
@@ -385,6 +395,38 @@ fn target_triple_guess() -> String {
     };
     format!("{}-{env_suffix}", std::env::consts::ARCH)
   })
+}
+
+fn refresh_install_index(
+  env_layout: &project_env::ProjectEnvLayout,
+  manifest: &Manifest,
+  native_link: &NativeLinkInputs,
+) -> Result<(), JoyError> {
+  let index_path = env_layout.state_dir.join("install-index.json");
+  let mut index = InstallIndex::load_or_default(&index_path)
+    .map_err(|err| JoyError::new("build", "state_index_error", err.to_string(), 1))?;
+
+  let desired_header_links = manifest
+    .dependencies
+    .keys()
+    .filter_map(|id| crate::package_id::PackageId::parse(id).ok())
+    .map(|pkg| env_layout.include_dir.join("deps").join(pkg.slug()))
+    .collect::<BTreeSet<_>>();
+  let desired_library_files =
+    native_link.installed_lib_files.iter().cloned().collect::<BTreeSet<_>>();
+
+  crate::install_index::cleanup_tracked_orphans(
+    &index,
+    &desired_header_links,
+    &desired_library_files,
+  )
+  .map_err(|err| JoyError::new("build", "state_cleanup_failed", err.to_string(), 1))?;
+
+  index.set_header_links(desired_header_links);
+  index.set_library_files(desired_library_files);
+  index
+    .save(&index_path)
+    .map_err(|err| JoyError::new("build", "state_index_error", err.to_string(), 1))
 }
 
 #[derive(Debug, Clone, Copy)]

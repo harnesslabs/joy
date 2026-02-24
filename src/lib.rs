@@ -5,6 +5,7 @@ pub mod commands;
 pub mod error;
 pub mod fetch;
 pub mod global_cache;
+pub mod install_index;
 pub mod linking;
 pub mod lockfile;
 pub mod manifest;

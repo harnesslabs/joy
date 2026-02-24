@@ -6,6 +6,7 @@ use crate::commands::CommandOutput;
 use crate::error::JoyError;
 use crate::fetch;
 use crate::global_cache::GlobalCache;
+use crate::install_index::InstallIndex;
 use crate::linking;
 use crate::manifest::{DependencySource, DependencySpec, Manifest};
 use crate::package_id::PackageId;
@@ -55,6 +56,15 @@ pub fn handle(args: AddArgs) -> Result<CommandOutput, JoyError> {
   let lockfile_warning = cwd.join("joy.lock").is_file().then_some(
     "joy.lock exists and may be stale; future builds should refresh the lockfile".to_string(),
   );
+
+  let install_index_path = env_layout.state_dir.join("install-index.json");
+  let mut install_index = InstallIndex::load_or_default(&install_index_path)
+    .map_err(|err| JoyError::new("add", "state_index_error", err.to_string(), 1))?;
+  install_index.header_links.insert(installed.link_path.display().to_string());
+  install_index
+    .save(&install_index_path)
+    .map_err(|err| JoyError::new("add", "state_index_error", err.to_string(), 1))?;
+
   let mut human_message = if changed {
     format!("Added dependency `{}` (rev `{rev}`)", args.package)
   } else {
@@ -93,6 +103,7 @@ pub fn handle(args: AddArgs) -> Result<CommandOutput, JoyError> {
       "manifest_path": manifest_path.display().to_string(),
       "project_root": cwd.display().to_string(),
       "created_env_paths": created_env_paths,
+      "state_index_path": install_index_path.display().to_string(),
       "warnings": lockfile_warning.map(|w| vec![w]).unwrap_or_default(),
     }),
   ))
