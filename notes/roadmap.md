@@ -6,8 +6,8 @@ Source: user-provided master roadmap (Feb 24, 2026) and the decision-complete ex
 
 - Current phase: Phase 5 dependency graph & compiled libraries (in progress)
 - Active branch: `codex/phase5-compiled-deps`
-- Last completed milestone: Phase 5 recipes + resolver + DAG (`264fce9`)
-- Current focus: implement ABI hashing inputs + compiled build cache layout
+- Last completed milestone: Phase 5 ABI hash + cache build layout (`a1d2cc3`)
+- Current focus: implement CMake adapter and compiled artifact linking into `.joy/lib`
 
 ## Locked Decisions
 
@@ -45,7 +45,7 @@ Source: user-provided master roadmap (Feb 24, 2026) and the decision-complete ex
 - [x] Phase 4 ninja build file generation (`14aabda`)
 - [x] Phase 4 `joy build`/`joy run` execution + E2E tests (`14aabda`)
 - [x] Phase 5 recipes + resolver + DAG (`264fce9`)
-- [ ] Phase 5 ABI hash + cache build layout
+- [x] Phase 5 ABI hash + cache build layout (`a1d2cc3`)
 - [ ] Phase 5 CMake adapter + linking
 
 ## Notes Convention
