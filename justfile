@@ -1,0 +1,58 @@
+default:
+  @just --list
+
+build:
+  cargo build --workspace
+
+test:
+  cargo test --workspace
+
+lint:
+  cargo fmt --all -- --check
+  cargo clippy --all-targets --all-features -- --deny warnings
+
+fmt-check:
+  cargo fmt --all -- --check
+  taplo fmt --check
+
+fmt-fix:
+  cargo fmt --all
+  taplo fmt
+
+clippy-target target:
+  cargo clippy --target {{target}} --all-targets --all-features -- --deny warnings
+
+test-target target:
+  cargo test --verbose --target {{target}} --workspace
+
+compiled-e2e:
+  cargo test --verbose --workspace --test add_command build_and_run_with_local_compiled_recipe_dependency -- --nocapture
+  cargo test --verbose --workspace --test lockfile_behavior -- --nocapture
+
+udeps:
+  cargo +nightly udeps --workspace
+
+semver:
+  @echo "Skipping semver checks locally by default: crates.io baseline for crate name \`joy\` is unrelated to this repo."
+  @echo "Use \`just semver-main\` (preferred) or \`just semver-cratesio\` for debugging."
+
+semver-main:
+  cargo semver-checks check-release --workspace --baseline-rev origin/main
+
+semver-cratesio:
+  cargo semver-checks check-release --workspace
+
+ci:
+  just fmt-check
+  just lint
+  just test
+
+ci-local:
+  just ci
+  just compiled-e2e
+
+ci-pr:
+  just ci-local
+
+clean:
+  rm -rf target .joy

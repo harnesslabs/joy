@@ -1,0 +1,21 @@
+id = "fmtlib/fmt"
+slug = "fmt"
+source = "github"
+kind = "cmake"
+
+[fetch]
+subdir = ""
+
+[headers]
+include_roots = ["include"]
+
+[deps]
+packages = []
+
+[cmake]
+configure_args = ["-DFMT_DOC=OFF", "-DFMT_TEST=OFF", "-DBUILD_SHARED_LIBS=OFF"]
+build_targets = ["fmt"]
+
+[link]
+libs = ["fmt"]
+preferred_linkage = "static"

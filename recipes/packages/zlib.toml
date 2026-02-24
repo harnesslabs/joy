@@ -1,0 +1,21 @@
+id = "madler/zlib"
+slug = "zlib"
+source = "github"
+kind = "cmake"
+
+[fetch]
+subdir = ""
+
+[headers]
+include_roots = ["."]
+
+[deps]
+packages = []
+
+[cmake]
+configure_args = ["-DBUILD_SHARED_LIBS=OFF", "-DZLIB_BUILD_TESTING=OFF"]
+build_targets = ["zlibstatic"]
+
+[link]
+libs = ["z"]
+preferred_linkage = "static"
