@@ -20,7 +20,7 @@ The release workflow currently builds and publishes:
 
 Notes:
 
-- Windows GNU is the supported Windows release target until Phase 10 (MSVC parity) is completed.
+- Windows MSVC local/CI build support is available (Phase 10), but the release workflow currently publishes the Windows GNU artifact for the packaged Windows channel.
 - Homebrew/Scoop metadata templates are kept in `/Users/autoparallel/Code/joy/packaging/` and updated per release with new version + SHA256 values.
 
 ## Release Workflow (GitHub Actions)

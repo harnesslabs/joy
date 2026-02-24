@@ -32,6 +32,20 @@ clippy-target target:
 test-target target:
   cargo test --verbose --target {{target}} --workspace
 
+build-msvc:
+  cargo build --target x86_64-pc-windows-msvc --workspace
+
+lint-msvc:
+  cargo clippy --target x86_64-pc-windows-msvc --all-targets --all-features -- --deny warnings
+
+test-msvc:
+  cargo test --verbose --target x86_64-pc-windows-msvc --workspace
+
+ci-msvc:
+  just build-msvc
+  just lint-msvc
+  just test-msvc
+
 compiled-e2e:
   cargo test --verbose --workspace --test add_command build_and_run_with_local_compiled_recipe_dependency -- --nocapture
   cargo test --verbose --workspace --test lockfile_behavior -- --nocapture

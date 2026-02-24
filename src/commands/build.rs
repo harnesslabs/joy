@@ -220,6 +220,7 @@ pub(crate) fn build_project(options: BuildOptions) -> Result<BuildExecution, Joy
   }
 
   let spec = NinjaBuildSpec {
+    compiler_kind: toolchain.compiler.kind,
     compiler_executable: toolchain.compiler.executable_name.clone(),
     cpp_standard: manifest.project.cpp_standard.clone(),
     compile_units,
@@ -571,7 +572,7 @@ fn build_compiled_dependency_stage(
       recipe_content_hash: abi::hash_recipe_contents(&recipe_contents),
       compiler_kind: toolchain.compiler.kind.as_str().to_string(),
       compiler_version: toolchain.compiler.version.clone(),
-      target_triple: target_triple_guess(),
+      target_triple: target_triple_guess(toolchain.compiler.kind),
       host_os: std::env::consts::OS.to_string(),
       host_arch: std::env::consts::ARCH.to_string(),
       profile: match profile {
@@ -614,6 +615,8 @@ fn build_compiled_dependency_stage(
       source_dir,
       build_layout: layout.clone(),
       profile,
+      compiler_kind: toolchain.compiler.kind,
+      compiler_path: toolchain.compiler.path.clone(),
       configure_args: cmake_recipe.configure_args.clone(),
       build_targets: cmake_recipe.build_targets.clone(),
       header_roots: recipe.include_roots().to_vec(),
@@ -871,10 +874,13 @@ fn linkage_name(linkage: RecipeLinkage) -> String {
   }
 }
 
-fn target_triple_guess() -> String {
+fn target_triple_guess(compiler_kind: toolchain::CompilerKind) -> String {
   std::env::var("TARGET").unwrap_or_else(|_| {
     let env_suffix = if cfg!(windows) {
-      "windows-gnu"
+      match compiler_kind {
+        toolchain::CompilerKind::Msvc => "pc-windows-msvc",
+        toolchain::CompilerKind::Clang | toolchain::CompilerKind::Gcc => "pc-windows-gnu",
+      }
     } else if cfg!(target_os = "macos") {
       "apple-darwin"
     } else {
@@ -1078,7 +1084,6 @@ fn map_toolchain_error(command: &'static str, err: toolchain::ToolchainError) ->
     toolchain::ToolchainError::NinjaNotFound | toolchain::ToolchainError::CompilerNotFound => {
       "toolchain_not_found"
     },
-    toolchain::ToolchainError::MsvcUnsupportedPhase4 => "toolchain_unsupported",
     toolchain::ToolchainError::Spawn { .. } | toolchain::ToolchainError::CommandFailed { .. } => {
       "toolchain_probe_failed"
     },

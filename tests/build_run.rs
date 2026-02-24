@@ -1,7 +1,6 @@
 use assert_cmd::cargo::cargo_bin_cmd;
 use serde_json::Value;
 use std::fs;
-use std::process::Command as ProcessCommand;
 use tempfile::TempDir;
 
 fn json_stdout(output: &[u8]) -> Value {
@@ -18,15 +17,12 @@ fn build_tools_available() -> bool {
     && (has_on_path("clang++")
       || has_on_path("g++")
       || has_on_path("clang++.exe")
-      || has_on_path("g++.exe"))
+      || has_on_path("g++.exe")
+      || (cfg!(windows) && has_on_path("cl.exe")))
 }
 
 fn has_on_path(program: &str) -> bool {
-  ProcessCommand::new(program)
-    .arg("--version")
-    .output()
-    .map(|output| output.status.success())
-    .unwrap_or(false)
+  which::which(program).is_ok()
 }
 
 #[test]
@@ -157,4 +153,39 @@ fn build_and_run_supports_extra_sources_include_dirs_and_duplicate_basenames() {
   let run_payload = json_stdout(&run_assert.get_output().stdout);
   let stdout = run_payload["data"]["stdout"].as_str().expect("stdout");
   assert_eq!(stdout.replace("\r\n", "\n"), "multi-file\n");
+}
+
+#[cfg(windows)]
+#[test]
+fn build_handles_crlf_sources_on_windows() {
+  if !build_tools_available() {
+    eprintln!("skipping windows CRLF E2E: ninja and/or compiler unavailable");
+    return;
+  }
+
+  let temp = TempDir::new().expect("tempdir");
+  init_project(&temp);
+
+  fs::write(
+    temp.path().join("src").join("main.cpp"),
+    "#include <iostream>\r\n\r\nint main() {\r\n  std::cout << \"crlf\" << std::endl;\r\n  return 0;\r\n}\r\n",
+  )
+  .expect("write crlf source");
+
+  let mut build = cargo_bin_cmd!("joy");
+  let build_assert = build.current_dir(temp.path()).args(["--json", "build"]).assert().success();
+  let build_payload = json_stdout(&build_assert.get_output().stdout);
+  assert_eq!(build_payload["command"], "build");
+  assert_eq!(build_payload["ok"], true);
+  assert!(build_payload["data"]["toolchain"]["compiler_kind"].is_string());
+
+  let mut run = cargo_bin_cmd!("joy");
+  let run_assert = run.current_dir(temp.path()).args(["--json", "run"]).assert().success();
+  let run_payload = json_stdout(&run_assert.get_output().stdout);
+  assert_eq!(run_payload["command"], "run");
+  assert_eq!(run_payload["data"]["exit_code"], 0);
+  assert_eq!(
+    run_payload["data"]["stdout"].as_str().expect("stdout").replace("\r\n", "\n"),
+    "crlf\n"
+  );
 }

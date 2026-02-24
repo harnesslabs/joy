@@ -62,7 +62,6 @@ The machine contract is defined by `/Users/autoparallel/Code/joy/src/error.rs` (
 
 - `toolchain_not_found`
 - `toolchain_probe_failed`
-- `toolchain_unsupported`
 - `env_setup_failed`
 - `recipe_load_failed`
 - `dependency_resolve_failed`

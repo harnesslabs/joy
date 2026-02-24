@@ -14,12 +14,13 @@ Native C++ package and build manager with a `cargo`-like CLI and a local project
 
 ## Status / Caveats
 
-`joy` is a functional pre-1.0 implementation that has completed Phases 7-9 and 11-14 of the current roadmap wave. Phase 10 (Windows MSVC parity) is intentionally deferred for now.
+`joy` is a functional pre-1.0 implementation that has completed Phases 7-14 of the current roadmap wave.
 
 Current constraints:
 
 - dependency versions are exact refs (`HEAD`, tag, branch, or commit SHA); there is no semver solver yet
-- Windows builds/releases currently target MinGW GNU (`x86_64-pc-windows-gnu`) first
+- Windows local builds are supported via both MinGW GNU and MSVC (`cl.exe` + Ninja)
+- GitHub release artifacts currently publish the Windows GNU target (`x86_64-pc-windows-gnu`)
 - no workspace/multi-target project model yet (single binary target per manifest)
 - package-manager channels (Homebrew tap / Scoop bucket) are template-driven and release-managed
 
@@ -177,7 +178,7 @@ The JSON envelope shape is stable and additive for existing commands in the curr
 | Linux (x86_64 GNU) | Supported | CI build/lint/test + release artifact |
 | macOS (Apple Silicon) | Supported | CI build/lint/test + release artifact |
 | Windows (MinGW GNU) | Supported | CI build/lint/test + release artifact |
-| Windows (MSVC) | Deferred | Planned in Phase 10 (`#17`, `#37-#41`) |
+| Windows (MSVC) | Supported | CI build/lint/test + compiled-e2e; release artifact currently GNU-only |
 
 ## How It Works (High-Level)
 
@@ -240,7 +241,7 @@ Release and distribution process docs:
 ## Current Limitations / Next Big Gaps
 
 - No semver range solving (exact refs only)
-- No first-class MSVC build path yet (Phase 10 deferred)
+- Windows release artifacts are GNU-only for now (MSVC build/test support exists)
 - No workspace support / multiple binary targets
 - Package-manager channels are template-driven until dedicated tap/bucket repos are maintained
 

@@ -1,6 +1,6 @@
 use std::ffi::OsString;
 use std::path::PathBuf;
-use std::process::Command;
+use std::process::{Command, Output};
 use thiserror::Error;
 
 /// Host C++ compiler family used for local builds.
@@ -73,26 +73,48 @@ pub fn discover_compiler() -> Result<Compiler, ToolchainError> {
     &[("clang++", CompilerKind::Clang), ("g++", CompilerKind::Gcc)]
   };
 
-  let mut saw_msvc = false;
   for (name, kind) in candidates {
     let Ok(path) = which::which(name) else {
       continue;
     };
-    if *kind == CompilerKind::Msvc {
-      saw_msvc = true;
-      continue;
-    }
-
-    let version_output = run_capture(&path, [OsString::from("--version")])?;
-    let version =
-      parse_compiler_version(*kind, &version_output).unwrap_or_else(|| "unknown".to_string());
+    let version = probe_compiler_version(*kind, &path)?;
     return Ok(Compiler { kind: *kind, executable_name: (*name).to_string(), path, version });
   }
 
-  if saw_msvc {
-    return Err(ToolchainError::MsvcUnsupportedPhase4);
-  }
   Err(ToolchainError::CompilerNotFound)
+}
+
+fn probe_compiler_version(
+  kind: CompilerKind,
+  path: &std::path::Path,
+) -> Result<String, ToolchainError> {
+  match kind {
+    CompilerKind::Msvc => {
+      // `cl.exe` prints its banner/version to stderr and may exit non-zero when invoked without
+      // input files. Treat a parsable banner as a successful probe.
+      let output = run_capture_output(path, Vec::<OsString>::new())?;
+      let combined = format!(
+        "{}\n{}",
+        String::from_utf8_lossy(&output.stdout),
+        String::from_utf8_lossy(&output.stderr)
+      );
+      if let Some(version) = parse_compiler_version(kind, &combined) {
+        return Ok(version);
+      }
+      if output.status.success() {
+        return Ok("unknown".to_string());
+      }
+      Err(ToolchainError::CommandFailed {
+        program: path.display().to_string(),
+        status: output.status.code(),
+        stderr: combined.trim().to_string(),
+      })
+    },
+    CompilerKind::Clang | CompilerKind::Gcc => {
+      let version_output = run_capture(path, [OsString::from("--version")])?;
+      Ok(parse_compiler_version(kind, &version_output).unwrap_or_else(|| "unknown".to_string()))
+    },
+  }
 }
 
 /// Parse compiler version text into a concise version string for diagnostics.
@@ -130,10 +152,7 @@ fn run_capture<const N: usize>(
   path: &std::path::Path,
   args: [OsString; N],
 ) -> Result<String, ToolchainError> {
-  let output = Command::new(path)
-    .args(args)
-    .output()
-    .map_err(|source| ToolchainError::Spawn { program: path.display().to_string(), source })?;
+  let output = run_capture_output(path, args)?;
   if !output.status.success() {
     return Err(ToolchainError::CommandFailed {
       program: path.display().to_string(),
@@ -144,16 +163,22 @@ fn run_capture<const N: usize>(
   Ok(String::from_utf8_lossy(&output.stdout).to_string())
 }
 
+fn run_capture_output(
+  path: &std::path::Path,
+  args: impl IntoIterator<Item = OsString>,
+) -> Result<Output, ToolchainError> {
+  Command::new(path)
+    .args(args)
+    .output()
+    .map_err(|source| ToolchainError::Spawn { program: path.display().to_string(), source })
+}
+
 #[derive(Debug, Error)]
 pub enum ToolchainError {
   #[error("ninja executable not found on PATH (looked for `ninja` and `ninja-build`)")]
   NinjaNotFound,
-  #[error("no supported C++ compiler found on PATH (looked for clang++/g++)")]
+  #[error("no supported C++ compiler found on PATH (looked for clang++/g++ and cl.exe on Windows)")]
   CompilerNotFound,
-  #[error(
-    "MSVC (`cl.exe`) was found but Phase 4 local build execution only supports MinGW/Clang on Windows"
-  )]
-  MsvcUnsupportedPhase4,
   #[error("failed to spawn `{program}`: {source}")]
   Spawn {
     program: String,
@@ -180,5 +205,12 @@ mod tests {
     let text = "g++ (Homebrew GCC 14.2.0) 14.2.0\nCopyright (C) ...";
     let parsed = parse_compiler_version(CompilerKind::Gcc, text).expect("gcc version");
     assert_eq!(parsed, "14.2.0");
+  }
+
+  #[test]
+  fn parses_msvc_version_output_with_crlf_banner() {
+    let text = "Microsoft (R) C/C++ Optimizing Compiler Version 19.38.33135 for x64\r\nCopyright (C) Microsoft Corporation.  All rights reserved.\r\n";
+    let parsed = parse_compiler_version(CompilerKind::Msvc, text).expect("msvc version");
+    assert_eq!(parsed, "19.38.33135");
   }
 }
