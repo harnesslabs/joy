@@ -105,7 +105,17 @@ fn build_ldflags(spec: &NinjaBuildSpec) -> String {
 }
 
 fn path_to_ninja(path: &Path) -> String {
-  path.to_string_lossy().replace('\\', "/").replace("$", "$$")
+  let raw = path.to_string_lossy().replace('\\', "/");
+  let mut escaped = String::with_capacity(raw.len());
+  for ch in raw.chars() {
+    match ch {
+      '$' => escaped.push_str("$$"),
+      ' ' => escaped.push_str("$ "),
+      ':' => escaped.push_str("$:"),
+      _ => escaped.push(ch),
+    }
+  }
+  escaped
 }
 
 #[derive(Debug, Error)]
@@ -151,5 +161,23 @@ mod tests {
     assert!(rendered.contains("\n  command = $cxx $cxxflags -MMD -MF $out.d -c $in -o $out\n"));
     assert!(rendered.contains("build .joy/build/obj/main.o: cxx_compile src/main.cpp"));
     assert!(rendered.contains("build .joy/bin/demo: cxx_link .joy/build/obj/main.o"));
+  }
+
+  #[test]
+  fn escapes_spaces_in_paths() {
+    let spec = NinjaBuildSpec {
+      compiler_executable: "clang++".into(),
+      cpp_standard: "c++20".into(),
+      source_file: PathBuf::from("src/main.cpp"),
+      object_file: PathBuf::from(".joy/build/obj/main.o"),
+      binary_file: PathBuf::from(".joy/bin/space demo"),
+      include_dirs: vec![],
+      link_dirs: vec![],
+      link_libs: vec![],
+      profile: BuildProfile::Debug,
+    };
+
+    let rendered = render_build_ninja(&spec);
+    assert!(rendered.contains("build .joy/bin/space$ demo: cxx_link .joy/build/obj/main.o"));
   }
 }
