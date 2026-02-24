@@ -11,6 +11,9 @@ lint:
   cargo fmt --all -- --check
   cargo clippy --all-targets --all-features -- --deny warnings
 
+recipe-check:
+  cargo run --quiet -- recipe-check --json
+
 fmt-check:
   cargo fmt --all -- --check
   taplo fmt --check
@@ -45,6 +48,7 @@ semver-cratesio:
 ci:
   just fmt-check
   just lint
+  just recipe-check
   just test
 
 ci-local:

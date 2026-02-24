@@ -51,6 +51,8 @@ pub enum Commands {
   Update(UpdateArgs),
   /// Show the resolved dependency graph.
   Tree(TreeArgs),
+  /// Validate bundled recipe metadata (for local checks and CI).
+  RecipeCheck(RecipeCheckArgs),
   /// Build the current project.
   Build(BuildArgs),
   /// Materialize dependencies and lockfile state without compiling the final binary.
@@ -93,6 +95,9 @@ pub struct UpdateArgs {
 
 #[derive(Debug, Args)]
 pub struct TreeArgs {}
+
+#[derive(Debug, Args)]
+pub struct RecipeCheckArgs {}
 
 #[derive(Debug, Args)]
 pub struct BuildArgs {
@@ -213,6 +218,15 @@ mod tests {
     match cli.command {
       Commands::Tree(_) => {},
       other => panic!("expected tree, got {other:?}"),
+    }
+  }
+
+  #[test]
+  fn parses_recipe_check_command() {
+    let cli = Cli::parse_from(["joy", "recipe-check"]);
+    match cli.command {
+      Commands::RecipeCheck(_) => {},
+      other => panic!("expected recipe-check, got {other:?}"),
     }
   }
 

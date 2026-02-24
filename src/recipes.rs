@@ -4,7 +4,7 @@
 //! configure/build targets, and link metadata) so `joy` can build them reproducibly.
 
 use serde::Deserialize;
-use std::collections::BTreeMap;
+use std::collections::{BTreeMap, BTreeSet};
 use std::fs;
 use std::path::{Path, PathBuf};
 use thiserror::Error;
@@ -43,8 +43,19 @@ impl RecipeStore {
       return Err(RecipeError::UnsupportedIndexVersion(index.version));
     }
 
+    let mut seen_index_ids = BTreeSet::new();
+    let mut seen_index_slugs = BTreeSet::new();
     let mut recipes_by_id = BTreeMap::new();
     for entry in &index.packages {
+      if !seen_index_ids.insert(entry.id.clone()) {
+        return Err(RecipeError::Validation(format!("duplicate recipe index id `{}`", entry.id)));
+      }
+      if !seen_index_slugs.insert(entry.slug.clone()) {
+        return Err(RecipeError::Validation(format!(
+          "duplicate recipe index slug `{}`",
+          entry.slug
+        )));
+      }
       let recipe_path = entry
         .path
         .as_ref()
@@ -52,7 +63,12 @@ impl RecipeStore {
         .unwrap_or_else(|| root_dir.join("packages").join(format!("{}.toml", entry.slug)));
       let recipe = load_recipe_file(&recipe_path)?;
       validate_recipe(&recipe, entry)?;
-      recipes_by_id.insert(recipe.id.clone(), recipe);
+      if recipes_by_id.insert(recipe.id.clone(), recipe).is_some() {
+        return Err(RecipeError::Validation(format!(
+          "duplicate recipe definition for `{}`",
+          entry.id
+        )));
+      }
     }
 
     Ok(Self { root_dir: root_dir.to_path_buf(), index, recipes_by_id })
@@ -380,5 +396,44 @@ source = "github"
 
     let err = RecipeStore::load_from_dir(temp.path()).expect_err("mismatch should fail");
     assert!(err.to_string().contains("index slug"));
+  }
+
+  #[test]
+  fn rejects_duplicate_index_ids_and_slugs() {
+    let temp = TempDir::new().expect("tempdir");
+    fs::create_dir_all(temp.path().join("packages")).expect("packages dir");
+    fs::write(
+      temp.path().join("index.toml"),
+      r#"version = 1
+
+[[packages]]
+id = "nlohmann/json"
+slug = "nlohmann_json"
+
+[[packages]]
+id = "nlohmann/json"
+slug = "nlohmann_json_alt"
+"#,
+    )
+    .expect("write index");
+    fs::write(
+      temp.path().join("packages/nlohmann_json.toml"),
+      r#"id = "nlohmann/json"
+slug = "nlohmann_json"
+source = "github"
+"#,
+    )
+    .expect("write recipe");
+    fs::write(
+      temp.path().join("packages/nlohmann_json_alt.toml"),
+      r#"id = "nlohmann/json"
+slug = "nlohmann_json_alt"
+source = "github"
+"#,
+    )
+    .expect("write alt recipe");
+
+    let err = RecipeStore::load_from_dir(temp.path()).expect_err("duplicate id should fail");
+    assert!(err.to_string().contains("duplicate recipe index id"));
   }
 }

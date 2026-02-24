@@ -1,0 +1,12 @@
+id = "gabime/spdlog"
+slug = "spdlog"
+source = "github"
+kind = "header_only"
+
+[headers]
+include_roots = ["include"]
+
+[deps]
+packages = [
+  { id = "fmtlib/fmt", rev = "11.0.2" },
+]

@@ -1,0 +1,7 @@
+id = "cliutils/CLI11"
+slug = "cli11"
+source = "github"
+kind = "header_only"
+
+[headers]
+include_roots = ["include"]

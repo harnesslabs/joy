@@ -2,6 +2,7 @@ pub mod add;
 pub mod build;
 pub mod init;
 pub mod new;
+pub mod recipe_check;
 pub mod remove;
 pub mod run;
 pub mod sync;
@@ -40,6 +41,7 @@ pub fn dispatch(command: Commands, runtime: RuntimeFlags) -> Result<CommandOutpu
     Commands::Remove(args) => remove::handle(args, runtime),
     Commands::Update(args) => update::handle(args, runtime),
     Commands::Tree(args) => tree::handle(args, runtime),
+    Commands::RecipeCheck(args) => recipe_check::handle(args),
     Commands::Build(args) => build::handle(args, runtime),
     Commands::Sync(args) => sync::handle(args, runtime),
     Commands::Run(args) => run::handle(args, runtime),
