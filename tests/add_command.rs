@@ -443,5 +443,6 @@ int main() {
     .success();
   let run_payload = json_stdout(&run_assert.get_output().stdout);
   assert_eq!(run_payload["ok"], true);
-  assert_eq!(run_payload["data"]["stdout"], "hello-from-fmt-fixture\n");
+  let stdout = run_payload["data"]["stdout"].as_str().expect("stdout string");
+  assert_eq!(stdout.replace("\r\n", "\n"), "hello-from-fmt-fixture\n");
 }

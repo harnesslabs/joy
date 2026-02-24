@@ -13,10 +13,7 @@ include_roots = ["."]
 packages = []
 
 [cmake]
-configure_args = [
-  "-DBUILD_SHARED_LIBS=OFF",
-  "-DZLIB_BUILD_TESTING=OFF",
-]
+configure_args = ["-DBUILD_SHARED_LIBS=OFF", "-DZLIB_BUILD_TESTING=OFF"]
 build_targets = ["zlibstatic"]
 
 [link]

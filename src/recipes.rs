@@ -34,8 +34,10 @@ impl RecipeStore {
       path: index_path.clone(),
       source,
     })?;
-    let index: RecipeIndexFile = toml::from_str(&raw)
-      .map_err(|source| RecipeError::Parse { path: index_path.clone(), source })?;
+    let index: RecipeIndexFile = toml::from_str(&raw).map_err(|source| RecipeError::Parse {
+      path: index_path.clone(),
+      source: Box::new(source),
+    })?;
 
     if index.version != 1 {
       return Err(RecipeError::UnsupportedIndexVersion(index.version));
@@ -88,7 +90,7 @@ fn load_recipe_file(path: &Path) -> Result<PackageRecipe, RecipeError> {
     source,
   })?;
   let recipe: PackageRecipe = toml::from_str(&raw)
-    .map_err(|source| RecipeError::Parse { path: path.to_path_buf(), source })?;
+    .map_err(|source| RecipeError::Parse { path: path.to_path_buf(), source: Box::new(source) })?;
   Ok(recipe)
 }
 
@@ -283,7 +285,7 @@ pub enum RecipeError {
   Parse {
     path: PathBuf,
     #[source]
-    source: toml::de::Error,
+    source: Box<toml::de::Error>,
   },
   #[error("unsupported recipe index version `{0}`")]
   UnsupportedIndexVersion(u32),

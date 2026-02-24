@@ -48,8 +48,10 @@ impl Lockfile {
   pub fn load(path: &Path) -> Result<Self, LockfileError> {
     let raw = fs::read_to_string(path)
       .map_err(|source| LockfileError::Io { path: path.to_path_buf(), source })?;
-    let lock: Self = toml::from_str(&raw)
-      .map_err(|source| LockfileError::Parse { path: path.to_path_buf(), source })?;
+    let lock: Self = toml::from_str(&raw).map_err(|source| LockfileError::Parse {
+      path: path.to_path_buf(),
+      source: Box::new(source),
+    })?;
     if lock.version != Self::VERSION {
       return Err(LockfileError::UnsupportedVersion(lock.version));
     }
@@ -106,7 +108,7 @@ pub enum LockfileError {
   Parse {
     path: PathBuf,
     #[source]
-    source: toml::de::Error,
+    source: Box<toml::de::Error>,
   },
   #[error("failed to serialize lockfile: {0}")]
   Serialize(toml::ser::Error),

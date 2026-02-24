@@ -43,8 +43,10 @@ impl Manifest {
   pub fn load(path: &Path) -> Result<Self, ManifestError> {
     let raw = fs::read_to_string(path)
       .map_err(|source| ManifestError::Io { path: path.to_path_buf(), source })?;
-    let manifest: Self = toml::from_str(&raw)
-      .map_err(|source| ManifestError::Parse { path: path.to_path_buf(), source })?;
+    let manifest: Self = toml::from_str(&raw).map_err(|source| ManifestError::Parse {
+      path: path.to_path_buf(),
+      source: Box::new(source),
+    })?;
     manifest.validate()?;
     Ok(manifest)
   }
@@ -98,7 +100,7 @@ pub enum ManifestError {
   Parse {
     path: PathBuf,
     #[source]
-    source: toml::de::Error,
+    source: Box<toml::de::Error>,
   },
   #[error("failed to serialize manifest: {0}")]
   Serialize(toml::ser::Error),

@@ -132,7 +132,20 @@ fn install_headers_inner(
 fn remove_existing_path(path: &Path) -> std::io::Result<()> {
   match fs::symlink_metadata(path) {
     Ok(metadata) => {
-      if metadata.file_type().is_symlink() || metadata.is_file() {
+      if metadata.file_type().is_symlink() {
+        match fs::remove_file(path) {
+          Ok(()) => Ok(()),
+          Err(err)
+            if matches!(
+              err.kind(),
+              std::io::ErrorKind::PermissionDenied | std::io::ErrorKind::IsADirectory
+            ) =>
+          {
+            fs::remove_dir(path)
+          },
+          Err(err) => Err(err),
+        }
+      } else if metadata.is_file() {
         fs::remove_file(path)
       } else if metadata.is_dir() {
         fs::remove_dir_all(path)

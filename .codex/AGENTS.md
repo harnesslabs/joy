@@ -94,3 +94,13 @@ We rely on `just` as our command runner. You are expected to use and maintain th
 * **Checks Policy:** You MUST run `just lint` and `just test` before every **code-changing** commit.
 * **Docs-Only Exception:** For commits that only touch `notes/`, tracker docs, or other non-code files, you MAY skip rerunning checks if the immediately preceding code commit already passed `just lint` and `just test`.
 * **Throughput Rule:** Do not split implementation into extra commits solely because a note/tracker update needs to be recorded. Prefer larger, coherent code milestones followed by notes.
+
+### 8.1 CI-Parity and PR Gate (Mandatory)
+Local checks must mirror CI closely enough that PR failures are rare and actionable.
+
+* Before opening or updating a PR, you MUST run the CI-parity `just` command(s) (at minimum `just ci-pr`, or the closest equivalent if platform/tool constraints apply).
+* If the GitHub workflow contains a check that is not represented in `justfile`, you MUST add a corresponding `just` command (or an explicit skip command with rationale) before declaring the PR ready.
+* TOML formatting (`taplo fmt --check`) is part of CI parity and MUST be included in local pre-PR checks.
+* After pushing a PR update, you MUST inspect GitHub checks (`gh pr checks <PR_NUMBER>`). If any check fails, you MUST fetch the relevant logs and triage before reporting completion.
+* For CI failures, your default loop is: (1) identify failing job(s), (2) pull logs, (3) reproduce locally when feasible, (4) patch code/tests/workflow/justfile, (5) rerun local CI-parity checks, (6) push and re-check.
+* Non-portable or non-applicable checks (for example semver checks against an unrelated crates.io baseline) must be converted into explicit CI-pass/skip behavior with documented rationale rather than left as noisy red failures.
