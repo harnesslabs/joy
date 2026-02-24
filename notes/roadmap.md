@@ -36,7 +36,7 @@ Source: user-provided master roadmap (Feb 24, 2026) and the decision-complete ex
 - [x] Phase 1 integration tests + justfile polish commit (`b7b8b6b`)
 - [x] Phase 2 manifest parsing commit (delivered in `dbdcb0e`)
 - [x] Phase 2 `joy add` + `.joy` env commit (delivered in `dbdcb0e`)
-- [x] Phase 2 tests/snapshots commit (completed with `dbdcb0e` + follow-up polish in working tree)
+- [x] Phase 2 tests/snapshots commit (completed with `dbdcb0e` + `fe7d586`)
 
 ## Notes Convention
 
