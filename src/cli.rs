@@ -9,6 +9,14 @@ pub struct Cli {
   #[arg(long, visible_alias = "machine", global = true)]
   pub json: bool,
 
+  /// Resolve and build using only locally cached dependency data.
+  #[arg(long, global = true)]
+  pub offline: bool,
+
+  /// CI-safe mode: no network access and no lockfile changes (`--offline` + `--locked`).
+  #[arg(long, global = true)]
+  pub frozen: bool,
+
   #[command(subcommand)]
   pub command: Commands,
 }
@@ -17,6 +25,16 @@ impl Cli {
   pub fn output_mode(&self) -> OutputMode {
     if self.json { OutputMode::Json } else { OutputMode::Human }
   }
+
+  pub fn runtime_flags(&self) -> RuntimeFlags {
+    RuntimeFlags { offline: self.offline || self.frozen, frozen: self.frozen }
+  }
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct RuntimeFlags {
+  pub offline: bool,
+  pub frozen: bool,
 }
 
 #[derive(Debug, Subcommand)]
@@ -120,6 +138,19 @@ mod tests {
       other => panic!("expected init, got {other:?}"),
     }
     assert!(cli.json);
+  }
+
+  #[test]
+  fn parses_global_offline_and_frozen_flags() {
+    let cli = Cli::parse_from(["joy", "--offline", "--frozen", "sync"]);
+    assert!(cli.offline);
+    assert!(cli.frozen);
+    assert!(cli.runtime_flags().offline);
+    assert!(cli.runtime_flags().frozen);
+    match cli.command {
+      Commands::Sync(_) => {},
+      other => panic!("expected sync, got {other:?}"),
+    }
   }
 
   #[test]

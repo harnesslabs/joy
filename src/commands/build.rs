@@ -7,7 +7,7 @@ use std::fs;
 use std::path::{Path, PathBuf};
 use std::process::Command;
 
-use crate::cli::BuildArgs;
+use crate::cli::{BuildArgs, RuntimeFlags};
 use crate::commands::CommandOutput;
 use crate::error::JoyError;
 use crate::install_index::InstallIndex;
@@ -123,14 +123,16 @@ pub(crate) struct BuildOptions {
   pub release: bool,
   pub locked: bool,
   pub update_lock: bool,
+  pub offline: bool,
 }
 
 /// Handle `joy build` by executing the local build pipeline and returning a CLI output payload.
-pub fn handle(args: BuildArgs) -> Result<CommandOutput, JoyError> {
+pub fn handle(args: BuildArgs, runtime: RuntimeFlags) -> Result<CommandOutput, JoyError> {
   let execution = build_project(BuildOptions {
     release: args.release,
-    locked: args.locked,
+    locked: args.locked || runtime.frozen,
     update_lock: args.update_lock,
+    offline: runtime.offline,
   })?;
 
   Ok(CommandOutput::new(
@@ -147,6 +149,8 @@ pub fn handle(args: BuildArgs) -> Result<CommandOutput, JoyError> {
 
 /// Build the current project and return the execution metadata reused by `joy run`.
 pub(crate) fn build_project(options: BuildOptions) -> Result<BuildExecution, JoyError> {
+  let _fetch_runtime =
+    fetch::push_runtime_options(fetch::RuntimeOptions { offline: options.offline });
   let project_root = env::current_dir().map_err(|err| {
     JoyError::new("build", "cwd_unavailable", format!("failed to get cwd: {err}"), 1)
   })?;
@@ -246,6 +250,8 @@ pub(crate) fn build_project(options: BuildOptions) -> Result<BuildExecution, Joy
 
 /// Materialize dependencies and lockfile state without compiling the final application binary.
 pub(crate) fn sync_project(options: BuildOptions) -> Result<SyncExecution, JoyError> {
+  let _fetch_runtime =
+    fetch::push_runtime_options(fetch::RuntimeOptions { offline: options.offline });
   let project_root = env::current_dir().map_err(|err| {
     JoyError::new("sync", "cwd_unavailable", format!("failed to get cwd: {err}"), 1)
   })?;
@@ -434,8 +440,8 @@ fn prepare_compiled_dependencies(
 fn resolve_dependency_stage(manifest: &Manifest) -> Result<ResolvedDependencyStage, JoyError> {
   let recipes = RecipeStore::load_default()
     .map_err(|err| JoyError::new("build", "recipe_load_failed", err.to_string(), 1))?;
-  let resolved = resolver::resolve_manifest(manifest, &recipes)
-    .map_err(|err| JoyError::new("build", "dependency_resolve_failed", err.to_string(), 1))?;
+  let resolved =
+    resolver::resolve_manifest(manifest, &recipes).map_err(map_dependency_resolve_error)?;
   let build_order_ids = resolved
     .build_order_ids()
     .map_err(|err| JoyError::new("build", "dependency_graph_invalid", err.to_string(), 1))?;
@@ -456,8 +462,8 @@ fn prefetch_dependency_stage(
       (pkg.id.clone(), pkg.requested_rev.clone())
     })
     .collect::<Vec<_>>();
-  let prefetched = fetch::prefetch_github_packages(requests)
-    .map_err(|err| JoyError::new("build", "fetch_failed", err.to_string(), 1))?;
+  let prefetched =
+    fetch::prefetch_github_packages(requests).map_err(|err| map_fetch_error("build", err))?;
   let all_by_key = prefetched
     .into_iter()
     .map(|f| ((f.package.to_string(), f.requested_rev.clone()), f))
@@ -981,4 +987,28 @@ fn map_toolchain_error(command: &'static str, err: toolchain::ToolchainError) ->
     },
   };
   JoyError::new(command, code, message, 1)
+}
+
+fn map_fetch_error(command: &'static str, err: fetch::FetchError) -> JoyError {
+  let code = if err.is_offline_cache_miss() {
+    "offline_cache_miss"
+  } else if err.is_offline_network_disabled() {
+    "offline_network_disabled"
+  } else {
+    "fetch_failed"
+  };
+  JoyError::new(command, code, err.to_string(), 1)
+}
+
+fn map_dependency_resolve_error(err: resolver::ResolverError) -> JoyError {
+  let code = match &err {
+    resolver::ResolverError::Fetch { source, .. } if source.is_offline_cache_miss() => {
+      "offline_cache_miss"
+    },
+    resolver::ResolverError::Fetch { source, .. } if source.is_offline_network_disabled() => {
+      "offline_network_disabled"
+    },
+    _ => "dependency_resolve_failed",
+  };
+  JoyError::new("build", code, err.to_string(), 1)
 }

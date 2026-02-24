@@ -9,7 +9,7 @@ use serde_json::Value;
 use std::fs;
 use std::path::{Path, PathBuf};
 
-use crate::cli::Commands;
+use crate::cli::{Commands, RuntimeFlags};
 use crate::error::JoyError;
 use crate::templates;
 
@@ -29,14 +29,14 @@ impl CommandOutput {
 }
 
 /// Dispatch the parsed CLI subcommand to its handler.
-pub fn dispatch(command: Commands) -> Result<CommandOutput, JoyError> {
+pub fn dispatch(command: Commands, runtime: RuntimeFlags) -> Result<CommandOutput, JoyError> {
   match command {
     Commands::New(args) => new::handle(args),
     Commands::Init(args) => init::handle(args),
-    Commands::Add(args) => add::handle(args),
-    Commands::Build(args) => build::handle(args),
-    Commands::Sync(args) => sync::handle(args),
-    Commands::Run(args) => run::handle(args),
+    Commands::Add(args) => add::handle(args, runtime),
+    Commands::Build(args) => build::handle(args, runtime),
+    Commands::Sync(args) => sync::handle(args, runtime),
+    Commands::Run(args) => run::handle(args, runtime),
   }
 }
 

@@ -1,17 +1,18 @@
 use serde_json::json;
 use std::process::Command;
 
-use crate::cli::RunArgs;
+use crate::cli::{RunArgs, RuntimeFlags};
 use crate::commands::CommandOutput;
 use crate::error::JoyError;
 
 use super::build;
 
-pub fn handle(args: RunArgs) -> Result<CommandOutput, JoyError> {
+pub fn handle(args: RunArgs, runtime: RuntimeFlags) -> Result<CommandOutput, JoyError> {
   let execution = build::build_project(build::BuildOptions {
     release: args.release,
-    locked: args.locked,
+    locked: args.locked || runtime.frozen,
     update_lock: args.update_lock,
+    offline: runtime.offline,
   })
   .map_err(remap_build_error_for_run)?;
 

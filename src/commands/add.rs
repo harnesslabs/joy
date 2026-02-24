@@ -3,7 +3,7 @@ use std::env;
 use std::fs;
 use std::path::Path;
 
-use crate::cli::AddArgs;
+use crate::cli::{AddArgs, RuntimeFlags};
 use crate::commands::CommandOutput;
 use crate::error::JoyError;
 use crate::fetch;
@@ -14,7 +14,19 @@ use crate::manifest::{DependencySource, DependencySpec, Manifest};
 use crate::package_id::PackageId;
 use crate::project_env;
 
-pub fn handle(args: AddArgs) -> Result<CommandOutput, JoyError> {
+pub fn handle(args: AddArgs, runtime: RuntimeFlags) -> Result<CommandOutput, JoyError> {
+  if runtime.frozen {
+    return Err(JoyError::new(
+      "add",
+      "frozen_disallows_add",
+      "`joy add` mutates the manifest and cannot run with `--frozen`; rerun without `--frozen`",
+      1,
+    ));
+  }
+
+  let _fetch_runtime =
+    fetch::push_runtime_options(fetch::RuntimeOptions { offline: runtime.offline });
+
   let package = PackageId::parse(&args.package)
     .map_err(|err| JoyError::new("add", "invalid_package_id", err.to_string(), 1))?;
 
@@ -41,7 +53,7 @@ pub fn handle(args: AddArgs) -> Result<CommandOutput, JoyError> {
   let cache = GlobalCache::resolve()
     .map_err(|err| JoyError::new("add", "cache_setup_failed", err.to_string(), 1))?;
   let fetched = fetch::fetch_github_with_cache(&package, &rev, &cache)
-    .map_err(|err| JoyError::new("add", "fetch_failed", err.to_string(), 1))?;
+    .map_err(|err| map_fetch_error("add", err))?;
   let installed = linking::install_headers(&env_layout.include_dir, &package, &fetched.source_dir)
     .map_err(|err| JoyError::new("add", "header_install_failed", err.to_string(), 1))?;
 
@@ -115,6 +127,17 @@ pub fn handle(args: AddArgs) -> Result<CommandOutput, JoyError> {
       "warnings": lockfile_warning.map(|w| vec![w]).unwrap_or_default(),
     }),
   ))
+}
+
+fn map_fetch_error(command: &'static str, err: fetch::FetchError) -> JoyError {
+  let code = if err.is_offline_cache_miss() {
+    "offline_cache_miss"
+  } else if err.is_offline_network_disabled() {
+    "offline_network_disabled"
+  } else {
+    "fetch_failed"
+  };
+  JoyError::new(command, code, err.to_string(), 1)
 }
 
 fn remove_installed_header_path(path: &Path) -> std::io::Result<()> {

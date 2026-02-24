@@ -11,11 +11,49 @@ use std::io::Read;
 use std::path::{Path, PathBuf};
 use std::process::Command;
 use std::sync::Arc;
+use std::sync::atomic::{AtomicU8, Ordering};
 use std::time::{SystemTime, UNIX_EPOCH};
 use thiserror::Error;
 
 use crate::global_cache::{GlobalCache, GlobalCacheError};
 use crate::package_id::PackageId;
+
+const FETCH_FLAG_OFFLINE: u8 = 1 << 0;
+static FETCH_RUNTIME_FLAGS: AtomicU8 = AtomicU8::new(0);
+
+/// Runtime fetch behavior toggles derived from global CLI flags.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+pub struct RuntimeOptions {
+  pub offline: bool,
+}
+
+/// RAII guard that restores the previous fetch runtime options on drop.
+pub struct RuntimeOptionsGuard {
+  previous_flags: u8,
+}
+
+impl Drop for RuntimeOptionsGuard {
+  fn drop(&mut self) {
+    FETCH_RUNTIME_FLAGS.store(self.previous_flags, Ordering::SeqCst);
+  }
+}
+
+/// Set process-wide fetch runtime options for the current command execution.
+///
+/// `joy` runs one command per process, so a lightweight global is sufficient and keeps the fetch
+/// API surface stable while `--offline`/`--frozen` semantics are introduced.
+pub fn push_runtime_options(options: RuntimeOptions) -> RuntimeOptionsGuard {
+  let mut flags = 0u8;
+  if options.offline {
+    flags |= FETCH_FLAG_OFFLINE;
+  }
+  let previous_flags = FETCH_RUNTIME_FLAGS.swap(flags, Ordering::SeqCst);
+  RuntimeOptionsGuard { previous_flags }
+}
+
+fn runtime_offline_enabled() -> bool {
+  FETCH_RUNTIME_FLAGS.load(Ordering::SeqCst) & FETCH_FLAG_OFFLINE != 0
+}
 
 /// Result of fetching a package source tree (or reusing an existing cached checkout).
 #[derive(Debug, Clone)]
@@ -47,9 +85,16 @@ pub fn fetch_github_with_cache(
 
   let remote_url = github_remote_url(package);
   let mirror_dir = cache.git_mirror_dir(package);
+  let requested = if requested_rev.trim().is_empty() { "HEAD" } else { requested_rev };
+  if runtime_offline_enabled() && !mirror_dir.exists() {
+    return Err(FetchError::OfflineCacheMiss {
+      package: package.to_string(),
+      requested_rev: requested.to_string(),
+      mirror_dir,
+    });
+  }
   ensure_mirror(&remote_url, &mirror_dir)?;
 
-  let requested = if requested_rev.trim().is_empty() { "HEAD" } else { requested_rev };
   let resolved_commit = resolve_commit(&mirror_dir, requested)?;
 
   let source_dir = cache.source_checkout_dir(package, &resolved_commit);
@@ -70,6 +115,13 @@ pub fn fetch_github_with_cache(
 
 /// Download and extract a `.tar.gz` archive into `dest_dir`.
 pub fn download_and_extract_tar_gz(url: &str, dest_dir: &Path) -> Result<(), FetchError> {
+  if runtime_offline_enabled() {
+    return Err(FetchError::OfflineNetworkDisabled {
+      action: "downloading archive".to_string(),
+      url: url.to_string(),
+    });
+  }
+
   if let Some(parent) = dest_dir.parent() {
     fs::create_dir_all(parent).map_err(|source| FetchError::Io {
       action: "creating archive extraction parent".into(),
@@ -173,6 +225,13 @@ fn extract_tar_gz_reader(reader: impl Read, dest_dir: &Path) -> Result<(), Fetch
 
 fn ensure_mirror(remote_url: &str, mirror_dir: &Path) -> Result<(), FetchError> {
   if mirror_dir.exists() {
+    if runtime_offline_enabled() {
+      emit_progress(&format!(
+        "Using cached source mirror for `{remote_url}` in offline mode ({})",
+        mirror_dir.display()
+      ));
+      return Ok(());
+    }
     emit_progress(&format!(
       "Refreshing cached source mirror from `{remote_url}` ({})",
       mirror_dir.display()
@@ -213,7 +272,17 @@ fn resolve_commit(mirror_dir: &Path, requested_rev: &str) -> Result<String, Fetc
     format!("{requested_rev}^{{commit}}")
   };
   let output =
-    run_git_capture(Some(mirror_dir), ["rev-parse", rev.as_str()], "resolving revision")?;
+    match run_git_capture(Some(mirror_dir), ["rev-parse", rev.as_str()], "resolving revision") {
+      Ok(output) => output,
+      Err(err) if runtime_offline_enabled() => {
+        return Err(FetchError::OfflineRevisionUnavailable {
+          requested_rev: requested_rev.to_string(),
+          mirror_dir: mirror_dir.to_path_buf(),
+          source: Box::new(err),
+        });
+      },
+      Err(err) => return Err(err),
+    };
   Ok(output.trim().to_string())
 }
 
@@ -390,6 +459,33 @@ pub enum FetchError {
   Runtime(std::io::Error),
   #[error("{0}")]
   TaskJoin(String),
+  #[error(
+    "offline mode requires a cached source mirror for `{package}` at rev `{requested_rev}` (missing `{}`)",
+    .mirror_dir.display()
+  )]
+  OfflineCacheMiss { package: String, requested_rev: String, mirror_dir: PathBuf },
+  #[error(
+    "offline mode could not resolve rev `{requested_rev}` from cached mirror `{}`; refresh online first",
+    .mirror_dir.display()
+  )]
+  OfflineRevisionUnavailable {
+    requested_rev: String,
+    mirror_dir: PathBuf,
+    #[source]
+    source: Box<FetchError>,
+  },
+  #[error("offline mode blocks {action} from `{url}`")]
+  OfflineNetworkDisabled { action: String, url: String },
+}
+
+impl FetchError {
+  pub fn is_offline_cache_miss(&self) -> bool {
+    matches!(self, Self::OfflineCacheMiss { .. } | Self::OfflineRevisionUnavailable { .. })
+  }
+
+  pub fn is_offline_network_disabled(&self) -> bool {
+    matches!(self, Self::OfflineNetworkDisabled { .. })
+  }
 }
 
 #[cfg(test)]

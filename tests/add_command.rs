@@ -31,6 +31,13 @@ fn init_project(temp: &TempDir) {
   cmd.current_dir(temp.path()).arg("init").assert().success();
 }
 
+fn append_manifest_dependency(temp: &TempDir, package: &str, rev: &str) {
+  let manifest_path = temp.path().join("joy.toml");
+  let mut manifest = fs::read_to_string(&manifest_path).expect("read joy.toml");
+  manifest.push_str(&format!("\"{package}\" = {{ source = \"github\", rev = \"{rev}\" }}\n"));
+  fs::write(&manifest_path, manifest).expect("write joy.toml");
+}
+
 fn git_is_available() -> bool {
   ProcessCommand::new("git")
     .arg("--version")
@@ -383,6 +390,22 @@ fn add_rejects_invalid_package_id() {
   assert_eq!(payload["ok"], false);
   assert_eq!(payload["command"], "add");
   assert_eq!(payload["error"]["code"], "invalid_package_id");
+}
+
+#[test]
+fn add_rejects_frozen_mode() {
+  let temp = TempDir::new().expect("tempdir");
+  init_project(&temp);
+
+  let mut cmd = cargo_bin_cmd!("joy");
+  let assert = cmd
+    .current_dir(temp.path())
+    .args(["--json", "--frozen", "add", "nlohmann/json"])
+    .assert()
+    .failure();
+  let payload = json_stdout(&assert.get_output().stdout);
+  assert_eq!(payload["command"], "add");
+  assert_eq!(payload["error"]["code"], "frozen_disallows_add");
 }
 
 #[test]
@@ -741,4 +764,134 @@ fn sync_materializes_header_only_dependencies_and_lockfile_without_app_build() {
     !temp.path().join(".joy/bin").join(binary_name).exists(),
     "sync should not compile or emit app binary"
   );
+}
+
+#[test]
+fn sync_offline_reports_stable_error_code_when_cache_is_cold() {
+  let temp = TempDir::new().expect("tempdir");
+  init_project(&temp);
+  let Some((remote_base, _bare_repo, _expected_commit)) =
+    setup_local_github_remote("nlohmann/json")
+  else {
+    return;
+  };
+  let joy_home = temp.path().join("joy-home");
+  append_manifest_dependency(&temp, "nlohmann/json", "HEAD");
+
+  let mut sync = cargo_bin_cmd!("joy");
+  let assert = sync
+    .current_dir(temp.path())
+    .env("JOY_GITHUB_BASE", remote_base.path())
+    .env("JOY_HOME", &joy_home)
+    .args(["--json", "--offline", "sync"])
+    .assert()
+    .failure();
+
+  let payload = json_stdout(&assert.get_output().stdout);
+  assert_eq!(payload["command"], "sync");
+  assert_eq!(payload["error"]["code"], "offline_cache_miss");
+  assert!(
+    payload["error"]["message"].as_str().is_some_and(|msg| msg.contains("offline mode")),
+    "expected offline mode guidance"
+  );
+}
+
+#[test]
+fn sync_offline_succeeds_with_warm_cache() {
+  let temp = TempDir::new().expect("tempdir");
+  init_project(&temp);
+  let Some((remote_base, _bare_repo, expected_commit)) = setup_local_github_remote("nlohmann/json")
+  else {
+    return;
+  };
+  let joy_home = temp.path().join("joy-home");
+
+  let mut add = cargo_bin_cmd!("joy");
+  add
+    .current_dir(temp.path())
+    .env("JOY_GITHUB_BASE", remote_base.path())
+    .env("JOY_HOME", &joy_home)
+    .args(["add", "nlohmann/json"])
+    .assert()
+    .success();
+
+  let bogus_remote_base = temp.path().join("missing-remotes");
+  let mut sync = cargo_bin_cmd!("joy");
+  let assert = sync
+    .current_dir(temp.path())
+    .env("JOY_GITHUB_BASE", &bogus_remote_base)
+    .env("JOY_HOME", &joy_home)
+    .args(["--json", "--offline", "sync"])
+    .assert()
+    .success();
+
+  let payload = json_stdout(&assert.get_output().stdout);
+  assert_eq!(payload["command"], "sync");
+  assert_eq!(payload["ok"], true);
+  assert_eq!(payload["data"]["toolchain"], Value::Null);
+  assert_eq!(payload["data"]["lockfile_updated"], true);
+  let lock = read_lockfile_toml(&temp);
+  let pkg = lock["packages"]
+    .as_array()
+    .expect("packages")
+    .iter()
+    .find(|pkg| pkg.get("id").and_then(|v| v.as_str()) == Some("nlohmann/json"))
+    .expect("nlohmann/json package");
+  assert_eq!(pkg["resolved_commit"].as_str(), Some(expected_commit.as_str()));
+}
+
+#[test]
+fn sync_frozen_implies_locked_and_offline_and_rejects_update_lock() {
+  let temp = TempDir::new().expect("tempdir");
+  init_project(&temp);
+  let Some((remote_base, _bare_repo, _expected_commit)) =
+    setup_local_github_remote("nlohmann/json")
+  else {
+    return;
+  };
+  let joy_home = temp.path().join("joy-home");
+
+  let mut add = cargo_bin_cmd!("joy");
+  add
+    .current_dir(temp.path())
+    .env("JOY_GITHUB_BASE", remote_base.path())
+    .env("JOY_HOME", &joy_home)
+    .args(["add", "nlohmann/json"])
+    .assert()
+    .success();
+
+  let mut first_sync = cargo_bin_cmd!("joy");
+  first_sync
+    .current_dir(temp.path())
+    .env("JOY_GITHUB_BASE", remote_base.path())
+    .env("JOY_HOME", &joy_home)
+    .args(["sync"])
+    .assert()
+    .success();
+
+  let bogus_remote_base = temp.path().join("missing-remotes");
+  let mut frozen_sync = cargo_bin_cmd!("joy");
+  let frozen_assert = frozen_sync
+    .current_dir(temp.path())
+    .env("JOY_GITHUB_BASE", &bogus_remote_base)
+    .env("JOY_HOME", &joy_home)
+    .args(["--json", "--frozen", "sync"])
+    .assert()
+    .success();
+  let frozen_payload = json_stdout(&frozen_assert.get_output().stdout);
+  assert_eq!(frozen_payload["command"], "sync");
+  assert_eq!(frozen_payload["ok"], true);
+  assert_eq!(frozen_payload["data"]["lockfile_updated"], false);
+
+  let mut invalid = cargo_bin_cmd!("joy");
+  let invalid_assert = invalid
+    .current_dir(temp.path())
+    .env("JOY_GITHUB_BASE", &bogus_remote_base)
+    .env("JOY_HOME", &joy_home)
+    .args(["--json", "--frozen", "sync", "--update-lock"])
+    .assert()
+    .failure();
+  let invalid_payload = json_stdout(&invalid_assert.get_output().stdout);
+  assert_eq!(invalid_payload["command"], "sync");
+  assert_eq!(invalid_payload["error"]["code"], "invalid_lock_flags");
 }
