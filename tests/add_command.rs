@@ -813,11 +813,11 @@ fn sync_materializes_header_only_dependencies_and_lockfile_without_app_build() {
   assert_eq!(payload["data"]["toolchain"], Value::Null);
   assert_eq!(payload["data"]["compiled_dependencies_built"], serde_json::json!([]));
   assert!(
-    payload["data"]["include_dirs"]
-      .as_array()
-      .expect("include_dirs array")
-      .iter()
-      .any(|v| v.as_str().is_some_and(|s| s.ends_with("/.joy/include/deps/nlohmann_json"))),
+    payload["data"]["include_dirs"].as_array().expect("include_dirs array").iter().any(|v| {
+      v.as_str()
+        .map(|s| s.replace('\\', "/"))
+        .is_some_and(|s| s.ends_with("/.joy/include/deps/nlohmann_json"))
+    }),
     "expected staged header include dir in sync output"
   );
 

@@ -7,6 +7,4 @@ kind = "header_only"
 include_roots = ["include"]
 
 [deps]
-packages = [
-  { id = "fmtlib/fmt", rev = "11.0.2" },
-]
+packages = [{ id = "fmtlib/fmt", rev = "11.0.2" }]

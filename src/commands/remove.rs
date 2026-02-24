@@ -101,12 +101,23 @@ fn remove_installed_path_if_exists(path: &Path) -> std::io::Result<bool> {
   match fs::symlink_metadata(path) {
     Ok(metadata) => {
       if metadata.file_type().is_symlink() || metadata.is_file() {
-        fs::remove_file(path)
+        match fs::remove_file(path) {
+          Ok(()) => {},
+          Err(err)
+            if matches!(
+              err.kind(),
+              std::io::ErrorKind::PermissionDenied | std::io::ErrorKind::IsADirectory
+            ) =>
+          {
+            fs::remove_dir(path)?;
+          },
+          Err(err) => return Err(err),
+        };
       } else if metadata.is_dir() {
-        fs::remove_dir_all(path)
+        fs::remove_dir_all(path)?;
       } else {
-        fs::remove_file(path)
-      }?;
+        fs::remove_file(path)?;
+      }
       Ok(true)
     },
     Err(err) if err.kind() == std::io::ErrorKind::NotFound => Ok(false),
