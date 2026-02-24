@@ -22,6 +22,10 @@ pub struct ProjectSection {
   pub version: String,
   pub cpp_standard: String,
   pub entry: String,
+  #[serde(default, skip_serializing_if = "Vec::is_empty")]
+  pub extra_sources: Vec<String>,
+  #[serde(default, skip_serializing_if = "Vec::is_empty")]
+  pub include_dirs: Vec<String>,
 }
 
 /// Dependency request recorded in `joy.toml`.
@@ -84,6 +88,16 @@ impl Manifest {
     if self.project.entry.trim().is_empty() {
       return Err(ManifestError::Validation("project.entry must not be empty".into()));
     }
+    if self.project.extra_sources.iter().any(|path| path.trim().is_empty()) {
+      return Err(ManifestError::Validation(
+        "project.extra_sources entries must not be empty".into(),
+      ));
+    }
+    if self.project.include_dirs.iter().any(|path| path.trim().is_empty()) {
+      return Err(ManifestError::Validation(
+        "project.include_dirs entries must not be empty".into(),
+      ));
+    }
     Ok(())
   }
 }
@@ -129,6 +143,8 @@ mod tests {
         version: "0.1.0".into(),
         cpp_standard: "c++20".into(),
         entry: "src/main.cpp".into(),
+        extra_sources: vec!["src/lib.cpp".into()],
+        include_dirs: vec!["include".into()],
       },
       dependencies: Default::default(),
     };
@@ -150,5 +166,24 @@ mod tests {
       source: std::io::Error::new(std::io::ErrorKind::PermissionDenied, "denied"),
     };
     assert!(err.to_string().contains("failed to write manifest"));
+  }
+
+  #[test]
+  fn parses_manifest_without_multifile_fields_using_defaults() {
+    let manifest: Manifest = toml::from_str(
+      r#"
+[project]
+name = "demo"
+version = "0.1.0"
+cpp_standard = "c++20"
+entry = "src/main.cpp"
+
+[dependencies]
+"#,
+    )
+    .expect("parse manifest");
+
+    assert!(manifest.project.extra_sources.is_empty());
+    assert!(manifest.project.include_dirs.is_empty());
   }
 }

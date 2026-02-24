@@ -427,6 +427,8 @@ packages = [{ id = "cycle/a", rev = "HEAD" }]
         version: "0.1.0".into(),
         cpp_standard: "c++20".into(),
         entry: "src/main.cpp".into(),
+        extra_sources: Vec::new(),
+        include_dirs: Vec::new(),
       },
       dependencies,
     }
