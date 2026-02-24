@@ -4,10 +4,10 @@ Source: user-provided master roadmap (Feb 24, 2026) and the decision-complete ex
 
 ## Current Status
 
-- Current phase: Phase 6 lockfiles & production polish (next)
-- Active branch: `codex/phase5-compiled-deps`
-- Last completed milestone: Phase 5 compiled dependency build integration (`ed5f6b2`)
-- Current focus: implement `joy.lock` core schema + build-time enforcement
+- Current phase: Phase 6 lockfiles & production polish (in progress)
+- Active branch: `codex/phase6-lockfiles-polish`
+- Last completed milestone: Phase 6 lockfile core + enforcement (`4205f6e`)
+- Current focus: parallelize fetch/extract work and add `.joy` cache cleanup/invalidation
 
 ## Locked Decisions
 
@@ -56,8 +56,8 @@ Source: user-provided master roadmap (Feb 24, 2026) and the decision-complete ex
 
 ## Phase 6 Immediate Milestones
 
-- [ ] Phase 6 lockfile core (`joy.lock` schema + manifest hash)
-- [ ] Phase 6 build/run lockfile enforcement (`--locked`, `--update-lock`)
+- [x] Phase 6 lockfile core (`joy.lock` schema + manifest hash) (`4205f6e`)
+- [x] Phase 6 build/run lockfile enforcement (`--locked`, `--update-lock`) (`4205f6e`)
 - [ ] Phase 6 parallel fetch + cache cleanup
 
 ## Notes Convention
