@@ -4,6 +4,7 @@ use std::env;
 use crate::cli::InitArgs;
 use crate::commands::{CommandOutput, scaffold_files};
 use crate::error::JoyError;
+use crate::output::HumanMessageBuilder;
 
 #[derive(Debug, Serialize)]
 struct InitResponse {
@@ -42,7 +43,11 @@ pub fn handle(args: InitArgs) -> Result<CommandOutput, JoyError> {
 
   CommandOutput::from_data(
     "init",
-    format!("Initialized joy project `{project_name}` in {}", summary.root.display()),
+    HumanMessageBuilder::new(format!("Initialized joy project `{project_name}`"))
+      .kv("root", summary.root.display().to_string())
+      .kv("created paths", created_paths.len().to_string())
+      .kv("overwritten paths", overwritten_paths.len().to_string())
+      .build(),
     &InitResponse {
       project_name,
       project_root: summary.root.display().to_string(),

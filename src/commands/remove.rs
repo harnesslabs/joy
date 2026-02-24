@@ -8,6 +8,7 @@ use crate::commands::CommandOutput;
 use crate::error::JoyError;
 use crate::install_index::InstallIndex;
 use crate::manifest::Manifest;
+use crate::output::HumanMessageBuilder;
 use crate::package_id::PackageId;
 use crate::project_env;
 
@@ -70,16 +71,14 @@ pub fn handle(args: RemoveArgs, runtime: RuntimeFlags) -> Result<CommandOutput, 
     "joy.lock exists and may be stale after dependency removal; rerun `joy sync --update-lock` or `joy build --update-lock`".to_string(),
   );
 
-  let mut human = format!("Removed dependency `{}`", package);
-  if header_link_removed {
-    human.push('\n');
-    human.push_str(&format!("Removed installed headers at {}", header_link_path.display()));
-  }
+  let mut human_builder = HumanMessageBuilder::new(format!("Removed dependency `{}`", package))
+    .kv("manifest", manifest_path.display().to_string())
+    .kv("header link", header_link_path.display().to_string())
+    .kv("header link removed", header_link_removed.to_string());
   if let Some(warning) = &lockfile_warning {
-    human.push('\n');
-    human.push_str("warning: ");
-    human.push_str(warning);
+    human_builder = human_builder.warning(warning.clone());
   }
+  let human = human_builder.build();
 
   Ok(CommandOutput::new(
     "remove",

@@ -15,6 +15,7 @@ use crate::install_index::InstallIndex;
 use crate::lockfile;
 use crate::manifest::Manifest;
 use crate::ninja::{BuildProfile, NinjaBuildSpec};
+use crate::output::{HumanMessageBuilder, progress_detail, progress_stage};
 use crate::recipes::{Linkage as RecipeLinkage, RecipeStore};
 use crate::{abi, cmake, fetch, global_cache, linking, ninja, project_env, resolver, toolchain};
 
@@ -133,7 +134,7 @@ pub(crate) struct BuildOptions {
 /// Handle `joy build` by executing the local build pipeline and returning a CLI output payload.
 pub fn handle(args: BuildArgs, runtime: RuntimeFlags) -> Result<CommandOutput, JoyError> {
   if runtime.progress {
-    eprintln!("Starting build...");
+    progress_stage("Starting build");
   }
   let execution = build_project(BuildOptions {
     release: args.release,
@@ -145,12 +146,20 @@ pub fn handle(args: BuildArgs, runtime: RuntimeFlags) -> Result<CommandOutput, J
 
   Ok(CommandOutput::new(
     "build",
-    format!(
-      "Built `{}` using {} {}",
-      execution.binary_path.display(),
-      execution.toolchain.compiler.kind.as_str(),
-      execution.toolchain.compiler.version
-    ),
+    HumanMessageBuilder::new("Build finished")
+      .kv("binary", execution.binary_path.display().to_string())
+      .kv(
+        "toolchain",
+        format!(
+          "{} {}",
+          execution.toolchain.compiler.kind.as_str(),
+          execution.toolchain.compiler.version
+        ),
+      )
+      .kv("profile", execution.profile_name())
+      .kv("compiled dependencies built", execution.compiled_dependencies_built.len().to_string())
+      .kv("lockfile updated", execution.lockfile_updated.to_string())
+      .build(),
     execution.json_data(),
   ))
 }
@@ -216,7 +225,7 @@ pub(crate) fn build_project(options: BuildOptions) -> Result<BuildExecution, Joy
   refresh_install_index(&env_layout, &manifest, &native_link)?;
 
   if options.progress {
-    eprintln!("Generating build graph...");
+    progress_detail("Generating build graph");
   }
 
   let spec = NinjaBuildSpec {
@@ -238,7 +247,7 @@ pub(crate) fn build_project(options: BuildOptions) -> Result<BuildExecution, Joy
     .map_err(|err| JoyError::new("build", "ninja_file_write_failed", err.to_string(), 1))?;
 
   if options.progress {
-    eprintln!("Compiling and linking...");
+    progress_detail("Compiling and linking");
   }
   let ninja_output = run_ninja_build(&toolchain, &project_root, &build_file)?;
 

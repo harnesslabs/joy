@@ -6,7 +6,6 @@
 
 use std::ffi::OsString;
 use std::fs;
-use std::io::IsTerminal;
 use std::io::Read;
 use std::path::{Path, PathBuf};
 use std::process::Command;
@@ -17,6 +16,7 @@ use std::time::{SystemTime, UNIX_EPOCH};
 use thiserror::Error;
 
 use crate::global_cache::{GlobalCache, GlobalCacheError};
+use crate::output::progress_detail_tty;
 use crate::package_id::PackageId;
 
 const FETCH_FLAG_OFFLINE: u8 = 1 << 0;
@@ -375,8 +375,8 @@ fn materialize_checkout(
 }
 
 fn emit_progress(message: &str) {
-  if runtime_progress_enabled() && std::io::stderr().is_terminal() {
-    eprintln!("{message}...");
+  if runtime_progress_enabled() {
+    progress_detail_tty(message);
   }
 }
 

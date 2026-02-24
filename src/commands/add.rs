@@ -11,6 +11,7 @@ use crate::global_cache::GlobalCache;
 use crate::install_index::InstallIndex;
 use crate::linking;
 use crate::manifest::{DependencySource, DependencySpec, Manifest};
+use crate::output::{HumanMessageBuilder, progress_detail, progress_stage};
 use crate::package_id::PackageId;
 use crate::project_env;
 
@@ -30,7 +31,7 @@ pub fn handle(args: AddArgs, runtime: RuntimeFlags) -> Result<CommandOutput, Joy
   });
 
   if runtime.progress {
-    eprintln!("Resolving and fetching `{}`...", args.package);
+    progress_stage(&format!("Resolving and fetching `{}`", args.package));
   }
 
   let package = PackageId::parse(&args.package)
@@ -61,7 +62,7 @@ pub fn handle(args: AddArgs, runtime: RuntimeFlags) -> Result<CommandOutput, Joy
   let fetched = fetch::fetch_github_with_cache(&package, &rev, &cache)
     .map_err(|err| map_fetch_error("add", err))?;
   if runtime.progress {
-    eprintln!("Installing headers for `{}`...", package);
+    progress_detail(&format!("Installing headers for `{package}`"));
   }
   let installed = linking::install_headers(&env_layout.include_dir, &package, &fetched.source_dir)
     .map_err(|err| JoyError::new("add", "header_install_failed", err.to_string(), 1))?;
@@ -94,23 +95,18 @@ pub fn handle(args: AddArgs, runtime: RuntimeFlags) -> Result<CommandOutput, Joy
     .save(&install_index_path)
     .map_err(|err| JoyError::new("add", "state_index_error", err.to_string(), 1))?;
 
-  let mut human_message = if changed {
-    format!("Added dependency `{}` (rev `{rev}`)", args.package)
+  let mut human_builder = if changed {
+    HumanMessageBuilder::new(format!("Added dependency `{}`", args.package))
   } else {
-    format!("Dependency `{}` already present with rev `{rev}`", args.package)
-  };
-  human_message.push('\n');
-  human_message.push_str(&format!(
-    "Fetched `{}` at {} and installed headers to {}",
-    package,
-    fetched.resolved_commit,
-    installed.link_path.display()
-  ));
-  if let Some(warning) = &lockfile_warning {
-    human_message.push('\n');
-    human_message.push_str("warning: ");
-    human_message.push_str(warning);
+    HumanMessageBuilder::new(format!("Dependency `{}` already present", args.package))
   }
+  .kv("requested rev", format!("`{rev}`"))
+  .kv("resolved commit", fetched.resolved_commit.clone())
+  .kv("headers installed", installed.link_path.display().to_string());
+  if let Some(warning) = &lockfile_warning {
+    human_builder = human_builder.warning(warning.clone());
+  }
+  let human_message = human_builder.build();
 
   let created_env_paths: Vec<String> =
     env_layout.created_paths.iter().map(|path| path.display().to_string()).collect();

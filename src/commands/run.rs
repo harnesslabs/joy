@@ -4,6 +4,7 @@ use std::process::Command;
 use crate::cli::{RunArgs, RuntimeFlags};
 use crate::commands::CommandOutput;
 use crate::error::JoyError;
+use crate::output::HumanMessageBuilder;
 
 use super::build;
 
@@ -52,7 +53,12 @@ pub fn handle(args: RunArgs, runtime: RuntimeFlags) -> Result<CommandOutput, Joy
     human.push_str(stderr_text.trim_end_matches('\n'));
     human.push('\n');
   }
-  human.push_str(&format!("Ran `{}` (exit {})", execution.binary_path.display(), exit_code));
+  human.push_str(
+    &HumanMessageBuilder::new("Program finished")
+      .kv("binary", execution.binary_path.display().to_string())
+      .kv("exit code", exit_code.to_string())
+      .build(),
+  );
 
   Ok(CommandOutput::new(
     "run",

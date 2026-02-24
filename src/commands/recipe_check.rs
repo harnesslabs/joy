@@ -3,6 +3,7 @@ use serde::Serialize;
 use crate::cli::RecipeCheckArgs;
 use crate::commands::CommandOutput;
 use crate::error::JoyError;
+use crate::output::HumanMessageBuilder;
 use crate::recipes::RecipeStore;
 
 #[derive(Debug, Serialize)]
@@ -22,7 +23,10 @@ pub fn handle(_args: RecipeCheckArgs) -> Result<CommandOutput, JoyError> {
 
   CommandOutput::from_data(
     "recipe-check",
-    format!("Validated {} bundled recipes", packages.len()),
+    HumanMessageBuilder::new("Recipe metadata validation passed")
+      .kv("bundled recipes", packages.len().to_string())
+      .kv("recipes root", store.root_dir().display().to_string())
+      .build(),
     &RecipeCheckResponse {
       recipes_root: store.root_dir().display().to_string(),
       recipe_count: packages.len(),

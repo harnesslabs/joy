@@ -2,8 +2,27 @@ use clap::{Args, Parser, Subcommand};
 
 use crate::output::OutputMode;
 
+const CLI_AFTER_HELP: &str = "\
+Examples:
+  joy new hello_cpp
+  joy add nlohmann/json
+  joy sync
+  joy --frozen build
+  joy --json doctor
+
+Common workflow:
+  1. `joy add <package>` to declare dependencies
+  2. `joy sync` to materialize dependency + lockfile state
+  3. `joy build` or `joy run` to compile and execute
+";
+
 #[derive(Debug, Parser)]
-#[command(name = "joy", version, about = "Native C++ package and build manager")]
+#[command(
+  name = "joy",
+  version,
+  about = "Native C++ package and build manager",
+  after_help = CLI_AFTER_HELP
+)]
 pub struct Cli {
   /// Emit machine-readable JSON output.
   #[arg(long, visible_alias = "machine", global = true)]
@@ -45,22 +64,29 @@ pub enum Commands {
   /// Initialize a joy project in the current directory.
   Init(InitArgs),
   /// Add a package dependency to the current project.
+  #[command(after_help = "Example:\n  joy add nlohmann/json\n  joy add fmtlib/fmt --rev 11.0.2")]
   Add(AddArgs),
   /// Remove a package dependency from the current project.
   Remove(RemoveArgs),
   /// Refresh dependency sources and optionally update exact refs.
+  #[command(after_help = "Examples:\n  joy update\n  joy update fmtlib/fmt --rev 11.1.0")]
   Update(UpdateArgs),
   /// Show the resolved dependency graph.
+  #[command(after_help = "Examples:\n  joy tree\n  joy --json tree")]
   Tree(TreeArgs),
   /// Validate bundled recipe metadata (for local checks and CI).
   RecipeCheck(RecipeCheckArgs),
   /// Diagnose local toolchain, cache, and recipe environment health.
+  #[command(after_help = "Examples:\n  joy doctor\n  joy --json doctor")]
   Doctor(DoctorArgs),
   /// Build the current project.
+  #[command(after_help = "Examples:\n  joy build\n  joy build --locked\n  joy --offline build")]
   Build(BuildArgs),
   /// Materialize dependencies and lockfile state without compiling the final binary.
+  #[command(after_help = "Examples:\n  joy sync\n  joy sync --update-lock\n  joy --frozen sync")]
   Sync(SyncArgs),
   /// Build and run the current project.
+  #[command(after_help = "Examples:\n  joy run\n  joy run -- --app-arg")]
   Run(RunArgs),
 }
 

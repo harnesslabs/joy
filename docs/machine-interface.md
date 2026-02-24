@@ -18,7 +18,15 @@ JSON output always uses one of two top-level envelopes:
 - Existing command payload keys are additive-only within the current roadmap phase series.
 - New commands may introduce new payload shapes, but should preserve deterministic ordering where practical.
 - Stable machine consumers should key off `error.code`, not free-form `error.message`.
+- Human-mode stdout/stderr formatting is intentionally allowed to improve over time; automation should use `--json`.
 - See `/Users/autoparallel/Code/joy/docs/error-codes.md` for the current documented error-code catalog (grounded in the `JoyError` machine contract defined in `/Users/autoparallel/Code/joy/src/error.rs`).
+
+## Human Mode vs Machine Mode
+
+- Default human output prioritizes readability and actionable guidance (warnings, hints, progress lines).
+- Human-mode strings may be reorganized or reworded between releases while preserving semantics.
+- `--json` / `--machine` mode is the stable automation interface and should be used by tools, scripts, and agents.
+- Human-mode regressions should be tested selectively (section presence / key phrases), not by freezing every full output string.
 
 ## Dependency Command Payloads (Phase 11)
 

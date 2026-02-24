@@ -7,6 +7,7 @@ use crate::commands::CommandOutput;
 use crate::error::JoyError;
 use crate::fetch;
 use crate::manifest::Manifest;
+use crate::output::HumanMessageBuilder;
 use crate::recipes::RecipeStore;
 use crate::resolver;
 
@@ -72,7 +73,9 @@ pub fn handle(_args: TreeArgs, runtime: RuntimeFlags) -> Result<CommandOutput, J
 
 fn render_tree_human(resolved: &resolver::ResolvedGraph, roots: &[String]) -> String {
   if roots.is_empty() {
-    return "No dependencies".to_string();
+    return HumanMessageBuilder::new("No dependencies")
+      .hint("Add one with `joy add <owner/repo>`")
+      .build();
   }
 
   let mut lines = Vec::new();

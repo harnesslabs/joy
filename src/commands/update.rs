@@ -9,6 +9,7 @@ use crate::global_cache::GlobalCache;
 use crate::install_index::InstallIndex;
 use crate::linking;
 use crate::manifest::{DependencySource, DependencySpec, Manifest};
+use crate::output::{HumanMessageBuilder, progress_detail};
 use crate::package_id::PackageId;
 use crate::project_env;
 
@@ -98,7 +99,7 @@ pub fn handle(args: UpdateArgs, runtime: RuntimeFlags) -> Result<CommandOutput, 
 
   for package_raw in targets {
     if runtime.progress {
-      eprintln!("Refreshing `{package_raw}`...");
+      progress_detail(&format!("Refreshing `{package_raw}`"));
     }
     let package = PackageId::parse(&package_raw)
       .map_err(|err| JoyError::new("update", "invalid_package_id", err.to_string(), 1))?;
@@ -171,18 +172,19 @@ pub fn handle(args: UpdateArgs, runtime: RuntimeFlags) -> Result<CommandOutput, 
     "joy.lock exists and may be stale after dependency updates; rerun `joy sync --update-lock` or `joy build --update-lock`".to_string(),
   );
 
-  let mut human = if updated.is_empty() {
-    "No dependencies updated".to_string()
+  let mut human_builder = if updated.is_empty() {
+    HumanMessageBuilder::new("No dependencies updated")
   } else if manifest_changed {
-    format!("Updated {} dependency entries and refreshed headers", updated.len())
+    HumanMessageBuilder::new(format!("Updated {} dependency entries", updated.len()))
   } else {
-    format!("Refreshed {} dependency header installs", updated.len())
-  };
-  if let Some(warning) = &lockfile_warning {
-    human.push('\n');
-    human.push_str("warning: ");
-    human.push_str(warning);
+    HumanMessageBuilder::new(format!("Refreshed {} dependency header installs", updated.len()))
   }
+  .kv("updated count", updated.len().to_string())
+  .kv("manifest changed", manifest_changed.to_string());
+  if let Some(warning) = &lockfile_warning {
+    human_builder = human_builder.warning(warning.clone());
+  }
+  let human = human_builder.build();
 
   Ok(CommandOutput::new(
     "update",
