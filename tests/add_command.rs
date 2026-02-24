@@ -895,3 +895,124 @@ fn sync_frozen_implies_locked_and_offline_and_rejects_update_lock() {
   assert_eq!(invalid_payload["command"], "sync");
   assert_eq!(invalid_payload["error"]["code"], "invalid_lock_flags");
 }
+
+#[test]
+fn build_offline_reports_stable_error_code_when_cache_is_cold() {
+  if !build_tools_available_for_test() {
+    eprintln!("skipping test: compiler/ninja not available");
+    return;
+  }
+
+  let temp = TempDir::new().expect("tempdir");
+  init_project(&temp);
+  let Some((remote_base, _bare_repo, _expected_commit)) =
+    setup_local_github_remote("nlohmann/json")
+  else {
+    return;
+  };
+  let joy_home = temp.path().join("joy-home");
+  append_manifest_dependency(&temp, "nlohmann/json", "HEAD");
+
+  let mut build = cargo_bin_cmd!("joy");
+  let assert = build
+    .current_dir(temp.path())
+    .env("JOY_GITHUB_BASE", remote_base.path())
+    .env("JOY_HOME", &joy_home)
+    .args(["--json", "--offline", "build"])
+    .assert()
+    .failure();
+  let payload = json_stdout(&assert.get_output().stdout);
+  assert_eq!(payload["command"], "build");
+  assert_eq!(payload["error"]["code"], "offline_cache_miss");
+}
+
+#[test]
+fn build_offline_succeeds_with_warm_cache() {
+  if !build_tools_available_for_test() {
+    eprintln!("skipping test: compiler/ninja not available");
+    return;
+  }
+
+  let temp = TempDir::new().expect("tempdir");
+  init_project(&temp);
+  let Some((remote_base, _bare_repo, _expected_commit)) =
+    setup_local_github_remote("nlohmann/json")
+  else {
+    return;
+  };
+  let joy_home = temp.path().join("joy-home");
+
+  let mut add = cargo_bin_cmd!("joy");
+  add
+    .current_dir(temp.path())
+    .env("JOY_GITHUB_BASE", remote_base.path())
+    .env("JOY_HOME", &joy_home)
+    .args(["add", "nlohmann/json"])
+    .assert()
+    .success();
+
+  let bogus_remote_base = temp.path().join("missing-remotes");
+  let mut build = cargo_bin_cmd!("joy");
+  let assert = build
+    .current_dir(temp.path())
+    .env("JOY_GITHUB_BASE", &bogus_remote_base)
+    .env("JOY_HOME", &joy_home)
+    .args(["--json", "--offline", "build"])
+    .assert()
+    .success();
+  let payload = json_stdout(&assert.get_output().stdout);
+  assert_eq!(payload["command"], "build");
+  assert_eq!(payload["ok"], true);
+  assert_eq!(payload["data"]["lockfile_updated"], true);
+}
+
+#[test]
+fn run_frozen_uses_warm_cache_and_existing_lockfile() {
+  if !build_tools_available_for_test() {
+    eprintln!("skipping test: compiler/ninja not available");
+    return;
+  }
+
+  let temp = TempDir::new().expect("tempdir");
+  init_project(&temp);
+  let Some((remote_base, _bare_repo, _expected_commit)) =
+    setup_local_github_remote("nlohmann/json")
+  else {
+    return;
+  };
+  let joy_home = temp.path().join("joy-home");
+
+  let mut add = cargo_bin_cmd!("joy");
+  add
+    .current_dir(temp.path())
+    .env("JOY_GITHUB_BASE", remote_base.path())
+    .env("JOY_HOME", &joy_home)
+    .args(["add", "nlohmann/json"])
+    .assert()
+    .success();
+
+  let mut sync = cargo_bin_cmd!("joy");
+  sync
+    .current_dir(temp.path())
+    .env("JOY_GITHUB_BASE", remote_base.path())
+    .env("JOY_HOME", &joy_home)
+    .args(["sync"])
+    .assert()
+    .success();
+
+  let bogus_remote_base = temp.path().join("missing-remotes");
+  let mut run = cargo_bin_cmd!("joy");
+  let assert = run
+    .current_dir(temp.path())
+    .env("JOY_GITHUB_BASE", &bogus_remote_base)
+    .env("JOY_HOME", &joy_home)
+    .args(["--json", "--frozen", "run"])
+    .assert()
+    .success();
+  let payload = json_stdout(&assert.get_output().stdout);
+  assert_eq!(payload["command"], "run");
+  assert_eq!(payload["ok"], true);
+  assert_eq!(payload["data"]["lockfile_updated"], false);
+  let stdout = payload["data"]["stdout"].as_str().expect("stdout");
+  assert!(stdout.contains("Hello from joy!"));
+}

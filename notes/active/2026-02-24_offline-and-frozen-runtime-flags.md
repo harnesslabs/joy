@@ -49,8 +49,11 @@ Phase 8 needs reproducible, CI-friendly command execution without network access
 - `joy sync --offline` fails on a cold cache with `offline_cache_miss`.
 - `joy sync --offline` succeeds with a warm cache (using a bogus remote base to confirm cache-only behavior).
 - `joy sync --frozen` succeeds with a warm cache + current lockfile and rejects `--update-lock`.
+- `joy build --offline` fails on a cold cache with `offline_cache_miss`.
+- `joy build --offline` succeeds with a warm cache.
+- `joy run --frozen` succeeds with a warm cache + existing lockfile (using a bogus remote base to confirm cache-only behavior).
 
 ## Follow-Up
 
 - `#30`: add retry/backoff for transient network failures (online mode only).
-- `#31`: expand offline/frozen matrix beyond the current `sync`-focused coverage (build/run cold/warm cache paths, compiled dependencies where feasible).
+- Consider a compiled-dependency offline/frozen matrix extension (e.g. `fmt` fixture) if cache ABI/build-artifact regressions become a recurring source of bugs.
