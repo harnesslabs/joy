@@ -5,13 +5,11 @@ pub mod new;
 pub mod run;
 
 use serde_json::Value;
-use std::env;
 use std::fs;
 use std::path::{Path, PathBuf};
 
 use crate::cli::Commands;
 use crate::error::JoyError;
-use crate::project_env;
 use crate::templates;
 
 #[derive(Debug, Clone)]
@@ -35,23 +33,6 @@ pub fn dispatch(command: Commands) -> Result<CommandOutput, JoyError> {
     Commands::Build(args) => build::handle(args),
     Commands::Run(args) => run::handle(args),
   }
-}
-
-pub(crate) fn not_implemented(command: &'static str) -> Result<CommandOutput, JoyError> {
-  Err(JoyError::not_implemented(command))
-}
-
-pub(crate) fn ensure_local_env_if_manifest_present(command: &'static str) -> Result<(), JoyError> {
-  let cwd = env::current_dir().map_err(|err| {
-    JoyError::new(command, "cwd_unavailable", format!("failed to get cwd: {err}"), 1)
-  })?;
-
-  if cwd.join("joy.toml").is_file() {
-    project_env::ensure_layout(&cwd)
-      .map_err(|err| JoyError::new(command, "env_setup_failed", err.to_string(), 1))?;
-  }
-
-  Ok(())
 }
 
 pub(crate) fn scaffold_files(

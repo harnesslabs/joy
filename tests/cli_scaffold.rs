@@ -150,15 +150,15 @@ fn joy_new_json_returns_success_envelope() {
 }
 
 #[test]
-fn stub_commands_return_json_not_implemented() {
+fn build_and_run_return_manifest_not_found_in_empty_directory() {
   let temp = TempDir::new().expect("tempdir");
   for (command, args) in [("build", vec!["build"]), ("run", vec!["run"])] {
     let mut cmd = cargo_bin_cmd!("joy");
-    let assert = cmd.current_dir(temp.path()).arg("--json").args(args).assert().code(2);
+    let assert = cmd.current_dir(temp.path()).arg("--json").args(args).assert().code(1);
 
     let payload = json_stdout(&assert.get_output().stdout);
     assert_eq!(payload["ok"], false, "command={command}");
     assert_eq!(payload["command"], command, "command={command}");
-    assert_eq!(payload["error"]["code"], "not_implemented", "command={command}");
+    assert_eq!(payload["error"]["code"], "manifest_not_found", "command={command}");
   }
 }

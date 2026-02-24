@@ -5,6 +5,7 @@ use std::fs;
 use std::path::{Path, PathBuf};
 use std::process::Command as ProcessCommand;
 use tempfile::TempDir;
+use which::which;
 
 fn json_stdout(output: &[u8]) -> Value {
   serde_json::from_slice(output).expect("valid json")
@@ -274,12 +275,27 @@ fn build_stub_creates_local_env_when_manifest_exists() {
   init_project(&temp);
 
   let mut cmd = cargo_bin_cmd!("joy");
-  let assert = cmd.current_dir(temp.path()).args(["--json", "build"]).assert().code(2);
+  let assert = cmd.current_dir(temp.path()).args(["--json", "build"]).assert();
 
   let payload = json_stdout(&assert.get_output().stdout);
-  assert_eq!(payload["error"]["code"], "not_implemented");
+  if build_tools_available_for_test() {
+    assert.success();
+    assert_eq!(payload["ok"], true);
+    assert_eq!(payload["command"], "build");
+  } else {
+    assert.failure();
+    assert_eq!(payload["error"]["code"], "toolchain_not_found");
+  }
 
   for dir in [".joy/include", ".joy/lib", ".joy/build", ".joy/bin", ".joy/state"] {
     assert!(temp.path().join(dir).is_dir(), "missing {dir}");
   }
+}
+
+fn build_tools_available_for_test() -> bool {
+  (which("ninja").is_ok() || which("ninja-build").is_ok())
+    && (which("clang++").is_ok()
+      || which("g++").is_ok()
+      || which("clang++.exe").is_ok()
+      || which("g++.exe").is_ok())
 }

@@ -5,10 +5,12 @@ pub mod fetch;
 pub mod global_cache;
 pub mod linking;
 pub mod manifest;
+pub mod ninja;
 pub mod output;
 pub mod package_id;
 pub mod project_env;
 pub mod templates;
+pub mod toolchain;
 
 use clap::Parser;
 use std::ffi::OsString;
