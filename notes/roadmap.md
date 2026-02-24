@@ -4,10 +4,10 @@ Source: user-provided master roadmap (Feb 24, 2026) and the decision-complete ex
 
 ## Current Status
 
-- Current phase: Phase 5 dependency graph & compiled libraries (next)
-- Active branch: `codex/phase4-local-build-engine`
-- Last completed milestone: Phase 4 local build engine (`14aabda`)
-- Current focus: start Phase 5 recipe loader + exact-ref resolver groundwork
+- Current phase: Phase 5 dependency graph & compiled libraries (in progress)
+- Active branch: `codex/phase5-compiled-deps`
+- Last completed milestone: Phase 5 recipes + resolver + DAG (`264fce9`)
+- Current focus: implement ABI hashing inputs + compiled build cache layout
 
 ## Locked Decisions
 
@@ -44,7 +44,7 @@ Source: user-provided master roadmap (Feb 24, 2026) and the decision-complete ex
 - [x] Phase 4 toolchain discovery (`14aabda`)
 - [x] Phase 4 ninja build file generation (`14aabda`)
 - [x] Phase 4 `joy build`/`joy run` execution + E2E tests (`14aabda`)
-- [ ] Phase 5 recipes + resolver + DAG
+- [x] Phase 5 recipes + resolver + DAG (`264fce9`)
 - [ ] Phase 5 ABI hash + cache build layout
 - [ ] Phase 5 CMake adapter + linking
 
