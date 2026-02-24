@@ -1,8 +1,12 @@
 pub mod cli;
 pub mod commands;
 pub mod error;
+pub mod fetch;
+pub mod global_cache;
+pub mod linking;
 pub mod manifest;
 pub mod output;
+pub mod package_id;
 pub mod project_env;
 pub mod templates;
 
