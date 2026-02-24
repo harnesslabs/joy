@@ -1,6 +1,6 @@
 ---
 date: 2026-02-24
-commit: pending
+commit: 4efd077
 tags:
   - lockfile
   - locked
@@ -37,4 +37,3 @@ After populating `joy.lock.packages[]`, `--locked` still only checked the manife
 ## Fallback Plan
 
 If strict package validation blocks legitimate workflows unexpectedly, keep `lockfile_incomplete` validation for empty `packages[]` (which is the main reproducibility gap) and temporarily relax full structural equality checks while gathering concrete mismatch cases in issue `#23`.
-

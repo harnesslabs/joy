@@ -220,53 +220,126 @@ struct CompiledLockMetadata {
   linkage: Option<String>,
 }
 
+#[derive(Debug, Clone)]
+struct ResolvedDependencyStage {
+  recipes: RecipeStore,
+  resolved: resolver::ResolvedGraph,
+  build_order_ids: Vec<String>,
+}
+
+#[derive(Debug, Clone)]
+struct PrefetchedDependencyStage {
+  all_by_key: BTreeMap<(String, String), fetch::FetchResult>,
+  build_by_key: BTreeMap<(String, String), fetch::FetchResult>,
+}
+
+#[derive(Debug, Clone, Default)]
+struct CompiledDependencyBuildStage {
+  link_dirs: Vec<PathBuf>,
+  link_libs: Vec<String>,
+  built_packages: Vec<String>,
+  installed_lib_files: Vec<PathBuf>,
+  compiled_lock_metadata: BTreeMap<String, CompiledLockMetadata>,
+}
+
 fn prepare_compiled_dependencies(
   manifest: &Manifest,
   project_lib_dir: &Path,
   toolchain: &toolchain::Toolchain,
   profile: BuildProfile,
 ) -> Result<NativeLinkInputs, JoyError> {
-  // TODO(phase7): Split this function into resolve/prefetch/build/install stages to shrink the
-  // surface area of `joy build` and make per-stage diagnostics easier to test in isolation.
   if manifest.dependencies.is_empty() {
     return Ok(NativeLinkInputs::default());
   }
 
+  let resolved_stage = resolve_dependency_stage(manifest)?;
+  let PrefetchedDependencyStage { all_by_key, build_by_key } =
+    prefetch_dependency_stage(&resolved_stage)?;
+  let compiled_stage = build_compiled_dependency_stage(
+    manifest,
+    project_lib_dir,
+    toolchain,
+    profile,
+    &resolved_stage,
+    build_by_key,
+  )?;
+  let lockfile_packages = assemble_lockfile_packages(
+    &resolved_stage.resolved,
+    &resolved_stage.recipes,
+    &all_by_key,
+    &compiled_stage.compiled_lock_metadata,
+  )?;
+
+  Ok(NativeLinkInputs {
+    link_dirs: compiled_stage.link_dirs,
+    link_libs: compiled_stage.link_libs,
+    built_packages: compiled_stage.built_packages,
+    installed_lib_files: compiled_stage.installed_lib_files,
+    lockfile_packages,
+  })
+}
+
+fn resolve_dependency_stage(manifest: &Manifest) -> Result<ResolvedDependencyStage, JoyError> {
   let recipes = RecipeStore::load_default()
     .map_err(|err| JoyError::new("build", "recipe_load_failed", err.to_string(), 1))?;
   let resolved = resolver::resolve_manifest(manifest, &recipes)
     .map_err(|err| JoyError::new("build", "dependency_resolve_failed", err.to_string(), 1))?;
-  let order = resolved
-    .build_order()
+  let build_order_ids = resolved
+    .build_order_ids()
     .map_err(|err| JoyError::new("build", "dependency_graph_invalid", err.to_string(), 1))?;
-  let prefetched = fetch::prefetch_github_packages(
-    order.iter().map(|pkg| (pkg.id.clone(), pkg.requested_rev.clone())).collect(),
-  )
-  .map_err(|err| JoyError::new("build", "fetch_failed", err.to_string(), 1))?;
-  let prefetched_by_key = prefetched
+  Ok(ResolvedDependencyStage { recipes, resolved, build_order_ids })
+}
+
+fn prefetch_dependency_stage(
+  resolved_stage: &ResolvedDependencyStage,
+) -> Result<PrefetchedDependencyStage, JoyError> {
+  let requests = resolved_stage
+    .build_order_ids
+    .iter()
+    .map(|id| {
+      let pkg = resolved_stage
+        .resolved
+        .package(id)
+        .expect("build_order_ids must correspond to resolved packages");
+      (pkg.id.clone(), pkg.requested_rev.clone())
+    })
+    .collect::<Vec<_>>();
+  let prefetched = fetch::prefetch_github_packages(requests)
+    .map_err(|err| JoyError::new("build", "fetch_failed", err.to_string(), 1))?;
+  let all_by_key = prefetched
     .into_iter()
     .map(|f| ((f.package.to_string(), f.requested_rev.clone()), f))
     .collect::<BTreeMap<_, _>>();
-  let mut prefetched_for_build = prefetched_by_key.clone();
+  let build_by_key = all_by_key.clone();
+  Ok(PrefetchedDependencyStage { all_by_key, build_by_key })
+}
 
+fn build_compiled_dependency_stage(
+  manifest: &Manifest,
+  project_lib_dir: &Path,
+  toolchain: &toolchain::Toolchain,
+  profile: BuildProfile,
+  resolved_stage: &ResolvedDependencyStage,
+  mut prefetched_for_build: BTreeMap<(String, String), fetch::FetchResult>,
+) -> Result<CompiledDependencyBuildStage, JoyError> {
   let cache = global_cache::GlobalCache::resolve()
     .map_err(|err| JoyError::new("build", "cache_setup_failed", err.to_string(), 1))?;
   cache
     .ensure_layout()
     .map_err(|err| JoyError::new("build", "cache_setup_failed", err.to_string(), 1))?;
 
-  let mut link_dirs = Vec::<PathBuf>::new();
-  let mut link_libs = Vec::<String>::new();
-  let mut built_packages = Vec::<String>::new();
-  let mut installed_lib_files = Vec::<PathBuf>::new();
-  let mut compiled_lock_metadata = BTreeMap::<String, CompiledLockMetadata>::new();
+  let mut stage = CompiledDependencyBuildStage::default();
 
-  for pkg in order {
+  for id in &resolved_stage.build_order_ids {
+    let pkg = resolved_stage
+      .resolved
+      .package(id)
+      .expect("build_order_ids must correspond to resolved packages");
     if pkg.header_only {
       continue;
     }
 
-    let Some(recipe) = recipes.get(&pkg.id) else {
+    let Some(recipe) = resolved_stage.recipes.get(&pkg.id) else {
       return Err(JoyError::new(
         "build",
         "missing_recipe",
@@ -305,7 +378,8 @@ fn prepare_compiled_dependencies(
         )
       })?;
 
-    let recipe_file = recipes.root_dir().join("packages").join(format!("{}.toml", recipe.slug));
+    let recipe_file =
+      resolved_stage.recipes.root_dir().join("packages").join(format!("{}.toml", recipe.slug));
     let recipe_contents = fs::read_to_string(&recipe_file)
       .map_err(|err| JoyError::io("build", "reading recipe file", &recipe_file, &err))?;
     let preferred_linkage = link_recipe.preferred_linkage.unwrap_or(RecipeLinkage::Static);
@@ -332,15 +406,12 @@ fn prepare_compiled_dependencies(
       recipe_configure_args: cmake_recipe.configure_args.clone(),
       env: Default::default(),
     });
-    compiled_lock_metadata.insert(
+    stage.compiled_lock_metadata.insert(
       pkg.id.to_string(),
       CompiledLockMetadata {
         abi_hash: abi_hash.clone(),
         libs: link_recipe.libs.clone(),
-        linkage: Some(match preferred_linkage {
-          RecipeLinkage::Static => "static".to_string(),
-          RecipeLinkage::Shared => "shared".to_string(),
-        }),
+        linkage: Some(linkage_name(preferred_linkage)),
       },
     );
 
@@ -371,33 +442,24 @@ fn prepare_compiled_dependencies(
         .map_err(|err| JoyError::new("build", "library_install_failed", err.to_string(), 1))?;
 
     if !cmake_result.cache_hit {
-      built_packages.push(pkg.id.to_string());
+      stage.built_packages.push(pkg.id.to_string());
     }
-    if !link_dirs.iter().any(|p| p == &lib_install.project_lib_dir) {
-      link_dirs.push(lib_install.project_lib_dir.clone());
+    if !stage.link_dirs.iter().any(|p| p == &lib_install.project_lib_dir) {
+      stage.link_dirs.push(lib_install.project_lib_dir.clone());
     }
     for lib in lib_install.link_libs {
-      if !link_libs.contains(&lib) {
-        link_libs.push(lib);
+      if !stage.link_libs.contains(&lib) {
+        stage.link_libs.push(lib);
       }
     }
     for file in lib_install.installed_files {
-      if !installed_lib_files.contains(&file) {
-        installed_lib_files.push(file);
+      if !stage.installed_lib_files.contains(&file) {
+        stage.installed_lib_files.push(file);
       }
     }
   }
 
-  let lockfile_packages =
-    assemble_lockfile_packages(&resolved, &recipes, &prefetched_by_key, &compiled_lock_metadata)?;
-
-  Ok(NativeLinkInputs {
-    link_dirs,
-    link_libs,
-    built_packages,
-    installed_lib_files,
-    lockfile_packages,
-  })
+  Ok(stage)
 }
 
 fn collect_include_dirs(project_include_dir: &Path) -> std::io::Result<Vec<PathBuf>> {
