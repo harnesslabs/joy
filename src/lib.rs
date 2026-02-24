@@ -1,5 +1,6 @@
 pub mod abi;
 pub mod cli;
+pub mod cmake;
 pub mod commands;
 pub mod error;
 pub mod fetch;

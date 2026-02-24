@@ -11,6 +11,13 @@ pub struct HeaderInstall {
   pub link_kind: &'static str,
 }
 
+#[derive(Debug, Clone)]
+pub struct LibraryInstall {
+  pub project_lib_dir: PathBuf,
+  pub installed_files: Vec<PathBuf>,
+  pub link_libs: Vec<String>,
+}
+
 pub fn discover_header_root(source_dir: &Path) -> Result<PathBuf, LinkingError> {
   for candidate in ["include", "single_include"] {
     let path = source_dir.join(candidate);
@@ -28,6 +35,63 @@ pub fn install_headers(
   source_dir: &Path,
 ) -> Result<HeaderInstall, LinkingError> {
   install_headers_inner(project_include_dir, package, source_dir, LinkMode::Auto)
+}
+
+pub fn install_compiled_libraries(
+  project_lib_dir: &Path,
+  cache_lib_dir: &Path,
+  link_libs: &[String],
+) -> Result<LibraryInstall, LinkingError> {
+  fs::create_dir_all(project_lib_dir).map_err(|source| LinkingError::Io {
+    action: "creating project library directory".into(),
+    path: project_lib_dir.to_path_buf(),
+    source,
+  })?;
+  if !cache_lib_dir.is_dir() {
+    return Err(LinkingError::MissingLibraryArtifact {
+      lib: "<cache_lib_dir>".into(),
+      cache_lib_dir: cache_lib_dir.to_path_buf(),
+    });
+  }
+
+  let mut installed_files = Vec::new();
+  for lib in link_libs {
+    let matches =
+      find_library_artifacts(cache_lib_dir, lib).map_err(|source| LinkingError::Io {
+        action: format!("scanning cached library artifacts for `{lib}`"),
+        path: cache_lib_dir.to_path_buf(),
+        source,
+      })?;
+    if matches.is_empty() {
+      return Err(LinkingError::MissingLibraryArtifact {
+        lib: lib.clone(),
+        cache_lib_dir: cache_lib_dir.to_path_buf(),
+      });
+    }
+
+    for src in matches {
+      let dst = project_lib_dir.join(src.file_name().ok_or_else(|| LinkingError::Io {
+        action: "reading library artifact file name".into(),
+        path: src.clone(),
+        source: std::io::Error::new(std::io::ErrorKind::InvalidData, "missing file name"),
+      })?);
+      fs::copy(&src, &dst).map_err(|source| LinkingError::Io {
+        action: format!("copying library artifact `{}`", src.display()),
+        path: dst.clone(),
+        source,
+      })?;
+      installed_files.push(dst);
+    }
+  }
+
+  installed_files.sort();
+  installed_files.dedup();
+
+  Ok(LibraryInstall {
+    project_lib_dir: project_lib_dir.to_path_buf(),
+    installed_files,
+    link_libs: link_libs.to_vec(),
+  })
 }
 
 fn install_headers_inner(
@@ -69,6 +133,43 @@ fn remove_existing_path(path: &Path) -> std::io::Result<()> {
     Err(err) if err.kind() == std::io::ErrorKind::NotFound => Ok(()),
     Err(err) => Err(err),
   }
+}
+
+fn find_library_artifacts(cache_lib_dir: &Path, lib: &str) -> std::io::Result<Vec<PathBuf>> {
+  let mut matches = Vec::new();
+  for entry in fs::read_dir(cache_lib_dir)? {
+    let entry = entry?;
+    let path = entry.path();
+    if !path.is_file() {
+      continue;
+    }
+    let Some(name) = path.file_name().and_then(|s| s.to_str()) else {
+      continue;
+    };
+    if is_matching_library_file(name, lib) {
+      matches.push(path);
+    }
+  }
+  matches.sort();
+  Ok(matches)
+}
+
+fn is_matching_library_file(file_name: &str, lib: &str) -> bool {
+  let unix_static = format!("lib{lib}.a");
+  let unix_shared_so = format!("lib{lib}.so");
+  let unix_shared_dylib = format!("lib{lib}.dylib");
+  let win_import_plain = format!("{lib}.lib");
+  let win_import_prefixed = format!("lib{lib}.lib");
+  let win_dll = format!("{lib}.dll");
+  let versioned_so_prefix = format!("lib{lib}.so.");
+
+  file_name == unix_static
+    || file_name == unix_shared_so
+    || file_name == unix_shared_dylib
+    || file_name == win_import_plain
+    || file_name == win_import_prefixed
+    || file_name == win_dll
+    || file_name.starts_with(&versioned_so_prefix)
 }
 
 #[cfg_attr(not(test), allow(dead_code))]
@@ -172,6 +273,8 @@ pub enum LinkingError {
     #[source]
     source: std::io::Error,
   },
+  #[error("no compiled artifact matching `{lib}` found in `{cache_lib_dir}`")]
+  MissingLibraryArtifact { lib: String, cache_lib_dir: PathBuf },
 }
 
 #[cfg(test)]
@@ -180,7 +283,7 @@ mod tests {
 
   use tempfile::TempDir;
 
-  use super::{discover_header_root, install_headers};
+  use super::{discover_header_root, install_compiled_libraries, install_headers};
   use crate::package_id::PackageId;
 
   #[test]
@@ -237,5 +340,39 @@ mod tests {
 
     assert_eq!(installed.link_kind, "copy");
     assert!(installed.link_path.join("demo.hpp").is_file());
+  }
+
+  #[test]
+  fn installs_compiled_library_artifacts_into_project_lib_dir() {
+    let temp = TempDir::new().expect("tempdir");
+    let cache_lib_dir = temp.path().join("cache").join("lib");
+    fs::create_dir_all(&cache_lib_dir).expect("cache lib dir");
+    fs::write(cache_lib_dir.join("libfmt.a"), b"stub").expect("static lib");
+    fs::write(cache_lib_dir.join("libfmt.so.1"), b"stub").expect("shared lib");
+    fs::write(cache_lib_dir.join("README.txt"), b"ignore").expect("noise");
+
+    let project_lib_dir = temp.path().join("project").join(".joy").join("lib");
+    let install =
+      install_compiled_libraries(&project_lib_dir, &cache_lib_dir, &[String::from("fmt")])
+        .expect("install libs");
+
+    assert_eq!(install.project_lib_dir, project_lib_dir);
+    assert_eq!(install.link_libs, vec!["fmt"]);
+    assert!(install.installed_files.iter().any(|p| p.ends_with("libfmt.a")));
+    assert!(install.installed_files.iter().any(|p| p.ends_with("libfmt.so.1")));
+    assert!(project_lib_dir.join("libfmt.a").is_file());
+    assert!(project_lib_dir.join("libfmt.so.1").is_file());
+  }
+
+  #[test]
+  fn errors_when_requested_compiled_library_artifact_is_missing() {
+    let temp = TempDir::new().expect("tempdir");
+    let cache_lib_dir = temp.path().join("cache").join("lib");
+    fs::create_dir_all(&cache_lib_dir).expect("cache lib dir");
+
+    let project_lib_dir = temp.path().join("project").join(".joy").join("lib");
+    let err = install_compiled_libraries(&project_lib_dir, &cache_lib_dir, &[String::from("z")])
+      .expect_err("missing lib should fail");
+    assert!(err.to_string().contains("no compiled artifact"));
   }
 }

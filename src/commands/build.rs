@@ -106,6 +106,8 @@ pub(crate) fn build_project(release: bool) -> Result<BuildExecution, JoyError> {
     object_file: relative_or_absolute(&project_root, &object_file),
     binary_file: relative_or_absolute(&project_root, &binary_path),
     include_dirs: include_dirs.iter().map(|dir| relative_or_absolute(&project_root, dir)).collect(),
+    link_dirs: Vec::new(),
+    link_libs: Vec::new(),
     profile: BuildProfile::from_release_flag(release),
   };
   ninja::write_build_ninja(&build_file, &spec)

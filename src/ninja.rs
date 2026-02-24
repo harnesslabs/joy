@@ -24,12 +24,15 @@ pub struct NinjaBuildSpec {
   pub object_file: PathBuf,
   pub binary_file: PathBuf,
   pub include_dirs: Vec<PathBuf>,
+  pub link_dirs: Vec<PathBuf>,
+  pub link_libs: Vec<String>,
   pub profile: BuildProfile,
 }
 
 /// Render a Ninja build file for a single `main.cpp` target.
 pub fn render_build_ninja(spec: &NinjaBuildSpec) -> String {
   let cxxflags = build_cxxflags(spec);
+  let ldflags = build_ldflags(spec);
   let source = path_to_ninja(&spec.source_file);
   let object = path_to_ninja(&spec.object_file);
   let binary = path_to_ninja(&spec.binary_file);
@@ -37,7 +40,7 @@ pub fn render_build_ninja(spec: &NinjaBuildSpec) -> String {
     "ninja_required_version = 1.3".to_string(),
     format!("cxx = {}", spec.compiler_executable),
     format!("cxxflags = {cxxflags}"),
-    "ldflags =".to_string(),
+    format!("ldflags = {ldflags}"),
     String::new(),
     "rule cxx_compile".to_string(),
     "  command = $cxx $cxxflags -MMD -MF $out.d -c $in -o $out".to_string(),
@@ -90,6 +93,17 @@ fn build_cxxflags(spec: &NinjaBuildSpec) -> String {
   parts.join(" ")
 }
 
+fn build_ldflags(spec: &NinjaBuildSpec) -> String {
+  let mut parts = Vec::new();
+  for dir in &spec.link_dirs {
+    parts.push(format!("-L{}", path_to_ninja(dir)));
+  }
+  for lib in &spec.link_libs {
+    parts.push(format!("-l{lib}"));
+  }
+  parts.join(" ")
+}
+
 fn path_to_ninja(path: &Path) -> String {
   path.to_string_lossy().replace('\\', "/").replace("$", "$$")
 }
@@ -123,6 +137,8 @@ mod tests {
         PathBuf::from(".joy/include/deps/nlohmann_json"),
         PathBuf::from(".joy/include/deps/fmt_fmt"),
       ],
+      link_dirs: vec![PathBuf::from(".joy/lib")],
+      link_libs: vec!["fmt".into()],
       profile: BuildProfile::Debug,
     };
 
@@ -131,6 +147,7 @@ mod tests {
     assert!(rendered.contains(
       "cxxflags = -std=c++20 -O0 -g -I.joy/include/deps/nlohmann_json -I.joy/include/deps/fmt_fmt"
     ));
+    assert!(rendered.contains("ldflags = -L.joy/lib -lfmt"));
     assert!(rendered.contains("\n  command = $cxx $cxxflags -MMD -MF $out.d -c $in -o $out\n"));
     assert!(rendered.contains("build .joy/build/obj/main.o: cxx_compile src/main.cpp"));
     assert!(rendered.contains("build .joy/bin/demo: cxx_link .joy/build/obj/main.o"));
