@@ -6,6 +6,7 @@
 
 use std::ffi::OsString;
 use std::fs;
+use std::io::IsTerminal;
 use std::io::Read;
 use std::path::{Path, PathBuf};
 use std::process::Command;
@@ -172,6 +173,10 @@ fn extract_tar_gz_reader(reader: impl Read, dest_dir: &Path) -> Result<(), Fetch
 
 fn ensure_mirror(remote_url: &str, mirror_dir: &Path) -> Result<(), FetchError> {
   if mirror_dir.exists() {
+    emit_progress(&format!(
+      "Refreshing cached source mirror from `{remote_url}` ({})",
+      mirror_dir.display()
+    ));
     run_git(Some(mirror_dir), ["fetch", "--all", "--tags", "--prune"], "fetching mirror")?;
     return Ok(());
   }
@@ -184,6 +189,10 @@ fn ensure_mirror(remote_url: &str, mirror_dir: &Path) -> Result<(), FetchError> 
     })?;
   }
 
+  emit_progress(&format!(
+    "Cloning source mirror from `{remote_url}` into {}",
+    mirror_dir.display()
+  ));
   run_git_dynamic(
     None,
     vec![
@@ -245,6 +254,10 @@ fn materialize_checkout(
   }
 
   let result = (|| {
+    emit_progress(&format!(
+      "Materializing source checkout `{commit}` into cache ({})",
+      dest_dir.display()
+    ));
     run_git_dynamic(
       None,
       vec![
@@ -275,6 +288,12 @@ fn materialize_checkout(
     let _ = remove_any(&tmp_dir);
   }
   result
+}
+
+fn emit_progress(message: &str) {
+  if std::io::stderr().is_terminal() {
+    eprintln!("{message}...");
+  }
 }
 
 fn run_git_dynamic(
