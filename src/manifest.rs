@@ -60,7 +60,8 @@ impl Manifest {
     if !raw.ends_with('\n') {
       raw.push('\n');
     }
-    fs::write(path, raw).map_err(|source| ManifestError::WriteIo { path: path.to_path_buf(), source })
+    fs::write(path, raw)
+      .map_err(|source| ManifestError::WriteIo { path: path.to_path_buf(), source })
   }
 
   /// Insert or replace a dependency entry.

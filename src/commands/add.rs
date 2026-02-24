@@ -49,18 +49,16 @@ pub fn handle(args: AddArgs) -> Result<CommandOutput, JoyError> {
     package.as_str().to_string(),
     DependencySpec { source: DependencySource::Github, rev: rev.clone() },
   );
-  if changed {
-    if let Err(err) = manifest.save(&manifest_path) {
-      let rollback_err = remove_installed_header_path(&installed.link_path);
-      let mut message = err.to_string();
-      if let Err(clean_err) = rollback_err {
-        message.push_str(&format!(
-          "\nrollback failed: could not remove installed headers at `{}`: {clean_err}",
-          installed.link_path.display()
-        ));
-      }
-      return Err(JoyError::new("add", "manifest_write_error", message, 1));
+  if changed && let Err(err) = manifest.save(&manifest_path) {
+    let rollback_err = remove_installed_header_path(&installed.link_path);
+    let mut message = err.to_string();
+    if let Err(clean_err) = rollback_err {
+      message.push_str(&format!(
+        "\nrollback failed: could not remove installed headers at `{}`: {clean_err}",
+        installed.link_path.display()
+      ));
     }
+    return Err(JoyError::new("add", "manifest_write_error", message, 1));
   }
 
   let lockfile_warning = cwd.join("joy.lock").is_file().then_some(

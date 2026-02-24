@@ -287,7 +287,8 @@ rev = "HEAD"
 fn add_rolls_back_installed_headers_when_manifest_write_fails() {
   let temp = TempDir::new().expect("tempdir");
   init_project(&temp);
-  let Some((remote_base, _bare_repo, _expected_commit)) = setup_local_github_remote("nlohmann/json")
+  let Some((remote_base, _bare_repo, _expected_commit)) =
+    setup_local_github_remote("nlohmann/json")
   else {
     return;
   };

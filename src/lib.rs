@@ -94,9 +94,7 @@ fn args_request_json_mode(args: &[OsString]) -> bool {
   args.iter().skip(1).any(|arg| {
     matches!(
       arg.to_str(),
-      Some("--json")
-        | Some("--machine")
-        | Some("-j") // future-proof if added
+      Some("--json") | Some("--machine") | Some("-j") // future-proof if added
     )
   })
 }
