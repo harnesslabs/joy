@@ -2,6 +2,8 @@ use assert_cmd::cargo::cargo_bin_cmd;
 use predicates::prelude::*;
 use serde_json::Value;
 use std::fs;
+#[cfg(unix)]
+use std::os::unix::fs::PermissionsExt;
 use std::path::{Path, PathBuf};
 use std::process::Command as ProcessCommand;
 use tempfile::TempDir;
@@ -278,6 +280,48 @@ rev = "HEAD"
       .join(expected_commit)
       .is_dir()
   );
+}
+
+#[cfg(unix)]
+#[test]
+fn add_rolls_back_installed_headers_when_manifest_write_fails() {
+  let temp = TempDir::new().expect("tempdir");
+  init_project(&temp);
+  let Some((remote_base, _bare_repo, _expected_commit)) = setup_local_github_remote("nlohmann/json")
+  else {
+    return;
+  };
+  let joy_home = temp.path().join("joy-home");
+  let manifest_path = temp.path().join("joy.toml");
+
+  let mut perms = fs::metadata(&manifest_path).expect("manifest metadata").permissions();
+  let original_mode = perms.mode();
+  perms.set_mode(0o444);
+  fs::set_permissions(&manifest_path, perms).expect("set readonly");
+
+  let mut cmd = cargo_bin_cmd!("joy");
+  cmd
+    .current_dir(temp.path())
+    .env("JOY_GITHUB_BASE", remote_base.path())
+    .env("JOY_HOME", &joy_home)
+    .args(["add", "nlohmann/json"])
+    .assert()
+    .failure()
+    .stderr(predicate::str::contains("manifest_write_error"));
+
+  let manifest = fs::read_to_string(&manifest_path).expect("manifest readable");
+  assert!(
+    !manifest.contains("nlohmann/json"),
+    "manifest should not record dependency when add fails"
+  );
+  assert!(
+    !temp.path().join(".joy/include/deps/nlohmann_json").exists(),
+    "installed header path should be rolled back on manifest save failure"
+  );
+
+  let mut restore = fs::metadata(&manifest_path).expect("manifest metadata").permissions();
+  restore.set_mode(original_mode);
+  fs::set_permissions(&manifest_path, restore).expect("restore permissions");
 }
 
 #[test]
