@@ -80,17 +80,31 @@ pub fn install_compiled_libraries(
     }
 
     for src in matches {
-      let dst = project_lib_dir.join(src.file_name().ok_or_else(|| LinkingError::Io {
+      let file_name = src.file_name().ok_or_else(|| LinkingError::Io {
         action: "reading library artifact file name".into(),
         path: src.clone(),
         source: std::io::Error::new(std::io::ErrorKind::InvalidData, "missing file name"),
-      })?);
+      })?;
+      let file_name_string = file_name.to_string_lossy().into_owned();
+      let dst = project_lib_dir.join(file_name);
       fs::copy(&src, &dst).map_err(|source| LinkingError::Io {
         action: format!("copying library artifact `{}`", src.display()),
         path: dst.clone(),
         source,
       })?;
       installed_files.push(dst);
+
+      if let Some(alias_name) = canonical_library_alias_name(&file_name_string, lib) {
+        let alias_path = project_lib_dir.join(alias_name);
+        if !alias_path.exists() {
+          fs::copy(&src, &alias_path).map_err(|source| LinkingError::Io {
+            action: format!("copying canonical library alias for `{lib}` from `{}`", src.display()),
+            path: alias_path.clone(),
+            source,
+          })?;
+          installed_files.push(alias_path);
+        }
+      }
     }
   }
 
@@ -178,6 +192,10 @@ fn find_library_artifacts(cache_lib_dir: &Path, lib: &str) -> std::io::Result<Ve
 }
 
 fn is_matching_library_file(file_name: &str, lib: &str) -> bool {
+  is_exact_library_file(file_name, lib) || is_exact_library_file(file_name, &format!("{lib}d"))
+}
+
+fn is_exact_library_file(file_name: &str, lib: &str) -> bool {
   let unix_static = format!("lib{lib}.a");
   let unix_shared_so = format!("lib{lib}.so");
   let unix_shared_dylib = format!("lib{lib}.dylib");
@@ -193,6 +211,45 @@ fn is_matching_library_file(file_name: &str, lib: &str) -> bool {
     || file_name == win_import_prefixed
     || file_name == win_dll
     || file_name.starts_with(&versioned_so_prefix)
+}
+
+fn canonical_library_alias_name(file_name: &str, lib: &str) -> Option<String> {
+  let debug_lib = format!("{lib}d");
+  if !is_exact_library_file(file_name, &debug_lib) || is_exact_library_file(file_name, lib) {
+    return None;
+  }
+
+  let debug_unix_static = format!("lib{debug_lib}.a");
+  if file_name == debug_unix_static {
+    return Some(format!("lib{lib}.a"));
+  }
+  let debug_unix_shared_so = format!("lib{debug_lib}.so");
+  if file_name == debug_unix_shared_so {
+    return Some(format!("lib{lib}.so"));
+  }
+  let debug_unix_shared_dylib = format!("lib{debug_lib}.dylib");
+  if file_name == debug_unix_shared_dylib {
+    return Some(format!("lib{lib}.dylib"));
+  }
+  let debug_win_import_plain = format!("{debug_lib}.lib");
+  if file_name == debug_win_import_plain {
+    return Some(format!("{lib}.lib"));
+  }
+  let debug_win_import_prefixed = format!("lib{debug_lib}.lib");
+  if file_name == debug_win_import_prefixed {
+    return Some(format!("lib{lib}.lib"));
+  }
+  let debug_win_dll = format!("{debug_lib}.dll");
+  if file_name == debug_win_dll {
+    return Some(format!("{lib}.dll"));
+  }
+
+  let debug_versioned_so_prefix = format!("lib{debug_lib}.so.");
+  if let Some(rest) = file_name.strip_prefix(&debug_versioned_so_prefix) {
+    return Some(format!("lib{lib}.so.{rest}"));
+  }
+
+  None
 }
 
 #[cfg_attr(not(test), allow(dead_code))]
@@ -386,6 +443,24 @@ mod tests {
     assert!(install.installed_files.iter().any(|p| p.ends_with("libfmt.so.1")));
     assert!(project_lib_dir.join("libfmt.a").is_file());
     assert!(project_lib_dir.join("libfmt.so.1").is_file());
+  }
+
+  #[test]
+  fn installs_canonical_alias_for_debug_suffixed_library_artifact() {
+    let temp = TempDir::new().expect("tempdir");
+    let cache_lib_dir = temp.path().join("cache").join("lib");
+    fs::create_dir_all(&cache_lib_dir).expect("cache lib dir");
+    fs::write(cache_lib_dir.join("libfmtd.a"), b"stub").expect("debug static lib");
+
+    let project_lib_dir = temp.path().join("project").join(".joy").join("lib");
+    let install =
+      install_compiled_libraries(&project_lib_dir, &cache_lib_dir, &[String::from("fmt")])
+        .expect("install libs");
+
+    assert!(install.installed_files.iter().any(|p| p.ends_with("libfmtd.a")));
+    assert!(install.installed_files.iter().any(|p| p.ends_with("libfmt.a")));
+    assert!(project_lib_dir.join("libfmtd.a").is_file());
+    assert!(project_lib_dir.join("libfmt.a").is_file());
   }
 
   #[test]
