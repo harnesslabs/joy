@@ -16,6 +16,17 @@ pub struct GlobalCache {
   pub tmp_root: PathBuf,
 }
 
+#[derive(Debug, Clone)]
+pub struct BuildCacheLayout {
+  pub root: PathBuf,
+  pub work_dir: PathBuf,
+  pub lib_dir: PathBuf,
+  pub bin_dir: PathBuf,
+  pub include_dir: PathBuf,
+  pub state_dir: PathBuf,
+  pub manifest_file: PathBuf,
+}
+
 impl GlobalCache {
   pub fn resolve() -> Result<Self, GlobalCacheError> {
     if let Some(path) = env::var_os("JOY_HOME") {
@@ -73,6 +84,39 @@ impl GlobalCache {
   pub fn tmp_dir(&self) -> &Path {
     &self.tmp_root
   }
+
+  pub fn compiled_build_layout(&self, abi_hash: &str) -> BuildCacheLayout {
+    let root = self.builds_root.join(abi_hash);
+    BuildCacheLayout {
+      work_dir: root.join("work"),
+      lib_dir: root.join("lib"),
+      bin_dir: root.join("bin"),
+      include_dir: root.join("include"),
+      state_dir: root.join("state"),
+      manifest_file: root.join("state").join("build-manifest.json"),
+      root,
+    }
+  }
+
+  pub fn ensure_compiled_build_layout(
+    &self,
+    abi_hash: &str,
+  ) -> Result<BuildCacheLayout, GlobalCacheError> {
+    let layout = self.compiled_build_layout(abi_hash);
+    self.ensure_layout()?;
+    for path in [
+      &layout.root,
+      &layout.work_dir,
+      &layout.lib_dir,
+      &layout.bin_dir,
+      &layout.include_dir,
+      &layout.state_dir,
+    ] {
+      fs::create_dir_all(path)
+        .map_err(|source| GlobalCacheError::Io { path: path.to_path_buf(), source })?;
+    }
+    Ok(layout)
+  }
 }
 
 #[derive(Debug, Error)]
@@ -90,6 +134,7 @@ pub enum GlobalCacheError {
 #[cfg(test)]
 mod tests {
   use std::path::PathBuf;
+  use tempfile::TempDir;
 
   use super::GlobalCache;
   use crate::package_id::PackageId;
@@ -108,5 +153,26 @@ mod tests {
       cache.git_mirror_dir(&pkg),
       PathBuf::from("/tmp/joy-home/cache/git/github/nlohmann/json.git")
     );
+    let build_layout = cache.compiled_build_layout("deadbeef");
+    assert_eq!(build_layout.root, PathBuf::from("/tmp/joy-home/cache/builds/deadbeef"));
+    assert_eq!(build_layout.work_dir, PathBuf::from("/tmp/joy-home/cache/builds/deadbeef/work"));
+    assert_eq!(
+      build_layout.manifest_file,
+      PathBuf::from("/tmp/joy-home/cache/builds/deadbeef/state/build-manifest.json")
+    );
+  }
+
+  #[test]
+  fn ensures_compiled_build_layout_directories() {
+    let temp = TempDir::new().expect("tempdir");
+    let cache = GlobalCache::from_joy_home(temp.path().join(".joy"));
+    let layout = cache.ensure_compiled_build_layout("abc123").expect("ensure compiled layout");
+
+    assert!(layout.root.is_dir());
+    assert!(layout.work_dir.is_dir());
+    assert!(layout.lib_dir.is_dir());
+    assert!(layout.bin_dir.is_dir());
+    assert!(layout.include_dir.is_dir());
+    assert!(layout.state_dir.is_dir());
   }
 }

@@ -1,3 +1,4 @@
+pub mod abi;
 pub mod cli;
 pub mod commands;
 pub mod error;
