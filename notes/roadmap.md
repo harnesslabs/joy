@@ -8,7 +8,8 @@ Archived milestone:
 
 ## Current Status
 
-- Current phase: post-roadmap cleanup and merge polish (in progress)
+- Open PR: `https://github.com/harnesslabs/joy/pull/1`
+- Current phase: post-roadmap cleanup and merge polish (PR open)
 - Next milestone: define Phase 7 priorities (lockfile package population, broader recipes, platform hardening)
 
 ## Immediate Follow-Up Candidates
