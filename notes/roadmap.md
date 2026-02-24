@@ -10,6 +10,7 @@ Archived milestone:
 
 - Open PR: `https://github.com/harnesslabs/joy/pull/1`
 - Current phase: post-roadmap cleanup and merge polish (PR open)
+- Latest milestone: CI parity + Windows CI failure triage closed in `/Users/autoparallel/Code/joy/notes/active/2026-02-24_43755eb_ci-parity-and-windows-ci-fixes.md`
 - Next milestone: define Phase 7 priorities (lockfile package population, broader recipes, platform hardening)
 
 ## Immediate Follow-Up Candidates
