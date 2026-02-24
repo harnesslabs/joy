@@ -169,7 +169,12 @@ pub(crate) fn build_project(options: BuildOptions) -> Result<BuildExecution, Joy
 
   let ninja_output = run_ninja_build(&toolchain, &project_root, &build_file)?;
 
-  let lockfile_updated = write_lockfile_if_needed(lock_plan, &lockfile_path, &manifest_hash)?;
+  let lockfile_updated = write_lockfile_if_needed(
+    lock_plan,
+    &lockfile_path,
+    &manifest_hash,
+    &native_link.lockfile_packages,
+  )?;
 
   Ok(BuildExecution {
     project_root,
@@ -197,6 +202,7 @@ struct NativeLinkInputs {
   link_libs: Vec<String>,
   built_packages: Vec<String>,
   installed_lib_files: Vec<PathBuf>,
+  lockfile_packages: Vec<lockfile::LockedPackage>,
 }
 
 #[derive(Debug, Clone)]
@@ -204,6 +210,13 @@ struct NinjaRunOutput {
   status_code: i32,
   stdout: String,
   stderr: String,
+}
+
+#[derive(Debug, Clone)]
+struct CompiledLockMetadata {
+  abi_hash: String,
+  libs: Vec<String>,
+  linkage: Option<String>,
 }
 
 fn prepare_compiled_dependencies(
@@ -229,10 +242,11 @@ fn prepare_compiled_dependencies(
     order.iter().map(|pkg| (pkg.id.clone(), pkg.requested_rev.clone())).collect(),
   )
   .map_err(|err| JoyError::new("build", "fetch_failed", err.to_string(), 1))?;
-  let mut prefetched_by_key = prefetched
+  let prefetched_by_key = prefetched
     .into_iter()
     .map(|f| ((f.package.to_string(), f.requested_rev.clone()), f))
     .collect::<BTreeMap<_, _>>();
+  let mut prefetched_for_build = prefetched_by_key.clone();
 
   let cache = global_cache::GlobalCache::resolve()
     .map_err(|err| JoyError::new("build", "cache_setup_failed", err.to_string(), 1))?;
@@ -244,6 +258,7 @@ fn prepare_compiled_dependencies(
   let mut link_libs = Vec::<String>::new();
   let mut built_packages = Vec::<String>::new();
   let mut installed_lib_files = Vec::<PathBuf>::new();
+  let mut compiled_lock_metadata = BTreeMap::<String, CompiledLockMetadata>::new();
 
   for pkg in order {
     if pkg.header_only {
@@ -278,7 +293,7 @@ fn prepare_compiled_dependencies(
       continue;
     }
 
-    let fetched = prefetched_by_key
+    let fetched = prefetched_for_build
       .remove(&(pkg.id.to_string(), pkg.requested_rev.clone()))
       .ok_or_else(|| {
         JoyError::new(
@@ -292,6 +307,7 @@ fn prepare_compiled_dependencies(
     let recipe_file = recipes.root_dir().join("packages").join(format!("{}.toml", recipe.slug));
     let recipe_contents = fs::read_to_string(&recipe_file)
       .map_err(|err| JoyError::io("build", "reading recipe file", &recipe_file, &err))?;
+    let preferred_linkage = link_recipe.preferred_linkage.unwrap_or(RecipeLinkage::Static);
     let abi_hash = abi::compute_abi_hash(&abi::AbiHashInput {
       package_id: pkg.id.to_string(),
       resolved_commit: pkg.resolved_commit.clone(),
@@ -306,7 +322,7 @@ fn prepare_compiled_dependencies(
         BuildProfile::Release => abi::AbiBuildProfile::Release,
       },
       cpp_standard: manifest.project.cpp_standard.clone(),
-      linkage: match link_recipe.preferred_linkage.unwrap_or(RecipeLinkage::Static) {
+      linkage: match preferred_linkage {
         RecipeLinkage::Static => abi::AbiLinkage::Static,
         RecipeLinkage::Shared => abi::AbiLinkage::Shared,
       },
@@ -315,6 +331,17 @@ fn prepare_compiled_dependencies(
       recipe_configure_args: cmake_recipe.configure_args.clone(),
       env: Default::default(),
     });
+    compiled_lock_metadata.insert(
+      pkg.id.to_string(),
+      CompiledLockMetadata {
+        abi_hash: abi_hash.clone(),
+        libs: link_recipe.libs.clone(),
+        linkage: Some(match preferred_linkage {
+          RecipeLinkage::Static => "static".to_string(),
+          RecipeLinkage::Shared => "shared".to_string(),
+        }),
+      },
+    );
 
     let layout = cache
       .ensure_compiled_build_layout(&abi_hash)
@@ -360,7 +387,16 @@ fn prepare_compiled_dependencies(
     }
   }
 
-  Ok(NativeLinkInputs { link_dirs, link_libs, built_packages, installed_lib_files })
+  let lockfile_packages =
+    assemble_lockfile_packages(&resolved, &recipes, &prefetched_by_key, &compiled_lock_metadata)?;
+
+  Ok(NativeLinkInputs {
+    link_dirs,
+    link_libs,
+    built_packages,
+    installed_lib_files,
+    lockfile_packages,
+  })
 }
 
 fn collect_include_dirs(project_include_dir: &Path) -> std::io::Result<Vec<PathBuf>> {
@@ -421,6 +457,102 @@ fn binary_name(project_name: &str) -> String {
   if cfg!(windows) { format!("{project_name}.exe") } else { project_name.to_string() }
 }
 
+fn assemble_lockfile_packages(
+  resolved: &resolver::ResolvedGraph,
+  recipes: &RecipeStore,
+  prefetched_by_key: &BTreeMap<(String, String), fetch::FetchResult>,
+  compiled_lock_metadata: &BTreeMap<String, CompiledLockMetadata>,
+) -> Result<Vec<lockfile::LockedPackage>, JoyError> {
+  let mut packages = Vec::new();
+
+  for pkg in resolved.packages() {
+    let key = (pkg.id.to_string(), pkg.requested_rev.clone());
+    let fetched = prefetched_by_key.get(&key).ok_or_else(|| {
+      JoyError::new(
+        "build",
+        "lockfile_package_assembly_failed",
+        format!(
+          "missing prefetched source checkout metadata for `{}` at `{}` while assembling lockfile",
+          pkg.id, pkg.requested_rev
+        ),
+        1,
+      )
+    })?;
+    let recipe = recipes.get(&pkg.id);
+
+    let mut header_roots = if let Some(recipe) = recipe {
+      recipe.include_roots().to_vec()
+    } else {
+      infer_header_roots_from_source_dir(&fetched.source_dir)
+    };
+    header_roots.sort();
+    header_roots.dedup();
+
+    let mut libs =
+      recipe.and_then(|r| r.link.as_ref()).map(|link| link.libs.clone()).unwrap_or_default();
+    let mut linkage = recipe
+      .and_then(|r| r.link.as_ref())
+      .and_then(|link| link.preferred_linkage)
+      .map(linkage_name);
+    let mut abi_hash = String::new();
+    if let Some(compiled_meta) = compiled_lock_metadata.get(pkg.id.as_str()) {
+      libs = compiled_meta.libs.clone();
+      linkage = compiled_meta.linkage.clone();
+      abi_hash = compiled_meta.abi_hash.clone();
+    }
+
+    packages.push(lockfile::LockedPackage {
+      id: pkg.id.to_string(),
+      source: dependency_source_name(&pkg.source).to_string(),
+      requested_rev: pkg.requested_rev.clone(),
+      resolved_commit: pkg.resolved_commit.clone(),
+      resolved_ref: None,
+      recipe: pkg.recipe_slug.clone(),
+      header_only: pkg.header_only,
+      header_roots,
+      deps: resolved.dependency_ids(pkg.id.as_str()).unwrap_or_default(),
+      abi_hash,
+      libs,
+      linkage,
+    });
+  }
+
+  packages.sort_by(|a, b| a.id.cmp(&b.id));
+  Ok(packages)
+}
+
+fn infer_header_roots_from_source_dir(source_dir: &Path) -> Vec<String> {
+  let mut roots = ["include", "single_include"]
+    .into_iter()
+    .filter_map(|candidate| source_dir.join(candidate).is_dir().then_some(candidate.to_string()))
+    .collect::<Vec<_>>();
+
+  if roots.is_empty()
+    && let Ok(header_root) = linking::discover_header_root(source_dir)
+    && let Ok(relative) = header_root.strip_prefix(source_dir)
+  {
+    let normalized = relative.to_string_lossy().replace('\\', "/");
+    if !normalized.is_empty() {
+      roots.push(normalized);
+    }
+  }
+
+  roots
+}
+
+fn dependency_source_name(source: &crate::manifest::DependencySource) -> &'static str {
+  match source {
+    crate::manifest::DependencySource::Github => "github",
+  }
+}
+
+fn linkage_name(linkage: RecipeLinkage) -> String {
+  match linkage {
+    RecipeLinkage::Static => "static".to_string(),
+    RecipeLinkage::Shared => "shared".to_string(),
+  }
+}
+
 fn target_triple_guess() -> String {
   std::env::var("TARGET").unwrap_or_else(|_| {
     let env_suffix = if cfg!(windows) {
@@ -475,18 +607,17 @@ fn write_lockfile_if_needed(
   lock_plan: LockfilePlan,
   lockfile_path: &Path,
   manifest_hash: &str,
+  lockfile_packages: &[lockfile::LockedPackage],
 ) -> Result<bool, JoyError> {
   if !lock_plan.write_after_build {
     return Ok(false);
   }
 
-  // TODO(phase7): Populate `joy.lock` packages with resolved dependency details once lockfile
-  // package serialization/validation is completed end-to-end.
   let lock = lockfile::Lockfile {
     version: lockfile::Lockfile::VERSION,
     manifest_hash: manifest_hash.to_string(),
     generated_by: lockfile::generated_by_string(),
-    packages: Vec::new(),
+    packages: lockfile_packages.to_vec(),
   };
   lock
     .save(lockfile_path)

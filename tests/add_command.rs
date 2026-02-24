@@ -13,6 +13,11 @@ fn json_stdout(output: &[u8]) -> Value {
   serde_json::from_slice(output).expect("valid json")
 }
 
+fn read_lockfile_toml(temp: &TempDir) -> toml::Value {
+  let raw = fs::read_to_string(temp.path().join("joy.lock")).expect("read joy.lock");
+  toml::from_str(&raw).expect("parse joy.lock")
+}
+
 fn init_project(temp: &TempDir) {
   let mut cmd = cargo_bin_cmd!("joy");
   cmd.current_dir(temp.path()).arg("init").assert().success();
@@ -429,7 +434,7 @@ fn build_and_run_with_local_compiled_recipe_dependency() {
 
   let temp = TempDir::new().expect("tempdir");
   init_project(&temp);
-  let Some((remote_base, _bare_repo, _commit)) = setup_local_github_remote_fmt_fixture() else {
+  let Some((remote_base, _bare_repo, fmt_commit)) = setup_local_github_remote_fmt_fixture() else {
     return;
   };
   let joy_home = temp.path().join("joy-home");
@@ -477,6 +482,33 @@ int main() {
     temp.path().join(".joy").join("lib").read_dir().expect("lib dir").next().is_some(),
     "expected staged compiled library artifacts in .joy/lib"
   );
+  let lock = read_lockfile_toml(&temp);
+  let packages = lock["packages"].as_array().expect("packages array");
+  let fmt_pkg = packages
+    .iter()
+    .find(|pkg| pkg.get("id").and_then(|v| v.as_str()) == Some("fmtlib/fmt"))
+    .expect("fmt package in lockfile");
+  assert_eq!(fmt_pkg["source"].as_str(), Some("github"));
+  assert_eq!(fmt_pkg["requested_rev"].as_str(), Some("HEAD"));
+  assert_eq!(fmt_pkg["resolved_commit"].as_str(), Some(fmt_commit.as_str()));
+  assert_eq!(fmt_pkg["recipe"].as_str(), Some("fmt"));
+  assert_eq!(fmt_pkg["header_only"].as_bool(), Some(false));
+  assert_eq!(fmt_pkg["linkage"].as_str(), Some("static"));
+  assert!(
+    fmt_pkg["abi_hash"]
+      .as_str()
+      .is_some_and(|s| s.len() == 64 && s.chars().all(|ch| ch.is_ascii_hexdigit()))
+  );
+  assert!(
+    fmt_pkg["header_roots"]
+      .as_array()
+      .expect("header_roots array")
+      .iter()
+      .any(|v| v.as_str() == Some("include"))
+  );
+  assert!(
+    fmt_pkg["libs"].as_array().expect("libs array").iter().any(|v| v.as_str() == Some("fmt"))
+  );
 
   let mut run = cargo_bin_cmd!("joy");
   let run_assert = run
@@ -490,4 +522,60 @@ int main() {
   assert_eq!(run_payload["ok"], true);
   let stdout = run_payload["data"]["stdout"].as_str().expect("stdout string");
   assert_eq!(stdout.replace("\r\n", "\n"), "hello-from-fmt-fixture\n");
+}
+
+#[test]
+fn build_populates_lockfile_package_records_for_header_only_dependency() {
+  if !build_tools_available_for_test() {
+    eprintln!("skipping test: compiler/ninja not available");
+    return;
+  }
+
+  let temp = TempDir::new().expect("tempdir");
+  init_project(&temp);
+  let Some((remote_base, _bare_repo, expected_commit)) = setup_local_github_remote("nlohmann/json")
+  else {
+    return;
+  };
+  let joy_home = temp.path().join("joy-home");
+
+  let mut add = cargo_bin_cmd!("joy");
+  add
+    .current_dir(temp.path())
+    .env("JOY_GITHUB_BASE", remote_base.path())
+    .env("JOY_HOME", &joy_home)
+    .args(["add", "nlohmann/json"])
+    .assert()
+    .success();
+
+  let mut build = cargo_bin_cmd!("joy");
+  build
+    .current_dir(temp.path())
+    .env("JOY_GITHUB_BASE", remote_base.path())
+    .env("JOY_HOME", &joy_home)
+    .args(["build"])
+    .assert()
+    .success();
+
+  let lock = read_lockfile_toml(&temp);
+  let packages = lock["packages"].as_array().expect("packages array");
+  assert_eq!(packages.len(), 1);
+
+  let pkg = &packages[0];
+  assert_eq!(pkg["id"].as_str(), Some("nlohmann/json"));
+  assert_eq!(pkg["source"].as_str(), Some("github"));
+  assert_eq!(pkg["requested_rev"].as_str(), Some("HEAD"));
+  assert_eq!(pkg["resolved_commit"].as_str(), Some(expected_commit.as_str()));
+  assert_eq!(pkg["recipe"].as_str(), Some("nlohmann_json"));
+  assert_eq!(pkg["header_only"].as_bool(), Some(true));
+  assert!(
+    pkg["header_roots"]
+      .as_array()
+      .expect("header_roots array")
+      .iter()
+      .any(|v| v.as_str() == Some("include"))
+  );
+  assert_eq!(pkg["deps"].as_array().map(Vec::len), Some(0));
+  assert_eq!(pkg["libs"].as_array().map(Vec::len), Some(0));
+  assert_eq!(pkg["abi_hash"].as_str(), Some(""));
 }
