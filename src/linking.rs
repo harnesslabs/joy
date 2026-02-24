@@ -27,6 +27,15 @@ pub fn install_headers(
   package: &PackageId,
   source_dir: &Path,
 ) -> Result<HeaderInstall, LinkingError> {
+  install_headers_inner(project_include_dir, package, source_dir, LinkMode::Auto)
+}
+
+fn install_headers_inner(
+  project_include_dir: &Path,
+  package: &PackageId,
+  source_dir: &Path,
+  link_mode: LinkMode,
+) -> Result<HeaderInstall, LinkingError> {
   let header_root = discover_header_root(source_dir)?;
   let deps_dir = project_include_dir.join("deps");
   fs::create_dir_all(&deps_dir).map_err(|source| LinkingError::Io {
@@ -42,7 +51,7 @@ pub fn install_headers(
     source,
   })?;
 
-  let link_kind = link_or_copy_dir(&header_root, &link_path)?;
+  let link_kind = link_or_copy_dir(&header_root, &link_path, link_mode)?;
   Ok(HeaderInstall { header_root, link_path, link_kind })
 }
 
@@ -62,7 +71,23 @@ fn remove_existing_path(path: &Path) -> std::io::Result<()> {
   }
 }
 
-fn link_or_copy_dir(src: &Path, dst: &Path) -> Result<&'static str, LinkingError> {
+#[cfg_attr(not(test), allow(dead_code))]
+#[derive(Debug, Clone, Copy)]
+enum LinkMode {
+  Auto,
+  CopyOnly,
+}
+
+fn link_or_copy_dir(src: &Path, dst: &Path, mode: LinkMode) -> Result<&'static str, LinkingError> {
+  if matches!(mode, LinkMode::CopyOnly) {
+    copy_dir_recursive(src, dst).map_err(|source| LinkingError::Io {
+      action: "copying headers".into(),
+      path: dst.to_path_buf(),
+      source,
+    })?;
+    return Ok("copy");
+  }
+
   #[cfg(unix)]
   {
     match std::os::unix::fs::symlink(src, dst) {
@@ -192,5 +217,25 @@ mod tests {
     assert_eq!(installed.link_path, project_include.join("deps").join("nlohmann_json"));
     assert!(installed.link_path.exists());
     assert!(installed.link_path.join("nlohmann").join("json.hpp").is_file());
+  }
+
+  #[test]
+  fn tests_copy_install_mode_without_relying_on_symlink_failure() {
+    let temp = TempDir::new().expect("tempdir");
+    let source_dir = temp.path().join("pkg");
+    let include_dir = source_dir.join("single_include");
+    fs::create_dir_all(&include_dir).expect("mkdir");
+    fs::write(include_dir.join("demo.hpp"), "// header\n").expect("write header");
+
+    let project_include = temp.path().join("project").join(".joy").join("include");
+    fs::create_dir_all(&project_include).expect("project include");
+
+    let pkg = PackageId::parse("owner/demo").expect("package");
+    let installed =
+      super::install_headers_inner(&project_include, &pkg, &source_dir, super::LinkMode::CopyOnly)
+        .expect("install headers");
+
+    assert_eq!(installed.link_kind, "copy");
+    assert!(installed.link_path.join("demo.hpp").is_file());
   }
 }
