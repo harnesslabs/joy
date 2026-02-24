@@ -3,6 +3,7 @@ use std::fs;
 use std::io::Read;
 use std::path::{Path, PathBuf};
 use std::process::Command;
+use std::sync::Arc;
 use std::time::{SystemTime, UNIX_EPOCH};
 use thiserror::Error;
 
@@ -79,6 +80,54 @@ pub fn download_and_extract_tar_gz(url: &str, dest_dir: &Path) -> Result<(), Fet
     .map_err(FetchError::Http)?;
 
   extract_tar_gz_reader(response, dest_dir)
+}
+
+pub fn prefetch_github_packages(
+  requests: Vec<(PackageId, String)>,
+) -> Result<Vec<FetchResult>, FetchError> {
+  if requests.is_empty() {
+    return Ok(Vec::new());
+  }
+
+  let concurrency = std::thread::available_parallelism().map(|n| n.get()).unwrap_or(4).max(1);
+  let runtime = tokio::runtime::Builder::new_multi_thread()
+    .worker_threads(concurrency)
+    .enable_all()
+    .build()
+    .map_err(FetchError::Runtime)?;
+
+  runtime.block_on(async move {
+    let semaphore = Arc::new(tokio::sync::Semaphore::new(concurrency));
+    let total = requests.len();
+    let mut join_set = tokio::task::JoinSet::new();
+
+    for (index, (package, rev)) in requests.into_iter().enumerate() {
+      let semaphore = semaphore.clone();
+      join_set.spawn(async move {
+        let permit = semaphore
+          .acquire_owned()
+          .await
+          .map_err(|_| FetchError::TaskJoin("prefetch semaphore closed".into()))?;
+        let _permit = permit;
+        tokio::task::spawn_blocking(move || fetch_github(&package, &rev))
+          .await
+          .map_err(|err| FetchError::TaskJoin(format!("prefetch task join failed: {err}")))?
+          .map(|result| (index, result))
+      });
+    }
+
+    let mut results: Vec<Option<FetchResult>> = vec![None; total];
+    while let Some(task_result) = join_set.join_next().await {
+      let (index, fetched) = task_result
+        .map_err(|err| FetchError::TaskJoin(format!("prefetch task failed: {err}")))??;
+      results[index] = Some(fetched);
+    }
+
+    results
+      .into_iter()
+      .map(|item| item.ok_or_else(|| FetchError::TaskJoin("missing prefetch result".into())))
+      .collect::<Result<Vec<_>, _>>()
+  })
 }
 
 fn github_remote_url(package: &PackageId) -> String {
@@ -302,6 +351,10 @@ pub enum FetchError {
     #[source]
     source: std::io::Error,
   },
+  #[error("failed to create tokio runtime for parallel fetch: {0}")]
+  Runtime(std::io::Error),
+  #[error("{0}")]
+  TaskJoin(String),
 }
 
 #[cfg(test)]

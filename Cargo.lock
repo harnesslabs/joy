@@ -796,6 +796,7 @@ dependencies = [
  "tar",
  "tempfile",
  "thiserror",
+ "tokio",
  "toml",
  "which",
 ]

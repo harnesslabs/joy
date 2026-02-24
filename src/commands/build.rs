@@ -1,5 +1,5 @@
 use serde_json::json;
-use std::collections::BTreeSet;
+use std::collections::{BTreeMap, BTreeSet};
 use std::env;
 use std::fs;
 use std::path::{Path, PathBuf};
@@ -236,6 +236,14 @@ fn prepare_compiled_dependencies(
   let order = resolved
     .build_order()
     .map_err(|err| JoyError::new("build", "dependency_graph_invalid", err.to_string(), 1))?;
+  let prefetched = fetch::prefetch_github_packages(
+    order.iter().map(|pkg| (pkg.id.clone(), pkg.requested_rev.clone())).collect(),
+  )
+  .map_err(|err| JoyError::new("build", "fetch_failed", err.to_string(), 1))?;
+  let mut prefetched_by_key = prefetched
+    .into_iter()
+    .map(|f| ((f.package.to_string(), f.requested_rev.clone()), f))
+    .collect::<BTreeMap<_, _>>();
 
   let cache = global_cache::GlobalCache::resolve()
     .map_err(|err| JoyError::new("build", "cache_setup_failed", err.to_string(), 1))?;
@@ -281,8 +289,16 @@ fn prepare_compiled_dependencies(
       continue;
     }
 
-    let fetched = fetch::fetch_github(&pkg.id, &pkg.requested_rev)
-      .map_err(|err| JoyError::new("build", "fetch_failed", err.to_string(), 1))?;
+    let fetched = prefetched_by_key
+      .remove(&(pkg.id.to_string(), pkg.requested_rev.clone()))
+      .ok_or_else(|| {
+        JoyError::new(
+          "build",
+          "fetch_failed",
+          format!("missing prefetched source checkout for `{}` at `{}`", pkg.id, pkg.requested_rev),
+          1,
+        )
+      })?;
 
     let recipe_file = recipes.root_dir().join("packages").join(format!("{}.toml", recipe.slug));
     let recipe_contents = fs::read_to_string(&recipe_file)
