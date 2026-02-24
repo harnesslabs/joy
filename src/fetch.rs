@@ -1,5 +1,6 @@
 use std::ffi::OsString;
 use std::fs;
+use std::io::Read;
 use std::path::{Path, PathBuf};
 use std::process::Command;
 use std::time::{SystemTime, UNIX_EPOCH};
@@ -53,6 +54,33 @@ pub fn fetch_github_with_cache(
   })
 }
 
+pub fn download_and_extract_tar_gz(url: &str, dest_dir: &Path) -> Result<(), FetchError> {
+  if let Some(parent) = dest_dir.parent() {
+    fs::create_dir_all(parent).map_err(|source| FetchError::Io {
+      action: "creating archive extraction parent".into(),
+      path: parent.to_path_buf(),
+      source,
+    })?;
+  }
+
+  if !dest_dir.exists() {
+    fs::create_dir_all(dest_dir).map_err(|source| FetchError::Io {
+      action: "creating archive extraction destination".into(),
+      path: dest_dir.to_path_buf(),
+      source,
+    })?;
+  }
+
+  let client = reqwest::blocking::Client::new();
+  let response = client
+    .get(url)
+    .send()
+    .and_then(reqwest::blocking::Response::error_for_status)
+    .map_err(FetchError::Http)?;
+
+  extract_tar_gz_reader(response, dest_dir)
+}
+
 fn github_remote_url(package: &PackageId) -> String {
   let base = std::env::var("JOY_GITHUB_BASE").unwrap_or_else(|_| "https://github.com".to_string());
   let base = base.trim_end_matches('/');
@@ -65,6 +93,16 @@ fn github_remote_url(package: &PackageId) -> String {
       .display()
       .to_string()
   }
+}
+
+fn extract_tar_gz_reader(reader: impl Read, dest_dir: &Path) -> Result<(), FetchError> {
+  let decoder = flate2::read::GzDecoder::new(reader);
+  let mut archive = tar::Archive::new(decoder);
+  archive.unpack(dest_dir).map_err(|source| FetchError::Io {
+    action: "extracting tar.gz archive".into(),
+    path: dest_dir.to_path_buf(),
+    source,
+  })
 }
 
 fn ensure_mirror(remote_url: &str, mirror_dir: &Path) -> Result<(), FetchError> {
@@ -247,6 +285,8 @@ fn git_failed_error(action: &str, output: &std::process::Output) -> FetchError {
 pub enum FetchError {
   #[error(transparent)]
   GlobalCache(#[from] GlobalCacheError),
+  #[error("http error while downloading archive: {0}")]
+  Http(#[from] reqwest::Error),
   #[error("failed to run git while {action}: {source}")]
   SpawnGit {
     action: String,
@@ -262,4 +302,56 @@ pub enum FetchError {
     #[source]
     source: std::io::Error,
   },
+}
+
+#[cfg(test)]
+mod tests {
+  use std::io::Write;
+
+  use flate2::Compression;
+  use flate2::write::GzEncoder;
+  use tempfile::TempDir;
+
+  use super::download_and_extract_tar_gz;
+
+  #[test]
+  fn downloads_and_extracts_tar_gz_from_mock_http_server() {
+    let mut server = mockito::Server::new();
+    let archive_bytes = build_fixture_tar_gz();
+
+    let mock = server.mock("GET", "/pkg.tar.gz").with_status(200).with_body(archive_bytes).create();
+
+    let temp = TempDir::new().expect("tempdir");
+    let url = format!("{}/pkg.tar.gz", server.url());
+    download_and_extract_tar_gz(&url, temp.path()).expect("download+extract");
+
+    mock.assert();
+    assert!(temp.path().join("fixture").join("include").join("demo.hpp").is_file());
+    assert!(temp.path().join("fixture").join("README.md").is_file());
+  }
+
+  fn build_fixture_tar_gz() -> Vec<u8> {
+    let mut tar_bytes = Vec::new();
+    {
+      let mut builder = tar::Builder::new(&mut tar_bytes);
+      let files = [
+        ("fixture/include/demo.hpp", b"// demo header\n".as_slice()),
+        ("fixture/README.md", b"# fixture\n".as_slice()),
+      ];
+
+      for (path, contents) in files {
+        let mut header = tar::Header::new_gnu();
+        header.set_path(path).expect("tar path");
+        header.set_size(contents.len() as u64);
+        header.set_mode(0o644);
+        header.set_cksum();
+        builder.append(&header, contents).expect("append tar entry");
+      }
+      builder.finish().expect("finish tar");
+    }
+
+    let mut encoder = GzEncoder::new(Vec::new(), Compression::default());
+    encoder.write_all(&tar_bytes).expect("write gzip payload");
+    encoder.finish().expect("finish gzip")
+  }
 }
