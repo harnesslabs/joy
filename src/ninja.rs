@@ -20,8 +20,7 @@ impl BuildProfile {
 pub struct NinjaBuildSpec {
   pub compiler_executable: String,
   pub cpp_standard: String,
-  pub source_file: PathBuf,
-  pub object_file: PathBuf,
+  pub compile_units: Vec<NinjaCompileUnit>,
   pub binary_file: PathBuf,
   pub include_dirs: Vec<PathBuf>,
   pub link_dirs: Vec<PathBuf>,
@@ -29,14 +28,19 @@ pub struct NinjaBuildSpec {
   pub profile: BuildProfile,
 }
 
+/// A single source/object compilation edge in the generated Ninja graph.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct NinjaCompileUnit {
+  pub source_file: PathBuf,
+  pub object_file: PathBuf,
+}
+
 /// Render a Ninja build file for a single `main.cpp` target.
 pub fn render_build_ninja(spec: &NinjaBuildSpec) -> String {
   let cxxflags = build_cxxflags(spec);
   let ldflags = build_ldflags(spec);
-  let source = path_to_ninja(&spec.source_file);
-  let object = path_to_ninja(&spec.object_file);
   let binary = path_to_ninja(&spec.binary_file);
-  let lines = [
+  let mut lines = vec![
     "ninja_required_version = 1.3".to_string(),
     format!("cxx = {}", spec.compiler_executable),
     format!("cxxflags = {cxxflags}"),
@@ -50,10 +54,20 @@ pub fn render_build_ninja(spec: &NinjaBuildSpec) -> String {
     "rule cxx_link".to_string(),
     "  command = $cxx $in -o $out $ldflags".to_string(),
     String::new(),
-    format!("build {object}: cxx_compile {source}"),
-    format!("build {binary}: cxx_link {object}"),
-    format!("default {binary}"),
   ];
+
+  let mut link_inputs = Vec::new();
+  for unit in &spec.compile_units {
+    let source = path_to_ninja(&unit.source_file);
+    let object = path_to_ninja(&unit.object_file);
+    link_inputs.push(object.clone());
+    lines.push(format!("build {object}: cxx_compile {source}"));
+  }
+
+  let link_inputs = link_inputs.join(" ");
+  lines.push(format!("build {binary}: cxx_link {link_inputs}"));
+  lines.push(format!("default {binary}"));
+
   format!("{}\n", lines.join("\n"))
 }
 
@@ -133,15 +147,23 @@ pub enum NinjaError {
 mod tests {
   use std::path::PathBuf;
 
-  use super::{BuildProfile, NinjaBuildSpec, render_build_ninja};
+  use super::{BuildProfile, NinjaBuildSpec, NinjaCompileUnit, render_build_ninja};
 
   #[test]
   fn renders_expected_ninja_file() {
     let spec = NinjaBuildSpec {
       compiler_executable: "clang++".into(),
       cpp_standard: "c++20".into(),
-      source_file: PathBuf::from("src/main.cpp"),
-      object_file: PathBuf::from(".joy/build/obj/main.o"),
+      compile_units: vec![
+        NinjaCompileUnit {
+          source_file: PathBuf::from("src/main.cpp"),
+          object_file: PathBuf::from(".joy/build/obj/main-a1b2c3.o"),
+        },
+        NinjaCompileUnit {
+          source_file: PathBuf::from("src/dup/main.cpp"),
+          object_file: PathBuf::from(".joy/build/obj/main-d4e5f6.o"),
+        },
+      ],
       binary_file: PathBuf::from(".joy/bin/demo"),
       include_dirs: vec![
         PathBuf::from(".joy/include/deps/nlohmann_json"),
@@ -159,8 +181,11 @@ mod tests {
     ));
     assert!(rendered.contains("ldflags = -L.joy/lib -lfmt"));
     assert!(rendered.contains("\n  command = $cxx $cxxflags -MMD -MF $out.d -c $in -o $out\n"));
-    assert!(rendered.contains("build .joy/build/obj/main.o: cxx_compile src/main.cpp"));
-    assert!(rendered.contains("build .joy/bin/demo: cxx_link .joy/build/obj/main.o"));
+    assert!(rendered.contains("build .joy/build/obj/main-a1b2c3.o: cxx_compile src/main.cpp"));
+    assert!(rendered.contains("build .joy/build/obj/main-d4e5f6.o: cxx_compile src/dup/main.cpp"));
+    assert!(rendered.contains(
+      "build .joy/bin/demo: cxx_link .joy/build/obj/main-a1b2c3.o .joy/build/obj/main-d4e5f6.o"
+    ));
   }
 
   #[test]
@@ -168,8 +193,10 @@ mod tests {
     let spec = NinjaBuildSpec {
       compiler_executable: "clang++".into(),
       cpp_standard: "c++20".into(),
-      source_file: PathBuf::from("src/main.cpp"),
-      object_file: PathBuf::from(".joy/build/obj/main.o"),
+      compile_units: vec![NinjaCompileUnit {
+        source_file: PathBuf::from("src/main.cpp"),
+        object_file: PathBuf::from(".joy/build/obj/main.o"),
+      }],
       binary_file: PathBuf::from(".joy/bin/space demo"),
       include_dirs: vec![],
       link_dirs: vec![],

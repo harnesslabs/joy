@@ -1,6 +1,7 @@
 //! `joy build` implementation and shared project build pipeline used by `joy run`.
 
 use serde_json::json;
+use sha2::{Digest, Sha256};
 use std::collections::{BTreeMap, BTreeSet};
 use std::env;
 use std::fs;
@@ -24,6 +25,7 @@ pub(crate) struct BuildExecution {
   pub build_file: PathBuf,
   pub binary_path: PathBuf,
   pub source_file: PathBuf,
+  pub compiled_sources: Vec<PathBuf>,
   pub include_dirs: Vec<PathBuf>,
   pub link_dirs: Vec<PathBuf>,
   pub link_libs: Vec<String>,
@@ -52,6 +54,7 @@ impl BuildExecution {
       "build_file": self.build_file.display().to_string(),
       "binary_path": self.binary_path.display().to_string(),
       "source_file": self.source_file.display().to_string(),
+      "compiled_sources": self.compiled_sources.iter().map(|p| p.display().to_string()).collect::<Vec<_>>(),
       "profile": self.profile_name(),
       "include_dirs": self.include_dirs.iter().map(|p| p.display().to_string()).collect::<Vec<_>>(),
       "link_dirs": self.link_dirs.iter().map(|p| p.display().to_string()).collect::<Vec<_>>(),
@@ -176,25 +179,30 @@ pub(crate) fn build_project(options: BuildOptions) -> Result<BuildExecution, Joy
   let toolchain = toolchain::discover().map_err(|err| map_toolchain_error("build", err))?;
   let profile = BuildProfile::from_release_flag(options.release);
   let source_file = project_root.join(&manifest.project.entry);
-  if !source_file.is_file() {
-    return Err(JoyError::new(
-      "build",
-      "entry_not_found",
-      format!("entry source file `{}` does not exist", source_file.display()),
-      1,
-    ));
-  }
+  let source_files = collect_project_source_files(&project_root, &manifest)?;
 
   let obj_dir = env_layout.build_dir.join("obj");
   fs::create_dir_all(&obj_dir)
     .map_err(|err| JoyError::io("build", "creating object directory", &obj_dir, &err))?;
-  let object_file = obj_dir
-    .join(format!("{}.o", source_file.file_stem().and_then(|s| s.to_str()).unwrap_or("main")));
+  let compile_units = source_files
+    .iter()
+    .map(|src| ninja::NinjaCompileUnit {
+      source_file: relative_or_absolute(&project_root, src),
+      object_file: relative_or_absolute(
+        &project_root,
+        &obj_dir.join(object_file_name_for_source(&project_root, src)),
+      ),
+    })
+    .collect::<Vec<_>>();
   let binary_path = env_layout.bin_dir.join(binary_name(&manifest.project.name));
   let build_file = env_layout.build_dir.join("build.ninja");
-  let include_dirs = collect_include_dirs(&env_layout.include_dir).map_err(|err| {
+  let mut include_dirs = collect_include_dirs(&env_layout.include_dir).map_err(|err| {
     JoyError::io("build", "reading include directories", &env_layout.include_dir, &err)
   })?;
+  let user_include_dirs = collect_user_include_dirs(&project_root, &manifest)?;
+  include_dirs.extend(user_include_dirs);
+  include_dirs.sort();
+  include_dirs.dedup();
   let native_link =
     prepare_compiled_dependencies(&manifest, &env_layout.lib_dir, &toolchain, profile)?;
   validate_locked_package_metadata_if_needed("build", &lock_plan, &native_link.lockfile_packages)?;
@@ -203,8 +211,7 @@ pub(crate) fn build_project(options: BuildOptions) -> Result<BuildExecution, Joy
   let spec = NinjaBuildSpec {
     compiler_executable: toolchain.compiler.executable_name.clone(),
     cpp_standard: manifest.project.cpp_standard.clone(),
-    source_file: relative_or_absolute(&project_root, &source_file),
-    object_file: relative_or_absolute(&project_root, &object_file),
+    compile_units,
     binary_file: relative_or_absolute(&project_root, &binary_path),
     include_dirs: include_dirs.iter().map(|dir| relative_or_absolute(&project_root, dir)).collect(),
     link_dirs: native_link
@@ -234,6 +241,7 @@ pub(crate) fn build_project(options: BuildOptions) -> Result<BuildExecution, Joy
     build_file,
     binary_path,
     source_file,
+    compiled_sources: source_files,
     include_dirs,
     link_dirs: native_link.link_dirs,
     link_libs: native_link.link_libs,
@@ -636,6 +644,79 @@ fn collect_include_dirs(project_include_dir: &Path) -> std::io::Result<Vec<PathB
   }
   dirs.sort();
   Ok(dirs)
+}
+
+fn collect_user_include_dirs(
+  project_root: &Path,
+  manifest: &Manifest,
+) -> Result<Vec<PathBuf>, JoyError> {
+  let mut dirs = Vec::new();
+  for raw in &manifest.project.include_dirs {
+    let path = project_root.join(raw);
+    if !path.is_dir() {
+      return Err(JoyError::new(
+        "build",
+        "include_dir_not_found",
+        format!("project include dir `{}` does not exist", path.display()),
+        1,
+      ));
+    }
+    dirs.push(path);
+  }
+  Ok(dirs)
+}
+
+fn collect_project_source_files(
+  project_root: &Path,
+  manifest: &Manifest,
+) -> Result<Vec<PathBuf>, JoyError> {
+  let entry = project_root.join(&manifest.project.entry);
+  if !entry.is_file() {
+    return Err(JoyError::new(
+      "build",
+      "entry_not_found",
+      format!("entry source file `{}` does not exist", entry.display()),
+      1,
+    ));
+  }
+
+  let mut seen = BTreeSet::new();
+  let mut files = Vec::new();
+
+  for path in std::iter::once(entry)
+    .chain(manifest.project.extra_sources.iter().map(|p| project_root.join(p)))
+  {
+    if !path.is_file() {
+      return Err(JoyError::new(
+        "build",
+        "source_not_found",
+        format!("source file `{}` does not exist", path.display()),
+        1,
+      ));
+    }
+    let key = normalize_path_for_hash(project_root, &path);
+    if seen.insert(key) {
+      files.push(path);
+    }
+  }
+
+  Ok(files)
+}
+
+fn object_file_name_for_source(project_root: &Path, source_file: &Path) -> String {
+  let normalized = normalize_path_for_hash(project_root, source_file);
+  let stem = source_file.file_stem().and_then(|s| s.to_str()).unwrap_or("obj");
+  let sanitized_stem =
+    stem.chars().map(|ch| if ch.is_ascii_alphanumeric() { ch } else { '_' }).collect::<String>();
+  let mut hasher = Sha256::new();
+  hasher.update(normalized.as_bytes());
+  let hash = format!("{:x}", hasher.finalize());
+  let short_hash = &hash[..12];
+  format!("{sanitized_stem}-{short_hash}.o")
+}
+
+fn normalize_path_for_hash(project_root: &Path, path: &Path) -> String {
+  relative_or_absolute(project_root, path).to_string_lossy().replace('\\', "/")
 }
 
 fn run_ninja_build(
