@@ -5,6 +5,7 @@ use thiserror::Error;
 
 use crate::package_id::PackageId;
 
+/// Global cache roots under `JOY_HOME` (or `~/.joy` by default).
 #[derive(Debug, Clone)]
 pub struct GlobalCache {
   pub joy_home: PathBuf,
@@ -16,6 +17,7 @@ pub struct GlobalCache {
   pub tmp_root: PathBuf,
 }
 
+/// ABI-keyed cache layout used for compiled dependency builds.
 #[derive(Debug, Clone)]
 pub struct BuildCacheLayout {
   pub root: PathBuf,
@@ -28,6 +30,7 @@ pub struct BuildCacheLayout {
 }
 
 impl GlobalCache {
+  /// Resolve the global cache location from `JOY_HOME`, then HOME/USERPROFILE fallback.
   pub fn resolve() -> Result<Self, GlobalCacheError> {
     if let Some(path) = env::var_os("JOY_HOME") {
       return Ok(Self::from_joy_home(PathBuf::from(path)));
@@ -40,6 +43,7 @@ impl GlobalCache {
     Ok(Self::from_joy_home(home.join(".joy")))
   }
 
+  /// Construct cache paths from an explicit `JOY_HOME` root (used heavily in tests).
   pub fn from_joy_home(joy_home: PathBuf) -> Self {
     let cache_root = joy_home.join("cache");
     Self {
@@ -53,6 +57,7 @@ impl GlobalCache {
     }
   }
 
+  /// Ensure the top-level global cache directory structure exists.
   pub fn ensure_layout(&self) -> Result<(), GlobalCacheError> {
     for path in [
       &self.joy_home,
@@ -69,22 +74,27 @@ impl GlobalCache {
     Ok(())
   }
 
+  /// Path for a materialized source checkout pinned by resolved commit.
   pub fn source_checkout_dir(&self, package: &PackageId, commit: &str) -> PathBuf {
     self.src_root.join("github").join(package.owner()).join(package.repo()).join(commit)
   }
 
+  /// Path for the cached git mirror used to resolve refs and clone checkouts quickly.
   pub fn git_mirror_dir(&self, package: &PackageId) -> PathBuf {
     self.git_root.join("github").join(package.owner()).join(format!("{}.git", package.repo()))
   }
 
+  /// Parent directory containing all cached source checkouts for a package.
   pub fn source_parent_dir(&self, package: &PackageId) -> PathBuf {
     self.src_root.join("github").join(package.owner()).join(package.repo())
   }
 
+  /// Temporary directory root used for atomic-ish cache materialization.
   pub fn tmp_dir(&self) -> &Path {
     &self.tmp_root
   }
 
+  /// Compute the compiled build cache layout for a specific ABI hash.
   pub fn compiled_build_layout(&self, abi_hash: &str) -> BuildCacheLayout {
     let root = self.builds_root.join(abi_hash);
     BuildCacheLayout {
@@ -98,6 +108,7 @@ impl GlobalCache {
     }
   }
 
+  /// Ensure the ABI-keyed compiled build layout exists and return it.
   pub fn ensure_compiled_build_layout(
     &self,
     abi_hash: &str,
@@ -119,6 +130,7 @@ impl GlobalCache {
   }
 }
 
+/// Errors while resolving or creating the global cache layout.
 #[derive(Debug, Error)]
 pub enum GlobalCacheError {
   #[error("could not determine a home directory for global joy cache")]

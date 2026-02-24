@@ -1,3 +1,8 @@
+//! Curated recipe index and package recipe parsing.
+//!
+//! Recipes encode build metadata for third-party C++ libraries (headers, transitive deps, CMake
+//! configure/build targets, and link metadata) so `joy` can build them reproducibly.
+
 use serde::Deserialize;
 use std::collections::BTreeMap;
 use std::fs;
@@ -6,6 +11,7 @@ use thiserror::Error;
 
 use crate::package_id::{PackageId, PackageIdError};
 
+/// Loaded curated recipe store rooted at `recipes/`.
 #[derive(Debug, Clone)]
 pub struct RecipeStore {
   root_dir: PathBuf,
@@ -14,11 +20,13 @@ pub struct RecipeStore {
 }
 
 impl RecipeStore {
+  /// Load the repository-local recipe index bundled with `joy`.
   pub fn load_default() -> Result<Self, RecipeError> {
     let root = PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("recipes");
     Self::load_from_dir(&root)
   }
 
+  /// Load a recipe store from an explicit directory (primarily used in tests).
   pub fn load_from_dir(root_dir: &Path) -> Result<Self, RecipeError> {
     let index_path = root_dir.join("index.toml");
     let raw = fs::read_to_string(&index_path).map_err(|source| RecipeError::Io {
@@ -52,18 +60,22 @@ impl RecipeStore {
     &self.root_dir
   }
 
+  /// Parsed `index.toml` backing this store.
   pub fn index(&self) -> &RecipeIndexFile {
     &self.index
   }
 
+  /// Lookup a recipe by canonical package ID string.
   pub fn get_by_id(&self, id: &str) -> Option<&PackageRecipe> {
     self.recipes_by_id.get(id)
   }
 
+  /// Lookup a recipe by parsed package ID.
   pub fn get(&self, package: &PackageId) -> Option<&PackageRecipe> {
     self.get_by_id(package.as_str())
   }
 
+  /// Return whether a recipe exists for the given canonical package ID.
   pub fn contains(&self, id: &str) -> bool {
     self.recipes_by_id.contains_key(id)
   }
@@ -111,6 +123,7 @@ fn validate_recipe(
   Ok(())
 }
 
+/// Top-level `recipes/index.toml` schema.
 #[derive(Debug, Clone, Deserialize)]
 pub struct RecipeIndexFile {
   pub version: u32,
@@ -118,6 +131,7 @@ pub struct RecipeIndexFile {
   pub packages: Vec<RecipeIndexEntry>,
 }
 
+/// Index entry describing where a package recipe file lives.
 #[derive(Debug, Clone, Deserialize)]
 pub struct RecipeIndexEntry {
   pub id: String,
@@ -125,6 +139,7 @@ pub struct RecipeIndexEntry {
   pub path: Option<String>,
 }
 
+/// Parsed package recipe schema.
 #[derive(Debug, Clone, Deserialize)]
 pub struct PackageRecipe {
   pub id: String,
@@ -145,14 +160,17 @@ pub struct PackageRecipe {
 }
 
 impl PackageRecipe {
+  /// Include roots exported by the package recipe.
   pub fn include_roots(&self) -> &[String] {
     self.headers.as_ref().map(|h| h.include_roots.as_slice()).unwrap_or(&[])
   }
 
+  /// Transitive package dependencies declared by the recipe.
   pub fn dep_packages(&self) -> &[RecipeDependency] {
     self.deps.as_ref().map(|d| d.packages.as_slice()).unwrap_or(&[])
   }
 
+  /// Whether the package should be treated as header-only by the resolver/build pipeline.
   pub fn is_header_only(&self) -> bool {
     match (&self.kind, &self.link) {
       (Some(RecipeKind::HeaderOnly), _) => true,
@@ -163,12 +181,14 @@ impl PackageRecipe {
   }
 }
 
+/// Supported recipe source backends.
 #[derive(Debug, Clone, Copy, Deserialize, PartialEq, Eq)]
 #[serde(rename_all = "lowercase")]
 pub enum RecipeSource {
   Github,
 }
 
+/// Package build strategy described by a recipe.
 #[derive(Debug, Clone, Copy, Deserialize, PartialEq, Eq)]
 #[serde(rename_all = "snake_case")]
 pub enum RecipeKind {
@@ -176,24 +196,28 @@ pub enum RecipeKind {
   Cmake,
 }
 
+/// Optional source fetch customization.
 #[derive(Debug, Clone, Default, Deserialize)]
 pub struct FetchSection {
   #[serde(default)]
   pub subdir: String,
 }
 
+/// Header export metadata.
 #[derive(Debug, Clone, Default, Deserialize)]
 pub struct HeadersSection {
   #[serde(default)]
   pub include_roots: Vec<String>,
 }
 
+/// Transitive dependency list for a recipe.
 #[derive(Debug, Clone, Default, Deserialize)]
 pub struct DepsSection {
   #[serde(default)]
   pub packages: Vec<RecipeDependency>,
 }
 
+/// Recipe dependency entry supporting short and detailed forms.
 #[derive(Debug, Clone, Deserialize, PartialEq, Eq)]
 #[serde(untagged)]
 pub enum RecipeDependency {
@@ -202,6 +226,7 @@ pub enum RecipeDependency {
 }
 
 impl RecipeDependency {
+  /// Canonical dependency package ID.
   pub fn id(&self) -> &str {
     match self {
       Self::Id(id) => id,
@@ -209,6 +234,7 @@ impl RecipeDependency {
     }
   }
 
+  /// Optional exact revision requested by this dependency edge.
   pub fn requested_rev(&self) -> Option<&str> {
     match self {
       Self::Id(_) => None,
@@ -217,6 +243,7 @@ impl RecipeDependency {
   }
 }
 
+/// CMake-specific build metadata used by the Phase 5 adapter.
 #[derive(Debug, Clone, Default, Deserialize)]
 pub struct CmakeSection {
   #[serde(default)]
@@ -225,6 +252,7 @@ pub struct CmakeSection {
   pub build_targets: Vec<String>,
 }
 
+/// Linker metadata for the final project build.
 #[derive(Debug, Clone, Default, Deserialize)]
 pub struct LinkSection {
   #[serde(default)]
@@ -233,6 +261,7 @@ pub struct LinkSection {
   pub preferred_linkage: Option<Linkage>,
 }
 
+/// Preferred linkage mode for recipe-built libraries.
 #[derive(Debug, Clone, Copy, Deserialize, PartialEq, Eq)]
 #[serde(rename_all = "lowercase")]
 pub enum Linkage {
@@ -240,6 +269,7 @@ pub enum Linkage {
   Shared,
 }
 
+/// Errors produced while loading or validating recipe metadata.
 #[derive(Debug, Error)]
 pub enum RecipeError {
   #[error("filesystem error while {action} at `{path}`: {source}")]

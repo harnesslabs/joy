@@ -1,3 +1,10 @@
+//! Dependency resolution and DAG construction for manifest + recipe dependencies.
+//!
+//! The current resolver intentionally uses an exact-ref model: direct dependencies provide an
+//! explicit ref (or `HEAD`), recipes declare exact revs for transitive dependencies, and git fetch
+//! resolution yields concrete commits. Conflicts are reported when one package ID resolves to
+//! different commits within the same graph.
+
 use std::collections::{BTreeMap, VecDeque};
 
 use petgraph::algo::toposort;
@@ -9,6 +16,7 @@ use crate::manifest::{DependencySource, Manifest};
 use crate::package_id::{PackageId, PackageIdError};
 use crate::recipes::RecipeStore;
 
+/// A resolved package node in the dependency graph.
 #[derive(Debug, Clone)]
 pub struct ResolvedPackage {
   pub id: PackageId,
@@ -20,6 +28,7 @@ pub struct ResolvedPackage {
   pub direct: bool,
 }
 
+/// Resolved dependency DAG with stable lookup helpers.
 #[derive(Debug, Clone)]
 pub struct ResolvedGraph {
   graph: DiGraph<ResolvedPackage, ()>,
@@ -27,14 +36,17 @@ pub struct ResolvedGraph {
 }
 
 impl ResolvedGraph {
+  /// Lookup a resolved package by canonical package ID.
   pub fn package(&self, id: &str) -> Option<&ResolvedPackage> {
     self.by_id.get(id).and_then(|idx| self.graph.node_weight(*idx))
   }
 
+  /// Iterate all resolved packages in graph insertion order.
   pub fn packages(&self) -> impl Iterator<Item = &ResolvedPackage> {
     self.graph.node_weights()
   }
 
+  /// Return a topological build order with dependencies before dependents.
   pub fn build_order(&self) -> Result<Vec<&ResolvedPackage>, ResolverError> {
     let order = toposort(&self.graph, None).map_err(|cycle| {
       let id = self
@@ -47,11 +59,13 @@ impl ResolvedGraph {
     Ok(order.into_iter().filter_map(|idx| self.graph.node_weight(idx)).collect::<Vec<_>>())
   }
 
+  /// Convenience helper returning the topological order as package IDs.
   pub fn build_order_ids(&self) -> Result<Vec<String>, ResolverError> {
     Ok(self.build_order()?.into_iter().map(|pkg| pkg.id.to_string()).collect())
   }
 }
 
+/// Resolve a manifest using the default fetch-based commit resolver.
 pub fn resolve_manifest(
   manifest: &Manifest,
   recipes: &RecipeStore,
@@ -72,6 +86,10 @@ pub fn resolve_manifest(
   })
 }
 
+/// Resolve a manifest with an injected commit-resolution function.
+///
+/// This hook keeps unit tests deterministic and allows future resolver extensions to decouple graph
+/// construction from transport concerns.
 pub fn resolve_manifest_with<F>(
   manifest: &Manifest,
   recipes: &RecipeStore,
@@ -80,6 +98,8 @@ pub fn resolve_manifest_with<F>(
 where
   F: FnMut(&PackageId, &str) -> Result<String, ResolverError>,
 {
+  // TODO(phase7): Split graph construction from transitive queue expansion to make semver-range
+  // resolution pluggable without rewriting conflict/cycle handling.
   let mut graph = DiGraph::<ResolvedPackage, ()>::new();
   let mut by_id = BTreeMap::<String, NodeIndex>::new();
   let mut queue = VecDeque::<PendingDependency>::new();
@@ -211,6 +231,7 @@ pub enum ResolverError {
   Cycle { package: String },
 }
 
+/// Detailed payload for version-conflict reporting.
 #[derive(Debug)]
 pub struct VersionConflictError {
   pub package: String,

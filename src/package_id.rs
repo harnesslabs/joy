@@ -1,6 +1,7 @@
 use std::fmt;
 use thiserror::Error;
 
+/// Canonical package identifier in `owner/repo` form.
 #[derive(Debug, Clone, PartialEq, Eq, Hash)]
 pub struct PackageId {
   raw: String,
@@ -9,6 +10,7 @@ pub struct PackageId {
 }
 
 impl PackageId {
+  /// Parse a GitHub shorthand package identifier.
   pub fn parse(raw: &str) -> Result<Self, PackageIdError> {
     let mut parts = raw.split('/');
     let owner = parts.next().unwrap_or_default();
@@ -28,18 +30,22 @@ impl PackageId {
     Ok(Self { raw: raw.to_string(), owner: owner.to_string(), repo: repo.to_string() })
   }
 
+  /// Return the original `owner/repo` string.
   pub fn as_str(&self) -> &str {
     &self.raw
   }
 
+  /// Return the package owner segment.
   pub fn owner(&self) -> &str {
     &self.owner
   }
 
+  /// Return the package repository segment.
   pub fn repo(&self) -> &str {
     &self.repo
   }
 
+  /// Build the filesystem-safe slug used for local install paths and recipe names.
   pub fn slug(&self) -> String {
     format!("{}_{}", self.owner, self.repo)
   }
@@ -55,6 +61,7 @@ fn is_valid_package_char(ch: char) -> bool {
   ch.is_ascii_alphanumeric() || matches!(ch, '.' | '_' | '-')
 }
 
+/// Parsing/validation errors for [`PackageId`].
 #[derive(Debug, Error)]
 pub enum PackageIdError {
   #[error("invalid package `{0}`; expected `owner/repo`")]

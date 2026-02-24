@@ -48,6 +48,9 @@ pub fn hash_recipe_contents(contents: &str) -> String {
 }
 
 fn hash_serialized<T: Serialize>(value: &T) -> String {
+  // `AbiHashInput` is fully JSON-serializable; this stays infallible for current inputs.
+  // TODO(phase7): Return a `Result` from ABI hashing if/when non-JSON-serializable inputs are
+  // introduced.
   let bytes = serde_json::to_vec(value).expect("ABI hash input serialization should not fail");
   hash_bytes(&bytes)
 }

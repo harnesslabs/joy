@@ -1,9 +1,15 @@
+//! Local project installation helpers for headers and compiled libraries.
+//!
+//! Header installs prefer symlinks for speed and disk efficiency, but transparently fall back to a
+//! recursive copy when symlink creation is unavailable (common on some Windows setups).
+
 use std::fs;
 use std::path::{Path, PathBuf};
 use thiserror::Error;
 
 use crate::package_id::PackageId;
 
+/// Result of installing a header-only package into `.joy/include/deps/<slug>`.
 #[derive(Debug, Clone)]
 pub struct HeaderInstall {
   pub header_root: PathBuf,
@@ -11,6 +17,7 @@ pub struct HeaderInstall {
   pub link_kind: &'static str,
 }
 
+/// Result of installing compiled library artifacts into `.joy/lib`.
 #[derive(Debug, Clone)]
 pub struct LibraryInstall {
   pub project_lib_dir: PathBuf,
@@ -18,6 +25,7 @@ pub struct LibraryInstall {
   pub link_libs: Vec<String>,
 }
 
+/// Discover the package header root used for header installation heuristics.
 pub fn discover_header_root(source_dir: &Path) -> Result<PathBuf, LinkingError> {
   for candidate in ["include", "single_include"] {
     let path = source_dir.join(candidate);
@@ -29,6 +37,7 @@ pub fn discover_header_root(source_dir: &Path) -> Result<PathBuf, LinkingError> 
   Err(LinkingError::NoHeaderRoot { source_dir: source_dir.to_path_buf() })
 }
 
+/// Install headers into the project-local include dependency directory.
 pub fn install_headers(
   project_include_dir: &Path,
   package: &PackageId,
@@ -37,6 +46,7 @@ pub fn install_headers(
   install_headers_inner(project_include_dir, package, source_dir, LinkMode::Auto)
 }
 
+/// Copy compiled library artifacts from the ABI cache into the project-local `.joy/lib`.
 pub fn install_compiled_libraries(
   project_lib_dir: &Path,
   cache_lib_dir: &Path,
@@ -206,6 +216,7 @@ fn link_or_copy_dir(src: &Path, dst: &Path, mode: LinkMode) -> Result<&'static s
 
   #[cfg(windows)]
   {
+    // TODO(phase7): Add a Windows junction fallback before full copy for large header trees.
     match std::os::windows::fs::symlink_dir(src, dst) {
       Ok(()) => Ok("symlink"),
       Err(err) => {

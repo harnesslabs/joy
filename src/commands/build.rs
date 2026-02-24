@@ -1,3 +1,5 @@
+//! `joy build` implementation and shared project build pipeline used by `joy run`.
+
 use serde_json::json;
 use std::collections::{BTreeMap, BTreeSet};
 use std::env;
@@ -35,6 +37,41 @@ pub(crate) struct BuildExecution {
   pub lockfile_updated: bool,
 }
 
+impl BuildExecution {
+  fn profile_name(&self) -> &'static str {
+    match self.profile {
+      BuildProfile::Debug => "debug",
+      BuildProfile::Release => "release",
+    }
+  }
+
+  fn json_data(&self) -> serde_json::Value {
+    json!({
+      "project_root": self.project_root.display().to_string(),
+      "manifest_path": self.manifest_path.display().to_string(),
+      "build_file": self.build_file.display().to_string(),
+      "binary_path": self.binary_path.display().to_string(),
+      "source_file": self.source_file.display().to_string(),
+      "profile": self.profile_name(),
+      "include_dirs": self.include_dirs.iter().map(|p| p.display().to_string()).collect::<Vec<_>>(),
+      "link_dirs": self.link_dirs.iter().map(|p| p.display().to_string()).collect::<Vec<_>>(),
+      "link_libs": self.link_libs.clone(),
+      "compiled_dependencies_built": self.compiled_dependencies_built.clone(),
+      "toolchain": {
+        "compiler_kind": self.toolchain.compiler.kind.as_str(),
+        "compiler_version": self.toolchain.compiler.version,
+        "compiler_path": self.toolchain.compiler.path.display().to_string(),
+        "ninja_path": self.toolchain.ninja.path.display().to_string(),
+      },
+      "ninja_status": self.ninja_status,
+      "ninja_stdout": self.ninja_stdout,
+      "ninja_stderr": self.ninja_stderr,
+      "lockfile_path": self.lockfile_path.display().to_string(),
+      "lockfile_updated": self.lockfile_updated,
+    })
+  }
+}
+
 #[derive(Debug, Clone, Copy)]
 pub(crate) struct BuildOptions {
   pub release: bool,
@@ -42,6 +79,7 @@ pub(crate) struct BuildOptions {
   pub update_lock: bool,
 }
 
+/// Handle `joy build` by executing the local build pipeline and returning a CLI output payload.
 pub fn handle(args: BuildArgs) -> Result<CommandOutput, JoyError> {
   let execution = build_project(BuildOptions {
     release: args.release,
@@ -57,32 +95,11 @@ pub fn handle(args: BuildArgs) -> Result<CommandOutput, JoyError> {
       execution.toolchain.compiler.kind.as_str(),
       execution.toolchain.compiler.version
     ),
-    json!({
-      "project_root": execution.project_root.display().to_string(),
-      "manifest_path": execution.manifest_path.display().to_string(),
-      "build_file": execution.build_file.display().to_string(),
-      "binary_path": execution.binary_path.display().to_string(),
-      "source_file": execution.source_file.display().to_string(),
-      "profile": match execution.profile { BuildProfile::Debug => "debug", BuildProfile::Release => "release" },
-      "include_dirs": execution.include_dirs.iter().map(|p| p.display().to_string()).collect::<Vec<_>>(),
-      "link_dirs": execution.link_dirs.iter().map(|p| p.display().to_string()).collect::<Vec<_>>(),
-      "link_libs": execution.link_libs,
-      "compiled_dependencies_built": execution.compiled_dependencies_built,
-      "toolchain": {
-        "compiler_kind": execution.toolchain.compiler.kind.as_str(),
-        "compiler_version": execution.toolchain.compiler.version,
-        "compiler_path": execution.toolchain.compiler.path.display().to_string(),
-        "ninja_path": execution.toolchain.ninja.path.display().to_string(),
-      },
-      "ninja_status": execution.ninja_status,
-      "ninja_stdout": execution.ninja_stdout,
-      "ninja_stderr": execution.ninja_stderr,
-      "lockfile_path": execution.lockfile_path.display().to_string(),
-      "lockfile_updated": execution.lockfile_updated,
-    }),
+    execution.json_data(),
   ))
 }
 
+/// Build the current project and return the execution metadata reused by `joy run`.
 pub(crate) fn build_project(options: BuildOptions) -> Result<BuildExecution, JoyError> {
   let project_root = env::current_dir().map_err(|err| {
     JoyError::new("build", "cwd_unavailable", format!("failed to get cwd: {err}"), 1)
@@ -107,6 +124,7 @@ pub(crate) fn build_project(options: BuildOptions) -> Result<BuildExecution, Joy
   let lock_plan = evaluate_lockfile_plan(&lockfile_path, &manifest_hash, options)?;
 
   let toolchain = toolchain::discover().map_err(map_toolchain_error)?;
+  let profile = BuildProfile::from_release_flag(options.release);
   let source_file = project_root.join(&manifest.project.entry);
   if !source_file.is_file() {
     return Err(JoyError::new(
@@ -127,12 +145,8 @@ pub(crate) fn build_project(options: BuildOptions) -> Result<BuildExecution, Joy
   let include_dirs = collect_include_dirs(&env_layout.include_dir).map_err(|err| {
     JoyError::io("build", "reading include directories", &env_layout.include_dir, &err)
   })?;
-  let native_link = prepare_compiled_dependencies(
-    &manifest,
-    &env_layout.lib_dir,
-    &toolchain,
-    BuildProfile::from_release_flag(options.release),
-  )?;
+  let native_link =
+    prepare_compiled_dependencies(&manifest, &env_layout.lib_dir, &toolchain, profile)?;
   refresh_install_index(&env_layout, &manifest, &native_link)?;
 
   let spec = NinjaBuildSpec {
@@ -148,48 +162,14 @@ pub(crate) fn build_project(options: BuildOptions) -> Result<BuildExecution, Joy
       .map(|dir| relative_or_absolute(&project_root, dir))
       .collect(),
     link_libs: native_link.link_libs.clone(),
-    profile: BuildProfile::from_release_flag(options.release),
+    profile,
   };
   ninja::write_build_ninja(&build_file, &spec)
     .map_err(|err| JoyError::new("build", "ninja_file_write_failed", err.to_string(), 1))?;
 
-  let output = Command::new(&toolchain.ninja.path)
-    .current_dir(&project_root)
-    .arg("-f")
-    .arg(relative_or_absolute(&project_root, &build_file))
-    .output()
-    .map_err(|err| {
-      JoyError::new("build", "ninja_spawn_failed", format!("failed to run ninja: {err}"), 1)
-    })?;
-  let ninja_stdout = String::from_utf8_lossy(&output.stdout).to_string();
-  let ninja_stderr = String::from_utf8_lossy(&output.stderr).to_string();
-  if !output.status.success() {
-    return Err(JoyError::new(
-      "build",
-      "build_failed",
-      format!(
-        "ninja build failed with status {:?}\nstdout:\n{}\nstderr:\n{}",
-        output.status.code(),
-        ninja_stdout.trim_end(),
-        ninja_stderr.trim_end()
-      ),
-      1,
-    ));
-  }
+  let ninja_output = run_ninja_build(&toolchain, &project_root, &build_file)?;
 
-  let mut lockfile_updated = false;
-  if lock_plan.write_after_build {
-    let lock = lockfile::Lockfile {
-      version: lockfile::Lockfile::VERSION,
-      manifest_hash,
-      generated_by: lockfile::generated_by_string(),
-      packages: Vec::new(),
-    };
-    lock
-      .save(&lockfile_path)
-      .map_err(|err| JoyError::new("build", "lockfile_write_failed", err.to_string(), 1))?;
-    lockfile_updated = true;
-  }
+  let lockfile_updated = write_lockfile_if_needed(lock_plan, &lockfile_path, &manifest_hash)?;
 
   Ok(BuildExecution {
     project_root,
@@ -201,10 +181,10 @@ pub(crate) fn build_project(options: BuildOptions) -> Result<BuildExecution, Joy
     link_dirs: native_link.link_dirs,
     link_libs: native_link.link_libs,
     toolchain,
-    profile: BuildProfile::from_release_flag(options.release),
-    ninja_status: output.status.code().unwrap_or_default(),
-    ninja_stdout,
-    ninja_stderr,
+    profile,
+    ninja_status: ninja_output.status_code,
+    ninja_stdout: ninja_output.stdout,
+    ninja_stderr: ninja_output.stderr,
     compiled_dependencies_built: native_link.built_packages,
     lockfile_path,
     lockfile_updated,
@@ -219,12 +199,21 @@ struct NativeLinkInputs {
   installed_lib_files: Vec<PathBuf>,
 }
 
+#[derive(Debug, Clone)]
+struct NinjaRunOutput {
+  status_code: i32,
+  stdout: String,
+  stderr: String,
+}
+
 fn prepare_compiled_dependencies(
   manifest: &Manifest,
   project_lib_dir: &Path,
   toolchain: &toolchain::Toolchain,
   profile: BuildProfile,
 ) -> Result<NativeLinkInputs, JoyError> {
+  // TODO(phase7): Split this function into resolve/prefetch/build/install stages to shrink the
+  // surface area of `joy build` and make per-stage diagnostics easier to test in isolation.
   if manifest.dependencies.is_empty() {
     return Ok(NativeLinkInputs::default());
   }
@@ -392,6 +381,38 @@ fn collect_include_dirs(project_include_dir: &Path) -> std::io::Result<Vec<PathB
   Ok(dirs)
 }
 
+fn run_ninja_build(
+  toolchain: &toolchain::Toolchain,
+  project_root: &Path,
+  build_file: &Path,
+) -> Result<NinjaRunOutput, JoyError> {
+  let output = Command::new(&toolchain.ninja.path)
+    .current_dir(project_root)
+    .arg("-f")
+    .arg(relative_or_absolute(project_root, build_file))
+    .output()
+    .map_err(|err| {
+      JoyError::new("build", "ninja_spawn_failed", format!("failed to run ninja: {err}"), 1)
+    })?;
+  let stdout = String::from_utf8_lossy(&output.stdout).to_string();
+  let stderr = String::from_utf8_lossy(&output.stderr).to_string();
+  if !output.status.success() {
+    return Err(JoyError::new(
+      "build",
+      "build_failed",
+      format!(
+        "ninja build failed with status {:?}\nstdout:\n{}\nstderr:\n{}",
+        output.status.code(),
+        stdout.trim_end(),
+        stderr.trim_end()
+      ),
+      1,
+    ));
+  }
+
+  Ok(NinjaRunOutput { status_code: output.status.code().unwrap_or_default(), stdout, stderr })
+}
+
 fn relative_or_absolute(root: &Path, path: &Path) -> PathBuf {
   path.strip_prefix(root).unwrap_or(path).to_path_buf()
 }
@@ -448,6 +469,29 @@ fn refresh_install_index(
 #[derive(Debug, Clone, Copy)]
 struct LockfilePlan {
   write_after_build: bool,
+}
+
+fn write_lockfile_if_needed(
+  lock_plan: LockfilePlan,
+  lockfile_path: &Path,
+  manifest_hash: &str,
+) -> Result<bool, JoyError> {
+  if !lock_plan.write_after_build {
+    return Ok(false);
+  }
+
+  // TODO(phase7): Populate `joy.lock` packages with resolved dependency details once lockfile
+  // package serialization/validation is completed end-to-end.
+  let lock = lockfile::Lockfile {
+    version: lockfile::Lockfile::VERSION,
+    manifest_hash: manifest_hash.to_string(),
+    generated_by: lockfile::generated_by_string(),
+    packages: Vec::new(),
+  };
+  lock
+    .save(lockfile_path)
+    .map_err(|err| JoyError::new("build", "lockfile_write_failed", err.to_string(), 1))?;
+  Ok(true)
 }
 
 fn evaluate_lockfile_plan(

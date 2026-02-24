@@ -1,3 +1,9 @@
+//! Source fetching backends and cache materialization helpers.
+//!
+//! `joy` currently prefers a git-mirror workflow (using the system `git` binary) for GitHub
+//! shorthand dependencies so refs can be resolved locally and subsequent fetches can reuse the
+//! mirror. A `.tar.gz` archive path is also available for tests and future fallback behavior.
+
 use std::ffi::OsString;
 use std::fs;
 use std::io::Read;
@@ -10,6 +16,7 @@ use thiserror::Error;
 use crate::global_cache::{GlobalCache, GlobalCacheError};
 use crate::package_id::PackageId;
 
+/// Result of fetching a package source tree (or reusing an existing cached checkout).
 #[derive(Debug, Clone)]
 pub struct FetchResult {
   pub package: PackageId,
@@ -20,11 +27,16 @@ pub struct FetchResult {
   pub cache_hit: bool,
 }
 
+/// Fetch a GitHub shorthand package using the default global cache.
 pub fn fetch_github(package: &PackageId, requested_rev: &str) -> Result<FetchResult, FetchError> {
   let cache = GlobalCache::resolve()?;
   fetch_github_with_cache(package, requested_rev, &cache)
 }
 
+/// Fetch a GitHub shorthand package using an explicit cache layout.
+///
+/// The requested ref is resolved to a concrete commit and the source checkout is materialized under
+/// the commit-keyed source cache path.
 pub fn fetch_github_with_cache(
   package: &PackageId,
   requested_rev: &str,
@@ -55,6 +67,7 @@ pub fn fetch_github_with_cache(
   })
 }
 
+/// Download and extract a `.tar.gz` archive into `dest_dir`.
 pub fn download_and_extract_tar_gz(url: &str, dest_dir: &Path) -> Result<(), FetchError> {
   if let Some(parent) = dest_dir.parent() {
     fs::create_dir_all(parent).map_err(|source| FetchError::Io {
@@ -82,6 +95,7 @@ pub fn download_and_extract_tar_gz(url: &str, dest_dir: &Path) -> Result<(), Fet
   extract_tar_gz_reader(response, dest_dir)
 }
 
+/// Prefetch multiple GitHub packages in parallel while preserving the original request ordering.
 pub fn prefetch_github_packages(
   requests: Vec<(PackageId, String)>,
 ) -> Result<Vec<FetchResult>, FetchError> {
@@ -101,6 +115,8 @@ pub fn prefetch_github_packages(
     let total = requests.len();
     let mut join_set = tokio::task::JoinSet::new();
 
+    // TODO(phase7): Add retry/backoff for transient failures while preserving deterministic output
+    // ordering and stable error reporting for the build pipeline.
     for (index, (package, rev)) in requests.into_iter().enumerate() {
       let semaphore = semaphore.clone();
       join_set.spawn(async move {

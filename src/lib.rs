@@ -1,3 +1,12 @@
+//! `joy` is a native C++ package and build manager with a CLI-first API.
+//!
+//! The library crate exists primarily to keep the CLI testable: `src/main.rs` is a thin wrapper
+//! around [`run`], while command dispatch, manifest parsing, dependency fetching, resolution, and
+//! local build orchestration live in modules here.
+//!
+//! TODO(phase7): Narrow the public module surface to a stable, intentional library API (or mark
+//! `joy` as CLI-only) once downstream usage expectations are finalized.
+
 pub mod abi;
 pub mod cli;
 pub mod cmake;
@@ -26,10 +35,15 @@ use crate::cli::Cli;
 use crate::commands::dispatch;
 use crate::output::{print_error, print_success};
 
+/// Run the `joy` CLI using the current process arguments.
 pub fn run() -> ExitCode {
   run_from(std::env::args_os())
 }
 
+/// Run the `joy` CLI using an explicit argument iterator.
+///
+/// This is used heavily by tests so command parsing and dispatch can be exercised without spawning
+/// a subprocess.
 pub fn run_from<I, T>(args: I) -> ExitCode
 where
   I: IntoIterator<Item = T>,

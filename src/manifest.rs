@@ -4,6 +4,10 @@ use std::fs;
 use std::path::{Path, PathBuf};
 use thiserror::Error;
 
+/// Parsed `joy.toml` manifest.
+///
+/// The schema is intentionally small in the current roadmap: a single project section and a map of
+/// direct dependencies keyed by canonical `owner/repo` IDs.
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
 pub struct Manifest {
   pub project: ProjectSection,
@@ -11,6 +15,7 @@ pub struct Manifest {
   pub dependencies: BTreeMap<String, DependencySpec>,
 }
 
+/// Project-level build configuration.
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
 pub struct ProjectSection {
   pub name: String,
@@ -19,12 +24,14 @@ pub struct ProjectSection {
   pub entry: String,
 }
 
+/// Dependency request recorded in `joy.toml`.
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
 pub struct DependencySpec {
   pub source: DependencySource,
   pub rev: String,
 }
 
+/// Supported dependency source backends for direct manifest entries.
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
 #[serde(rename_all = "lowercase")]
 pub enum DependencySource {
@@ -32,6 +39,7 @@ pub enum DependencySource {
 }
 
 impl Manifest {
+  /// Load, parse, and validate a manifest from disk.
   pub fn load(path: &Path) -> Result<Self, ManifestError> {
     let raw = fs::read_to_string(path)
       .map_err(|source| ManifestError::Io { path: path.to_path_buf(), source })?;
@@ -41,6 +49,9 @@ impl Manifest {
     Ok(manifest)
   }
 
+  /// Validate and write a manifest back to disk.
+  ///
+  /// Formatting normalization is expected because `toml` serialization is used.
   pub fn save(&self, path: &Path) -> Result<(), ManifestError> {
     self.validate()?;
     let mut raw = toml::to_string_pretty(self).map_err(ManifestError::Serialize)?;
@@ -50,6 +61,9 @@ impl Manifest {
     fs::write(path, raw).map_err(|source| ManifestError::Io { path: path.to_path_buf(), source })
   }
 
+  /// Insert or replace a dependency entry.
+  ///
+  /// Returns `true` if the manifest changed and `false` if the existing entry was identical.
   pub fn add_dependency(&mut self, package: String, spec: DependencySpec) -> bool {
     match self.dependencies.get(&package) {
       Some(existing) if existing == &spec => false,
@@ -71,6 +85,7 @@ impl Manifest {
   }
 }
 
+/// Errors produced when loading, validating, or writing `joy.toml`.
 #[derive(Debug, Error)]
 pub enum ManifestError {
   #[error("failed to read manifest `{path}`: {source}")]

@@ -45,7 +45,7 @@ impl InstallIndex {
       fs::create_dir_all(parent)
         .map_err(|source| InstallIndexError::Io { path: parent.to_path_buf(), source })?;
     }
-    let raw = serde_json::to_vec_pretty(self).expect("install index serialization");
+    let raw = serde_json::to_vec_pretty(self).map_err(InstallIndexError::Serialize)?;
     fs::write(path, raw)
       .map_err(|source| InstallIndexError::Io { path: path.to_path_buf(), source })
   }
@@ -145,6 +145,8 @@ pub enum InstallIndexError {
     #[source]
     source: serde_json::Error,
   },
+  #[error("failed to serialize install index: {0}")]
+  Serialize(serde_json::Error),
   #[error("unsupported install index version `{0}`")]
   UnsupportedVersion(u32),
 }

@@ -1,3 +1,9 @@
+//! CMake build adapter for compiled third-party dependencies.
+//!
+//! The adapter builds recipe-backed dependencies into an ABI-keyed global cache layout and copies
+//! library/header artifacts into stable cache directories that can later be installed into project
+//! local `.joy/` paths.
+
 use serde_json::json;
 use std::fs;
 use std::path::{Path, PathBuf};
@@ -7,6 +13,7 @@ use thiserror::Error;
 use crate::global_cache::BuildCacheLayout;
 use crate::ninja::BuildProfile;
 
+/// Inputs for building a recipe-backed dependency into an ABI cache directory.
 #[derive(Debug, Clone)]
 pub struct CmakeBuildRequest {
   pub source_dir: PathBuf,
@@ -17,6 +24,7 @@ pub struct CmakeBuildRequest {
   pub header_roots: Vec<String>,
 }
 
+/// Indexed result of a CMake build cache execution (or cache hit).
 #[derive(Debug, Clone)]
 pub struct CmakeBuildResult {
   pub cache_hit: bool,
@@ -26,6 +34,10 @@ pub struct CmakeBuildResult {
   pub manifest_file: PathBuf,
 }
 
+/// Build a CMake project into the provided ABI cache layout.
+///
+/// A cache hit is returned if the cache manifest already exists and artifact directories are
+/// populated.
 pub fn build_into_cache(request: &CmakeBuildRequest) -> Result<CmakeBuildResult, CmakeError> {
   ensure_tools()?;
   ensure_layout_dirs(&request.build_layout)?;
@@ -132,6 +144,8 @@ fn run_cmake_configure(request: &CmakeBuildRequest) -> Result<(), CmakeError> {
     ),
   ];
   args.extend(request.configure_args.iter().cloned());
+  // TODO(phase7): Consider normalizing duplicate/conflicting configure args before invocation so
+  // recipe defaults and user overrides can compose predictably.
   run_cmake(&args, "configuring CMake project")
 }
 
@@ -164,6 +178,8 @@ fn run_cmake(args: &[String], action: &str) -> Result<(), CmakeError> {
 fn collect_and_copy_artifacts(
   layout: &BuildCacheLayout,
 ) -> Result<(Vec<PathBuf>, Vec<PathBuf>), CmakeError> {
+  // TODO(phase7): Split artifact discovery from copy/staging so future recipe metadata can express
+  // explicit output locations and names instead of relying on broad file scanning.
   let mut lib_files = Vec::new();
   let mut bin_files = Vec::new();
   let mut stack = vec![layout.work_dir.clone()];
@@ -362,7 +378,7 @@ fn write_manifest(
     "bin_files": bin_files.iter().map(|p| p.display().to_string()).collect::<Vec<_>>(),
     "include_paths": include_paths.iter().map(|p| p.display().to_string()).collect::<Vec<_>>(),
   });
-  let raw = serde_json::to_vec_pretty(&payload).expect("serialize manifest");
+  let raw = serde_json::to_vec_pretty(&payload).map_err(CmakeError::SerializeManifest)?;
   fs::write(manifest_file, raw).map_err(|source| CmakeError::Io {
     action: "writing build cache manifest".into(),
     path: manifest_file.to_path_buf(),
@@ -471,6 +487,8 @@ pub enum CmakeError {
     #[source]
     source: std::io::Error,
   },
+  #[error("failed to serialize cmake cache manifest: {0}")]
+  SerializeManifest(serde_json::Error),
 }
 
 #[cfg(test)]

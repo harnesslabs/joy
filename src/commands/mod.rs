@@ -12,6 +12,7 @@ use crate::cli::Commands;
 use crate::error::JoyError;
 use crate::templates;
 
+/// Unified command result used by the output renderer for human and JSON modes.
 #[derive(Debug, Clone)]
 pub struct CommandOutput {
   pub command: &'static str,
@@ -20,11 +21,13 @@ pub struct CommandOutput {
 }
 
 impl CommandOutput {
+  /// Create a command output envelope payload.
   pub fn new(command: &'static str, human_message: impl Into<String>, data: Value) -> Self {
     Self { command, human_message: human_message.into(), data }
   }
 }
 
+/// Dispatch the parsed CLI subcommand to its handler.
 pub fn dispatch(command: Commands) -> Result<CommandOutput, JoyError> {
   match command {
     Commands::New(args) => new::handle(args),
@@ -41,6 +44,8 @@ pub(crate) fn scaffold_files(
   project_name: &str,
   force: bool,
 ) -> Result<ScaffoldWriteResult, JoyError> {
+  // TODO(phase7): Move scaffolding path policy and force-overwrite semantics into a dedicated
+  // `scaffold` module so `new` and `init` handlers remain thin wrappers.
   let mut created = Vec::new();
   let mut overwritten = Vec::new();
 

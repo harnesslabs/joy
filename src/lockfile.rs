@@ -4,6 +4,10 @@ use std::fs;
 use std::path::{Path, PathBuf};
 use thiserror::Error;
 
+/// Parsed `joy.lock` file.
+///
+/// Phase 6 currently enforces the manifest hash strongly; the `packages` list exists for the
+/// eventual fully-populated lock model and is intentionally forward-compatible.
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
 pub struct Lockfile {
   pub version: u32,
@@ -13,6 +17,7 @@ pub struct Lockfile {
   pub packages: Vec<LockedPackage>,
 }
 
+/// A single locked dependency entry.
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
 pub struct LockedPackage {
   pub id: String,
@@ -39,6 +44,7 @@ pub struct LockedPackage {
 impl Lockfile {
   pub const VERSION: u32 = 1;
 
+  /// Load and validate a lockfile from disk.
   pub fn load(path: &Path) -> Result<Self, LockfileError> {
     let raw = fs::read_to_string(path)
       .map_err(|source| LockfileError::Io { path: path.to_path_buf(), source })?;
@@ -50,6 +56,7 @@ impl Lockfile {
     Ok(lock)
   }
 
+  /// Write a lockfile to disk, enforcing the current supported version.
   pub fn save(&self, path: &Path) -> Result<(), LockfileError> {
     if self.version != Self::VERSION {
       return Err(LockfileError::UnsupportedVersion(self.version));
@@ -62,12 +69,14 @@ impl Lockfile {
   }
 }
 
+/// Compute a SHA-256 hash of the manifest bytes for stale-lock detection.
 pub fn compute_manifest_hash(path: &Path) -> Result<String, LockfileError> {
   let bytes =
     fs::read(path).map_err(|source| LockfileError::Io { path: path.to_path_buf(), source })?;
   Ok(hash_bytes(&bytes))
 }
 
+/// Return the canonical `generated_by` string for new lockfiles.
 pub fn generated_by_string() -> String {
   format!("joy {}", env!("CARGO_PKG_VERSION"))
 }
@@ -84,6 +93,7 @@ fn hash_bytes(bytes: &[u8]) -> String {
   out
 }
 
+/// Errors produced by `joy.lock` parsing, serialization, and hashing operations.
 #[derive(Debug, Error)]
 pub enum LockfileError {
   #[error("filesystem error for `{path}`: {source}")]

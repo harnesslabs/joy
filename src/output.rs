@@ -5,6 +5,7 @@ use std::io::{self, Write};
 use crate::commands::CommandOutput;
 use crate::error::JoyError;
 
+/// Output mode selected by CLI flags.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum OutputMode {
   Human,
@@ -31,6 +32,7 @@ struct ErrorPayload<'a> {
   message: &'a str,
 }
 
+/// Render a successful command result to stdout in the selected mode.
 pub fn print_success(mode: OutputMode, result: &CommandOutput) -> io::Result<()> {
   match mode {
     OutputMode::Human => {
@@ -44,6 +46,10 @@ pub fn print_success(mode: OutputMode, result: &CommandOutput) -> io::Result<()>
   }
 }
 
+/// Render a command error in human or machine-readable form.
+///
+/// JSON mode writes to stdout intentionally so callers can treat all command output as a single
+/// stream while still relying on process exit codes for success/failure.
 pub fn print_error(mode: OutputMode, command: &'static str, err: &JoyError) -> io::Result<()> {
   match mode {
     OutputMode::Human => {
@@ -63,6 +69,8 @@ fn write_json<T: Serialize>(writer: &mut impl Write, value: &T) -> io::Result<()
   writer.flush()
 }
 
+// TODO(phase7): Consolidate command success/error JSON envelope shaping in one module so command
+// handlers can return typed payloads instead of raw `serde_json::Value`.
 fn error_envelope<'a>(command: &'a str, err: &'a JoyError) -> ErrorEnvelope<'a> {
   ErrorEnvelope {
     ok: false,
