@@ -12,6 +12,7 @@ use std::path::{Path, PathBuf};
 use std::process::Command;
 use std::sync::Arc;
 use std::sync::atomic::{AtomicU8, Ordering};
+use std::time::Duration;
 use std::time::{SystemTime, UNIX_EPOCH};
 use thiserror::Error;
 
@@ -19,6 +20,7 @@ use crate::global_cache::{GlobalCache, GlobalCacheError};
 use crate::package_id::PackageId;
 
 const FETCH_FLAG_OFFLINE: u8 = 1 << 0;
+const TRANSIENT_RETRY_ATTEMPTS: usize = 3;
 static FETCH_RUNTIME_FLAGS: AtomicU8 = AtomicU8::new(0);
 
 /// Runtime fetch behavior toggles derived from global CLI flags.
@@ -138,14 +140,16 @@ pub fn download_and_extract_tar_gz(url: &str, dest_dir: &Path) -> Result<(), Fet
     })?;
   }
 
-  let client = reqwest::blocking::Client::new();
-  let response = client
-    .get(url)
-    .send()
-    .and_then(reqwest::blocking::Response::error_for_status)
-    .map_err(FetchError::Http)?;
+  retry_transient_network("downloading archive", || {
+    let client = reqwest::blocking::Client::new();
+    let response = client
+      .get(url)
+      .send()
+      .and_then(reqwest::blocking::Response::error_for_status)
+      .map_err(FetchError::Http)?;
 
-  extract_tar_gz_reader(response, dest_dir)
+    extract_tar_gz_reader(response, dest_dir)
+  })
 }
 
 /// Prefetch multiple GitHub packages in parallel while preserving the original request ordering.
@@ -168,8 +172,6 @@ pub fn prefetch_github_packages(
     let total = requests.len();
     let mut join_set = tokio::task::JoinSet::new();
 
-    // TODO(phase7): Add retry/backoff for transient failures while preserving deterministic output
-    // ordering and stable error reporting for the build pipeline.
     for (index, (package, rev)) in requests.into_iter().enumerate() {
       let semaphore = semaphore.clone();
       join_set.spawn(async move {
@@ -236,7 +238,9 @@ fn ensure_mirror(remote_url: &str, mirror_dir: &Path) -> Result<(), FetchError> 
       "Refreshing cached source mirror from `{remote_url}` ({})",
       mirror_dir.display()
     ));
-    run_git(Some(mirror_dir), ["fetch", "--all", "--tags", "--prune"], "fetching mirror")?;
+    retry_transient_network("fetching mirror", || {
+      run_git(Some(mirror_dir), ["fetch", "--all", "--tags", "--prune"], "fetching mirror")
+    })?;
     return Ok(());
   }
 
@@ -252,16 +256,18 @@ fn ensure_mirror(remote_url: &str, mirror_dir: &Path) -> Result<(), FetchError> 
     "Cloning source mirror from `{remote_url}` into {}",
     mirror_dir.display()
   ));
-  run_git_dynamic(
-    None,
-    vec![
-      "clone".into(),
-      "--mirror".into(),
-      remote_url.into(),
-      mirror_dir.as_os_str().to_os_string(),
-    ],
-    "cloning mirror",
-  )?;
+  retry_transient_network("cloning mirror", || {
+    run_git_dynamic(
+      None,
+      vec![
+        "clone".into(),
+        "--mirror".into(),
+        remote_url.into(),
+        mirror_dir.as_os_str().to_os_string(),
+      ],
+      "cloning mirror",
+    )
+  })?;
   Ok(())
 }
 
@@ -363,6 +369,54 @@ fn emit_progress(message: &str) {
   if std::io::stderr().is_terminal() {
     eprintln!("{message}...");
   }
+}
+
+fn retry_transient_network<T, F>(action: &str, mut op: F) -> Result<T, FetchError>
+where
+  F: FnMut() -> Result<T, FetchError>,
+{
+  retry_transient_network_with_sleep(action, &mut op, std::thread::sleep)
+}
+
+fn retry_transient_network_with_sleep<T, F, S>(
+  action: &str,
+  op: &mut F,
+  mut sleep_fn: S,
+) -> Result<T, FetchError>
+where
+  F: FnMut() -> Result<T, FetchError>,
+  S: FnMut(Duration),
+{
+  for attempt in 1..=TRANSIENT_RETRY_ATTEMPTS {
+    match op() {
+      Ok(value) => return Ok(value),
+      Err(err) if err.is_transient_network() && attempt < TRANSIENT_RETRY_ATTEMPTS => {
+        emit_progress(&format!(
+          "Transient fetch failure while {action}; retrying ({attempt}/{TRANSIENT_RETRY_ATTEMPTS})"
+        ));
+        sleep_fn(transient_retry_delay(attempt));
+      },
+      Err(err) if err.is_transient_network() => {
+        return Err(FetchError::TransientRetriesExhausted {
+          action: action.to_string(),
+          attempts: TRANSIENT_RETRY_ATTEMPTS,
+          source: Box::new(err),
+        });
+      },
+      Err(err) => return Err(err),
+    }
+  }
+
+  unreachable!("retry loop must return on success or terminal failure")
+}
+
+fn transient_retry_delay(attempt: usize) -> Duration {
+  let millis = match attempt {
+    0 | 1 => 100,
+    2 => 250,
+    _ => 500,
+  };
+  Duration::from_millis(millis)
 }
 
 fn run_git_dynamic(
@@ -476,6 +530,13 @@ pub enum FetchError {
   },
   #[error("offline mode blocks {action} from `{url}`")]
   OfflineNetworkDisabled { action: String, url: String },
+  #[error("transient network failures while {action} after {attempts} attempts: {source}")]
+  TransientRetriesExhausted {
+    action: String,
+    attempts: usize,
+    #[source]
+    source: Box<FetchError>,
+  },
 }
 
 impl FetchError {
@@ -485,6 +546,48 @@ impl FetchError {
 
   pub fn is_offline_network_disabled(&self) -> bool {
     matches!(self, Self::OfflineNetworkDisabled { .. })
+  }
+
+  pub fn is_transient_network(&self) -> bool {
+    match self {
+      Self::Http(err) => err.is_timeout() || err.is_connect() || err.is_request(),
+      Self::SpawnGit { source, .. } => matches!(
+        source.kind(),
+        std::io::ErrorKind::TimedOut
+          | std::io::ErrorKind::ConnectionAborted
+          | std::io::ErrorKind::ConnectionReset
+          | std::io::ErrorKind::NotConnected
+          | std::io::ErrorKind::Interrupted
+          | std::io::ErrorKind::UnexpectedEof
+          | std::io::ErrorKind::WouldBlock
+          | std::io::ErrorKind::BrokenPipe
+      ),
+      Self::GitFailed { stderr, .. } => {
+        let stderr = stderr.to_ascii_lowercase();
+        [
+          "connection reset",
+          "timed out",
+          "timeout",
+          "could not resolve host",
+          "failed to connect",
+          "network is unreachable",
+          "remote end hung up unexpectedly",
+          "early eof",
+          "connection was forcibly closed",
+          "tls",
+        ]
+        .iter()
+        .any(|needle| stderr.contains(needle))
+      },
+      Self::TransientRetriesExhausted { .. } => false,
+      Self::OfflineCacheMiss { .. }
+      | Self::OfflineRevisionUnavailable { .. }
+      | Self::OfflineNetworkDisabled { .. }
+      | Self::GlobalCache(_)
+      | Self::Io { .. }
+      | Self::Runtime(_)
+      | Self::TaskJoin(_) => false,
+    }
   }
 }
 
@@ -496,7 +599,7 @@ mod tests {
   use flate2::write::GzEncoder;
   use tempfile::TempDir;
 
-  use super::download_and_extract_tar_gz;
+  use super::{FetchError, download_and_extract_tar_gz, retry_transient_network_with_sleep};
 
   #[test]
   fn downloads_and_extracts_tar_gz_from_mock_http_server() {
@@ -512,6 +615,82 @@ mod tests {
     mock.assert();
     assert!(temp.path().join("fixture").join("include").join("demo.hpp").is_file());
     assert!(temp.path().join("fixture").join("README.md").is_file());
+  }
+
+  #[test]
+  fn retry_policy_retries_transient_errors_and_succeeds() {
+    let mut attempts = 0usize;
+    let value = retry_transient_network_with_sleep(
+      "fetching mirror",
+      &mut || {
+        attempts += 1;
+        if attempts < 3 {
+          Err(FetchError::GitFailed {
+            action: "fetching mirror".to_string(),
+            status: Some(128),
+            stdout: String::new(),
+            stderr: "fatal: Connection reset by peer".to_string(),
+          })
+        } else {
+          Ok("ok")
+        }
+      },
+      |_| {},
+    )
+    .expect("retry should succeed");
+
+    assert_eq!(value, "ok");
+    assert_eq!(attempts, 3);
+  }
+
+  #[test]
+  fn retry_policy_does_not_retry_non_transient_errors() {
+    let mut attempts = 0usize;
+    let err = retry_transient_network_with_sleep(
+      "cloning mirror",
+      &mut || {
+        attempts += 1;
+        Err::<(), _>(FetchError::GitFailed {
+          action: "cloning mirror".to_string(),
+          status: Some(128),
+          stdout: String::new(),
+          stderr: "fatal: repository not found".to_string(),
+        })
+      },
+      |_| {},
+    )
+    .expect_err("non-transient error should not retry");
+
+    assert!(matches!(err, FetchError::GitFailed { .. }));
+    assert_eq!(attempts, 1);
+  }
+
+  #[test]
+  fn retry_policy_returns_stable_error_when_retries_exhausted() {
+    let mut attempts = 0usize;
+    let err = retry_transient_network_with_sleep(
+      "fetching mirror",
+      &mut || {
+        attempts += 1;
+        Err::<(), _>(FetchError::GitFailed {
+          action: "fetching mirror".to_string(),
+          status: Some(128),
+          stdout: String::new(),
+          stderr: "fatal: operation timed out".to_string(),
+        })
+      },
+      |_| {},
+    )
+    .expect_err("expected retry exhaustion");
+
+    match err {
+      FetchError::TransientRetriesExhausted { attempts: got_attempts, .. } => {
+        assert_eq!(got_attempts, 3)
+      },
+      other => panic!("unexpected error variant: {other}"),
+    }
+    assert_eq!(attempts, 3);
+    assert!(err.to_string().contains("after 3 attempts"));
   }
 
   fn build_fixture_tar_gz() -> Vec<u8> {
