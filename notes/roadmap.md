@@ -9,6 +9,7 @@ Archived milestone (Phase 1–6):
 ## Current Status
 
 - Roadmap umbrella tracker: [#13](https://github.com/harnesslabs/joy/issues/13)
+- Umbrella tracker status: open (only Phase 10 / Windows MSVC parity remains deferred)
 - Current phase: Phase 10 (`Windows MSVC Parity`) is deferred by choice while GNU Windows remains supported
 - Current phase tracker: [#17](https://github.com/harnesslabs/joy/issues/17) (deferred / open)
 - Completed phases in this wave: 7, 8, 9, 11, 12, 13, 14
@@ -46,7 +47,7 @@ Execution order when Windows MSVC parity resumes:
 - Phase 11 tracker [#18](https://github.com/harnesslabs/joy/issues/18) (closed): `#42`, `#43`, `#44`, `#45`, `#46`
 - Phase 12 tracker [#19](https://github.com/harnesslabs/joy/issues/19) (closed): `#47`, `#48`, `#49`, `#50`
 - Phase 13 tracker [#20](https://github.com/harnesslabs/joy/issues/20) (closed): `#51`, `#52`, `#53`, `#54`
-- Phase 14 tracker [#21](https://github.com/harnesslabs/joy/issues/21) (pending close): `#55`, `#56`, `#57`, `#58`
+- Phase 14 tracker [#21](https://github.com/harnesslabs/joy/issues/21) (closed): `#55`, `#56`, `#57`, `#58`
 
 ## Locked Roadmap Priorities
 
