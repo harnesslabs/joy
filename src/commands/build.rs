@@ -147,6 +147,7 @@ pub(crate) fn build_project(options: BuildOptions) -> Result<BuildExecution, Joy
   })?;
   let native_link =
     prepare_compiled_dependencies(&manifest, &env_layout.lib_dir, &toolchain, profile)?;
+  validate_locked_package_metadata_if_needed(&lock_plan, &native_link.lockfile_packages)?;
   refresh_install_index(&env_layout, &manifest, &native_link)?;
 
   let spec = NinjaBuildSpec {
@@ -598,9 +599,10 @@ fn refresh_install_index(
     .map_err(|err| JoyError::new("build", "state_index_error", err.to_string(), 1))
 }
 
-#[derive(Debug, Clone, Copy)]
+#[derive(Debug, Clone)]
 struct LockfilePlan {
   write_after_build: bool,
+  locked_existing: Option<lockfile::Lockfile>,
 }
 
 fn write_lockfile_if_needed(
@@ -623,6 +625,44 @@ fn write_lockfile_if_needed(
     .save(lockfile_path)
     .map_err(|err| JoyError::new("build", "lockfile_write_failed", err.to_string(), 1))?;
   Ok(true)
+}
+
+fn validate_locked_package_metadata_if_needed(
+  lock_plan: &LockfilePlan,
+  expected_packages: &[lockfile::LockedPackage],
+) -> Result<(), JoyError> {
+  let Some(lock) = lock_plan.locked_existing.as_ref() else {
+    return Ok(());
+  };
+
+  if !expected_packages.is_empty() && lock.packages.is_empty() {
+    return Err(JoyError::new(
+      "build",
+      "lockfile_incomplete",
+      "lockfile package metadata is missing for current dependencies; rerun with --update-lock",
+      1,
+    ));
+  }
+
+  let mut expected = expected_packages.to_vec();
+  sort_locked_packages(&mut expected);
+  let mut actual = lock.packages.clone();
+  sort_locked_packages(&mut actual);
+
+  if actual != expected {
+    return Err(JoyError::new(
+      "build",
+      "lockfile_mismatch",
+      "lockfile package metadata does not match resolved dependency graph; rerun with --update-lock",
+      1,
+    ));
+  }
+
+  Ok(())
+}
+
+fn sort_locked_packages(packages: &mut [lockfile::LockedPackage]) {
+  packages.sort_by(|a, b| a.id.cmp(&b.id).then_with(|| a.requested_rev.cmp(&b.requested_rev)));
 }
 
 fn evaluate_lockfile_plan(
@@ -669,7 +709,7 @@ fn evaluate_lockfile_plan(
         1,
       ));
     }
-    return Ok(LockfilePlan { write_after_build: false });
+    return Ok(LockfilePlan { write_after_build: false, locked_existing: Some(lock) });
   }
 
   if let Some(ref lock) = lock
@@ -685,7 +725,10 @@ fn evaluate_lockfile_plan(
   }
 
   let stale = lock.as_ref().is_some_and(|l| l.manifest_hash != manifest_hash);
-  Ok(LockfilePlan { write_after_build: options.update_lock || !lock_exists || stale })
+  Ok(LockfilePlan {
+    write_after_build: options.update_lock || !lock_exists || stale,
+    locked_existing: None,
+  })
 }
 
 fn map_toolchain_error(err: toolchain::ToolchainError) -> JoyError {

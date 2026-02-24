@@ -1,6 +1,6 @@
 ---
 date: 2026-02-24
-commit: pending
+commit: 4174494
 tags:
   - lockfile
   - reproducibility
@@ -38,4 +38,3 @@ related_components:
 ## Fallback Plan
 
 If populated lockfile entries cause unexpected compatibility issues, keep manifest-hash lockfile enforcement intact and temporarily gate package population behind a focused revert of the `src/commands/build.rs` lockfile assembly changes while preserving the new resolver dependency helper and test scaffolding for future reintroduction.
-

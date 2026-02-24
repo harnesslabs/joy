@@ -18,6 +18,14 @@ fn read_lockfile_toml(temp: &TempDir) -> toml::Value {
   toml::from_str(&raw).expect("parse joy.lock")
 }
 
+fn write_lockfile_toml(temp: &TempDir, lock: &toml::Value) {
+  let mut raw = toml::to_string_pretty(lock).expect("serialize joy.lock");
+  if !raw.ends_with('\n') {
+    raw.push('\n');
+  }
+  fs::write(temp.path().join("joy.lock"), raw).expect("write joy.lock");
+}
+
 fn init_project(temp: &TempDir) {
   let mut cmd = cargo_bin_cmd!("joy");
   cmd.current_dir(temp.path()).arg("init").assert().success();
@@ -578,4 +586,83 @@ fn build_populates_lockfile_package_records_for_header_only_dependency() {
   assert_eq!(pkg["deps"].as_array().map(Vec::len), Some(0));
   assert_eq!(pkg["libs"].as_array().map(Vec::len), Some(0));
   assert_eq!(pkg["abi_hash"].as_str(), Some(""));
+}
+
+#[test]
+fn build_locked_rejects_incomplete_and_mismatched_lockfile_package_metadata() {
+  if !build_tools_available_for_test() {
+    eprintln!("skipping test: compiler/ninja not available");
+    return;
+  }
+
+  let temp = TempDir::new().expect("tempdir");
+  init_project(&temp);
+  let Some((remote_base, _bare_repo, _expected_commit)) =
+    setup_local_github_remote("nlohmann/json")
+  else {
+    return;
+  };
+  let joy_home = temp.path().join("joy-home");
+
+  let mut add = cargo_bin_cmd!("joy");
+  add
+    .current_dir(temp.path())
+    .env("JOY_GITHUB_BASE", remote_base.path())
+    .env("JOY_HOME", &joy_home)
+    .args(["add", "nlohmann/json"])
+    .assert()
+    .success();
+
+  let mut build = cargo_bin_cmd!("joy");
+  build
+    .current_dir(temp.path())
+    .env("JOY_GITHUB_BASE", remote_base.path())
+    .env("JOY_HOME", &joy_home)
+    .args(["build"])
+    .assert()
+    .success();
+
+  let mut incomplete = read_lockfile_toml(&temp);
+  incomplete["packages"] = toml::Value::Array(Vec::new());
+  write_lockfile_toml(&temp, &incomplete);
+
+  let mut locked_incomplete = cargo_bin_cmd!("joy");
+  let incomplete_assert = locked_incomplete
+    .current_dir(temp.path())
+    .env("JOY_GITHUB_BASE", remote_base.path())
+    .env("JOY_HOME", &joy_home)
+    .args(["--json", "build", "--locked"])
+    .assert()
+    .failure();
+  let incomplete_payload = json_stdout(&incomplete_assert.get_output().stdout);
+  assert_eq!(incomplete_payload["error"]["code"], "lockfile_incomplete");
+
+  let mut refresh = cargo_bin_cmd!("joy");
+  refresh
+    .current_dir(temp.path())
+    .env("JOY_GITHUB_BASE", remote_base.path())
+    .env("JOY_HOME", &joy_home)
+    .args(["build", "--update-lock"])
+    .assert()
+    .success();
+
+  let mut mismatch = read_lockfile_toml(&temp);
+  let packages = mismatch["packages"].as_array_mut().expect("packages array");
+  let pkg = packages
+    .iter_mut()
+    .find(|pkg| pkg.get("id").and_then(|v| v.as_str()) == Some("nlohmann/json"))
+    .expect("nlohmann package");
+  pkg["resolved_commit"] = toml::Value::String("deadbeef".to_string());
+  write_lockfile_toml(&temp, &mismatch);
+
+  let mut locked_mismatch = cargo_bin_cmd!("joy");
+  let mismatch_assert = locked_mismatch
+    .current_dir(temp.path())
+    .env("JOY_GITHUB_BASE", remote_base.path())
+    .env("JOY_HOME", &joy_home)
+    .args(["--json", "build", "--locked"])
+    .assert()
+    .failure();
+  let mismatch_payload = json_stdout(&mismatch_assert.get_output().stdout);
+  assert_eq!(mismatch_payload["error"]["code"], "lockfile_mismatch");
 }
