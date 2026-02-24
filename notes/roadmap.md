@@ -4,10 +4,10 @@ Source: user-provided master roadmap (Feb 24, 2026) and the decision-complete ex
 
 ## Current Status
 
-- Current phase: Phase 3 fetcher & header-only ecosystem (in progress)
+- Current phase: Phase 4 compiler discovery & local build engine (next)
 - Active branch: `codex/phase3-fetcher-header-only`
-- Last completed milestone: Phase 3 archive fetch backend + mock HTTP tests (`ba47dfc`)
-- Current focus: finish Phase 3 cross-platform link fallback assertions, then start Phase 4 toolchain discovery
+- Last completed milestone: Phase 3 linker copy-fallback coverage (`9d7a05d`)
+- Current focus: start Phase 4 toolchain discovery (`ninja`, `clang++`/`g++`) and version parsing
 
 ## Locked Decisions
 
@@ -23,7 +23,7 @@ Source: user-provided master roadmap (Feb 24, 2026) and the decision-complete ex
 - [x] Phase 0: prep/bootstrap (tracker, justfile, crate split, baseline deps/tests)
 - [x] Phase 1: CLI foundation & scaffolding
 - [x] Phase 2: manifest parsing & local `.joy` environment
-- [ ] Phase 3: fetcher & header-only packages
+- [x] Phase 3: fetcher & header-only packages
 - [ ] Phase 4: compiler discovery & local build engine
 - [ ] Phase 5: dependency graph & compiled libraries
 - [ ] Phase 6: lockfiles & production polish
@@ -40,7 +40,10 @@ Source: user-provided master roadmap (Feb 24, 2026) and the decision-complete ex
 - [x] Phase 3 cache/fetch core commit (`68f879a`) - git mirror cache + commit materialization
 - [x] Phase 3 header linking + `joy add` integration commit (`68f879a`) - `.joy/include/deps/<slug>` install path
 - [x] Phase 3 archive fetch backend + mockito tests (`ba47dfc`)
-- [ ] Phase 3 cross-platform symlink/copy fallback assertions
+- [x] Phase 3 cross-platform symlink/copy fallback assertions (`9d7a05d`) - explicit copy-path coverage
+- [ ] Phase 4 toolchain discovery
+- [ ] Phase 4 ninja build file generation
+- [ ] Phase 4 `joy build`/`joy run` execution
 
 ## Notes Convention
 
