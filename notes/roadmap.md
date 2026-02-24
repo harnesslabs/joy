@@ -4,10 +4,10 @@ Source: user-provided master roadmap (Feb 24, 2026) and the decision-complete ex
 
 ## Current Status
 
-- Current phase: Phase 6 lockfiles & production polish (in progress)
+- Current phase: Phase 6 lockfiles & production polish (complete)
 - Active branch: `codex/phase6-lockfiles-polish`
-- Last completed milestone: Phase 6 parallel dependency prefetch (`038afdf`)
-- Current focus: CI hardening for compiled-dependency coverage and final polish
+- Last completed milestone: Phase 6 CI hardening (`2911d2b`)
+- Current focus: roadmap complete; optional follow-ups are incremental polish and broader real-world recipe coverage
 
 ## Locked Decisions
 
@@ -26,7 +26,7 @@ Source: user-provided master roadmap (Feb 24, 2026) and the decision-complete ex
 - [x] Phase 3: fetcher & header-only packages
 - [x] Phase 4: compiler discovery & local build engine
 - [x] Phase 5: dependency graph & compiled libraries
-- [ ] Phase 6: lockfiles & production polish
+- [x] Phase 6: lockfiles & production polish
 
 ## Immediate Milestones (Execution Order)
 
@@ -65,7 +65,12 @@ Source: user-provided master roadmap (Feb 24, 2026) and the decision-complete ex
 - [x] `joy.lock` core schema + manifest-hash enforcement in build/run (`4205f6e`)
 - [x] `.joy/state/install-index.json` tracking and orphan cleanup for tracked headers/libs (`0502b1a`)
 - [x] Parallelize fetch/extract work with bounded concurrency (`038afdf`)
-- [ ] CI hardening / compiled-dependency coverage job
+- [x] CI hardening / compiled-dependency coverage job (`2911d2b`)
+
+## Completion Notes
+
+- Major roadmap phases (1-6) are implemented end-to-end in this branch sequence.
+- Remaining work is iterative quality expansion: richer lockfile package population/validation, broader recipe set, and additional cross-platform/runtime edge-case hardening.
 
 ## Notes Convention
 
