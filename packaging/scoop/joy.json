@@ -1,0 +1,15 @@
+{
+  "version": "0.1.0",
+  "description": "Native C++ package and build manager with a cargo-like CLI.",
+  "homepage": "https://github.com/harnesslabs/joy",
+  "license": "UNLICENSED",
+  "url": "https://github.com/harnesslabs/joy/releases/download/v0.1.0/joy-v0.1.0-x86_64-pc-windows-gnu.zip",
+  "hash": "REPLACE_WITH_WINDOWS_X86_64_GNU_SHA256",
+  "bin": "joy.exe",
+  "checkver": {
+    "github": "https://github.com/harnesslabs/joy"
+  },
+  "autoupdate": {
+    "url": "https://github.com/harnesslabs/joy/releases/download/v$version/joy-v$version-x86_64-pc-windows-gnu.zip"
+  }
+}

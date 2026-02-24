@@ -14,6 +14,10 @@ lint:
 recipe-check:
   cargo run --quiet -- recipe-check --json
 
+dist-metadata-check:
+  ruby -c packaging/homebrew/joy.rb
+  jq empty packaging/scoop/joy.json
+
 fmt-check:
   cargo fmt --all -- --check
   taplo fmt --check

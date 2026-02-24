@@ -31,6 +31,19 @@ jobs:
       - name: Validate bundled recipes
         run: cargo run --quiet -- recipe-check --json
 
+  distribution-metadata:
+    name: distribution-metadata
+    runs-on: ubuntu-latest
+    continue-on-error: true
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Validate Homebrew formula syntax
+        run: ruby -c packaging/homebrew/joy.rb
+
+      - name: Validate Scoop manifest JSON
+        run: jq empty packaging/scoop/joy.json
+
   format:
     name: fmt
     runs-on: ubuntu-latest
