@@ -104,3 +104,15 @@ Local checks must mirror CI closely enough that PR failures are rare and actiona
 * After pushing a PR update, you MUST inspect GitHub checks (`gh pr checks <PR_NUMBER>`). If any check fails, you MUST fetch the relevant logs and triage before reporting completion.
 * For CI failures, your default loop is: (1) identify failing job(s), (2) pull logs, (3) reproduce locally when feasible, (4) patch code/tests/workflow/justfile, (5) rerun local CI-parity checks, (6) push and re-check.
 * Non-portable or non-applicable checks (for example semver checks against an unrelated crates.io baseline) must be converted into explicit CI-pass/skip behavior with documented rationale rather than left as noisy red failures.
+
+### 8.2 Bug-Bash / Triage Mode (Mandatory When Asked)
+When the user asks for a bug hunt, UX audit, debugging sweep, or issue triage pass, switch into a bug-bash workflow instead of feature implementation.
+
+* **Primary deliverable:** GitHub issues (one issue per confirmed bug or UX improvement) with exact repro steps, expected vs actual behavior, and evidence.
+* **Tracker-first:** Create one umbrella tracker issue labeled `audit` and link every finding back to it.
+* **File-as-found:** Do not batch findings locally for too long. File each issue immediately after a reliable repro so details are not lost.
+* **Evidence-first:** Prefer real command repros (fresh temp dirs, fresh `JOY_HOME`, local fixtures, CI logs) over code inspection alone. Code inspection may be used to add likely root-cause notes after reproduction.
+* **CI evidence:** Open a temporary branch/PR (see branch prefix policy) to trigger CI and inspect `gh pr checks` / logs for cross-platform regressions. Keep the PR open during triage, then close it after the tracker is updated.
+* **Scope discipline:** Cover README flows first, then edge cases (invalid inputs, lockfile flags, missing tools, cache behaviors, JSON mode, repeat runs).
+* **No surprise fixes:** Unless the user explicitly asks for fixes in the same pass, do not patch product code while triaging. Capture issues and evidence instead.
+* **Process docs:** Follow `/Users/autoparallel/Code/joy/.codex/bug-bash-playbook.md` for the current commands, labels, issue template, and tracker update checklist.
