@@ -81,6 +81,13 @@ impl Manifest {
     }
   }
 
+  /// Remove a dependency entry by canonical package ID.
+  ///
+  /// Returns the removed spec if present.
+  pub fn remove_dependency(&mut self, package: &str) -> Option<DependencySpec> {
+    self.dependencies.remove(package)
+  }
+
   fn validate(&self) -> Result<(), ManifestError> {
     if self.project.name.trim().is_empty() {
       return Err(ManifestError::Validation("project.name must not be empty".into()));

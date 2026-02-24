@@ -13,6 +13,13 @@ fn json_stdout(output: &[u8]) -> Value {
   serde_json::from_slice(output).expect("valid json")
 }
 
+fn json_object_keys(value: &Value) -> Vec<String> {
+  let mut keys =
+    value.as_object().expect("json object").keys().map(ToString::to_string).collect::<Vec<_>>();
+  keys.sort();
+  keys
+}
+
 fn read_lockfile_toml(temp: &TempDir) -> toml::Value {
   let raw = fs::read_to_string(temp.path().join("joy.lock")).expect("read joy.lock");
   toml::from_str(&raw).expect("parse joy.lock")
@@ -102,6 +109,77 @@ fn setup_local_github_remote(package: &str) -> Option<(TempDir, PathBuf, String)
   .expect("set bare HEAD");
 
   Some((remote_base, bare_repo, commit))
+}
+
+fn setup_local_github_remote_two_commits(
+  package: &str,
+) -> Option<(TempDir, PathBuf, String, String)> {
+  if !git_is_available() {
+    eprintln!("skipping test: git is not available");
+    return None;
+  }
+
+  let mut parts = package.split('/');
+  let owner = parts.next().expect("owner");
+  let repo = parts.next().expect("repo");
+
+  let remote_base = TempDir::new().expect("remote base");
+  let work = TempDir::new().expect("work repo");
+  let bare_repo = remote_base.path().join(owner).join(format!("{repo}.git"));
+  fs::create_dir_all(bare_repo.parent().expect("bare parent")).expect("create bare parent");
+
+  run_git(Some(work.path()), ["init"]).expect("git init");
+  run_git(Some(work.path()), ["config", "user.email", "joy-tests@example.com"])
+    .expect("git config email");
+  run_git(Some(work.path()), ["config", "user.name", "Joy Tests"]).expect("git config name");
+  fs::create_dir_all(work.path().join("include").join("nlohmann")).expect("header dir");
+  fs::write(
+    work.path().join("include").join("nlohmann").join("json.hpp"),
+    "// header-only fixture v1\n",
+  )
+  .expect("write header v1");
+  run_git(Some(work.path()), ["add", "."]).expect("git add v1");
+  run_git(Some(work.path()), ["commit", "-m", "fixture v1"]).expect("git commit v1");
+  let commit1 = run_git_capture(Some(work.path()), ["rev-parse", "HEAD"]).expect("rev-parse v1");
+  let commit1 = commit1.trim().to_string();
+
+  run_git_owned(
+    None,
+    vec!["init".into(), "--bare".into(), bare_repo.to_string_lossy().into_owned()],
+  )
+  .expect("git init --bare");
+  run_git_owned(
+    Some(work.path()),
+    vec!["remote".into(), "add".into(), "origin".into(), bare_repo.to_string_lossy().into_owned()],
+  )
+  .expect("git remote add");
+  run_git(Some(work.path()), ["push", "origin", "HEAD:refs/heads/main"]).expect("git push v1");
+
+  fs::write(
+    work.path().join("include").join("nlohmann").join("json.hpp"),
+    "// header-only fixture v2\n",
+  )
+  .expect("write header v2");
+  fs::write(work.path().join("CHANGELOG.md"), "v2\n").expect("write changelog v2");
+  run_git(Some(work.path()), ["add", "."]).expect("git add v2");
+  run_git(Some(work.path()), ["commit", "-m", "fixture v2"]).expect("git commit v2");
+  let commit2 = run_git_capture(Some(work.path()), ["rev-parse", "HEAD"]).expect("rev-parse v2");
+  let commit2 = commit2.trim().to_string();
+  run_git(Some(work.path()), ["push", "origin", "HEAD:refs/heads/main"]).expect("git push v2");
+
+  run_git_owned(
+    None,
+    vec![
+      "--git-dir".into(),
+      bare_repo.to_string_lossy().into_owned(),
+      "symbolic-ref".into(),
+      "HEAD".into(),
+      "refs/heads/main".into(),
+    ],
+  )
+  .expect("set bare HEAD");
+
+  Some((remote_base, bare_repo, commit1, commit2))
 }
 
 fn setup_local_github_remote_fmt_fixture() -> Option<(TempDir, PathBuf, String)> {
@@ -1015,4 +1093,278 @@ fn run_frozen_uses_warm_cache_and_existing_lockfile() {
   assert_eq!(payload["data"]["lockfile_updated"], false);
   let stdout = payload["data"]["stdout"].as_str().expect("stdout");
   assert!(stdout.contains("Hello from joy!"));
+}
+
+#[test]
+fn remove_updates_manifest_cleans_headers_and_warns_stale_lockfile() {
+  let temp = TempDir::new().expect("tempdir");
+  init_project(&temp);
+  let Some((remote_base, _bare_repo, _commit)) = setup_local_github_remote("nlohmann/json") else {
+    return;
+  };
+  let joy_home = temp.path().join("joy-home");
+
+  let mut add = cargo_bin_cmd!("joy");
+  add
+    .current_dir(temp.path())
+    .env("JOY_GITHUB_BASE", remote_base.path())
+    .env("JOY_HOME", &joy_home)
+    .args(["add", "nlohmann/json"])
+    .assert()
+    .success();
+
+  fs::write(temp.path().join("joy.lock"), "version = 1\n").expect("seed lockfile");
+
+  let mut remove = cargo_bin_cmd!("joy");
+  let assert = remove
+    .current_dir(temp.path())
+    .env("JOY_HOME", &joy_home)
+    .args(["--json", "remove", "nlohmann/json"])
+    .assert()
+    .success();
+  let payload = json_stdout(&assert.get_output().stdout);
+  assert_eq!(payload["command"], "remove");
+  assert_eq!(payload["ok"], true);
+  assert_eq!(payload["data"]["removed"], true);
+  assert!(
+    payload["data"]["warnings"]
+      .as_array()
+      .expect("warnings array")
+      .iter()
+      .any(|w| w.as_str().is_some_and(|msg| msg.contains("joy.lock"))),
+    "expected stale lockfile warning"
+  );
+
+  let manifest = fs::read_to_string(temp.path().join("joy.toml")).expect("manifest");
+  assert!(!manifest.contains("\"nlohmann/json\""));
+  assert!(!temp.path().join(".joy/include/deps/nlohmann_json").exists());
+}
+
+#[test]
+fn remove_rejects_frozen_mode() {
+  let temp = TempDir::new().expect("tempdir");
+  init_project(&temp);
+
+  let mut cmd = cargo_bin_cmd!("joy");
+  let assert = cmd
+    .current_dir(temp.path())
+    .args(["--json", "--frozen", "remove", "nlohmann/json"])
+    .assert()
+    .failure();
+  let payload = json_stdout(&assert.get_output().stdout);
+  assert_eq!(payload["command"], "remove");
+  assert_eq!(payload["error"]["code"], "frozen_disallows_remove");
+}
+
+#[test]
+fn update_rejects_frozen_mode() {
+  let temp = TempDir::new().expect("tempdir");
+  init_project(&temp);
+
+  let mut cmd = cargo_bin_cmd!("joy");
+  let assert =
+    cmd.current_dir(temp.path()).args(["--json", "--frozen", "update"]).assert().failure();
+  let payload = json_stdout(&assert.get_output().stdout);
+  assert_eq!(payload["command"], "update");
+  assert_eq!(payload["error"]["code"], "frozen_disallows_update");
+}
+
+#[test]
+fn update_changes_manifest_rev_and_warns_stale_lockfile() {
+  let temp = TempDir::new().expect("tempdir");
+  init_project(&temp);
+  let Some((remote_base, _bare_repo, _commit1, commit2)) =
+    setup_local_github_remote_two_commits("nlohmann/json")
+  else {
+    return;
+  };
+  let joy_home = temp.path().join("joy-home");
+
+  let mut add = cargo_bin_cmd!("joy");
+  add
+    .current_dir(temp.path())
+    .env("JOY_GITHUB_BASE", remote_base.path())
+    .env("JOY_HOME", &joy_home)
+    .args(["add", "nlohmann/json"])
+    .assert()
+    .success();
+
+  fs::write(temp.path().join("joy.lock"), "version = 1\n").expect("seed lockfile");
+
+  let mut update = cargo_bin_cmd!("joy");
+  let assert = update
+    .current_dir(temp.path())
+    .env("JOY_GITHUB_BASE", remote_base.path())
+    .env("JOY_HOME", &joy_home)
+    .args(["--json", "update", "nlohmann/json", "--rev", &commit2])
+    .assert()
+    .success();
+  let payload = json_stdout(&assert.get_output().stdout);
+  assert_eq!(payload["command"], "update");
+  assert_eq!(payload["data"]["manifest_changed"], true);
+  assert_eq!(payload["data"]["updated_count"], 1);
+  assert_eq!(payload["data"]["updated"][0]["package"], "nlohmann/json");
+  assert_eq!(payload["data"]["updated"][0]["rev"], commit2);
+  assert_eq!(payload["data"]["updated"][0]["resolved_commit"], commit2);
+  assert!(
+    payload["data"]["warnings"]
+      .as_array()
+      .expect("warnings array")
+      .iter()
+      .any(|w| w.as_str().is_some_and(|msg| msg.contains("joy.lock"))),
+    "expected stale lockfile warning"
+  );
+
+  let manifest = fs::read_to_string(temp.path().join("joy.toml")).expect("manifest");
+  assert!(manifest.contains(&format!("rev = \"{commit2}\"")));
+}
+
+#[test]
+fn tree_outputs_deterministic_json_and_human_for_direct_dependency() {
+  let temp = TempDir::new().expect("tempdir");
+  init_project(&temp);
+  let Some((remote_base, _bare_repo, expected_commit)) = setup_local_github_remote("nlohmann/json")
+  else {
+    return;
+  };
+  let joy_home = temp.path().join("joy-home");
+
+  let mut add = cargo_bin_cmd!("joy");
+  add
+    .current_dir(temp.path())
+    .env("JOY_GITHUB_BASE", remote_base.path())
+    .env("JOY_HOME", &joy_home)
+    .args(["add", "nlohmann/json"])
+    .assert()
+    .success();
+
+  let mut tree_json = cargo_bin_cmd!("joy");
+  let json_assert = tree_json
+    .current_dir(temp.path())
+    .env("JOY_GITHUB_BASE", remote_base.path())
+    .env("JOY_HOME", &joy_home)
+    .args(["--json", "tree"])
+    .assert()
+    .success();
+  let payload = json_stdout(&json_assert.get_output().stdout);
+  assert_eq!(payload["command"], "tree");
+  assert_eq!(payload["ok"], true);
+  assert_eq!(payload["data"]["roots"], serde_json::json!(["nlohmann/json"]));
+  let packages = payload["data"]["packages"].as_array().expect("packages array");
+  assert_eq!(packages.len(), 1);
+  assert_eq!(packages[0]["id"], "nlohmann/json");
+  assert_eq!(packages[0]["direct"], true);
+  assert_eq!(packages[0]["header_only"], true);
+  assert_eq!(packages[0]["resolved_commit"], expected_commit);
+  assert_eq!(packages[0]["deps"], serde_json::json!([]));
+
+  let mut tree_human = cargo_bin_cmd!("joy");
+  let human_assert = tree_human
+    .current_dir(temp.path())
+    .env("JOY_GITHUB_BASE", remote_base.path())
+    .env("JOY_HOME", &joy_home)
+    .arg("tree")
+    .assert()
+    .success();
+  let stdout = String::from_utf8_lossy(&human_assert.get_output().stdout);
+  assert!(stdout.contains("- nlohmann/json"));
+  assert!(stdout.contains(expected_commit.as_str()));
+}
+
+#[test]
+fn dependency_command_json_payload_shapes_are_stable() {
+  let temp = TempDir::new().expect("tempdir");
+  init_project(&temp);
+  let Some((remote_base, _bare_repo, _commit)) = setup_local_github_remote("nlohmann/json") else {
+    return;
+  };
+  let joy_home = temp.path().join("joy-home");
+
+  let mut add = cargo_bin_cmd!("joy");
+  let add_assert = add
+    .current_dir(temp.path())
+    .env("JOY_GITHUB_BASE", remote_base.path())
+    .env("JOY_HOME", &joy_home)
+    .args(["--json", "add", "nlohmann/json"])
+    .assert()
+    .success();
+  let add_payload = json_stdout(&add_assert.get_output().stdout);
+  assert_eq!(
+    json_object_keys(&add_payload["data"]),
+    vec![
+      "cache_hit",
+      "cache_source_dir",
+      "changed",
+      "created_env_paths",
+      "header_link_kind",
+      "header_link_path",
+      "header_root",
+      "manifest_path",
+      "package",
+      "project_root",
+      "remote_url",
+      "resolved_commit",
+      "rev",
+      "state_index_path",
+      "warnings"
+    ]
+  );
+
+  let mut tree = cargo_bin_cmd!("joy");
+  let tree_assert = tree
+    .current_dir(temp.path())
+    .env("JOY_GITHUB_BASE", remote_base.path())
+    .env("JOY_HOME", &joy_home)
+    .args(["--json", "tree"])
+    .assert()
+    .success();
+  let tree_payload = json_stdout(&tree_assert.get_output().stdout);
+  assert_eq!(
+    json_object_keys(&tree_payload["data"]),
+    vec!["manifest_path", "packages", "project_root", "roots"]
+  );
+
+  let mut update = cargo_bin_cmd!("joy");
+  let update_assert = update
+    .current_dir(temp.path())
+    .env("JOY_GITHUB_BASE", remote_base.path())
+    .env("JOY_HOME", &joy_home)
+    .args(["--json", "update", "nlohmann/json"])
+    .assert()
+    .success();
+  let update_payload = json_stdout(&update_assert.get_output().stdout);
+  assert_eq!(
+    json_object_keys(&update_payload["data"]),
+    vec![
+      "manifest_changed",
+      "manifest_path",
+      "project_root",
+      "state_index_path",
+      "updated",
+      "updated_count",
+      "warnings"
+    ]
+  );
+
+  let mut remove = cargo_bin_cmd!("joy");
+  let remove_assert = remove
+    .current_dir(temp.path())
+    .env("JOY_HOME", &joy_home)
+    .args(["--json", "remove", "nlohmann/json"])
+    .assert()
+    .success();
+  let remove_payload = json_stdout(&remove_assert.get_output().stdout);
+  assert_eq!(
+    json_object_keys(&remove_payload["data"]),
+    vec![
+      "header_link_path",
+      "header_link_removed",
+      "manifest_path",
+      "package",
+      "project_root",
+      "removed",
+      "state_index_path",
+      "warnings"
+    ]
+  );
 }

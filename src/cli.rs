@@ -45,6 +45,12 @@ pub enum Commands {
   Init(InitArgs),
   /// Add a package dependency to the current project.
   Add(AddArgs),
+  /// Remove a package dependency from the current project.
+  Remove(RemoveArgs),
+  /// Refresh dependency sources and optionally update exact refs.
+  Update(UpdateArgs),
+  /// Show the resolved dependency graph.
+  Tree(TreeArgs),
   /// Build the current project.
   Build(BuildArgs),
   /// Materialize dependencies and lockfile state without compiling the final binary.
@@ -72,6 +78,21 @@ pub struct AddArgs {
   #[arg(long)]
   pub rev: Option<String>,
 }
+
+#[derive(Debug, Args)]
+pub struct RemoveArgs {
+  pub package: String,
+}
+
+#[derive(Debug, Args)]
+pub struct UpdateArgs {
+  pub package: Option<String>,
+  #[arg(long)]
+  pub rev: Option<String>,
+}
+
+#[derive(Debug, Args)]
+pub struct TreeArgs {}
 
 #[derive(Debug, Args)]
 pub struct BuildArgs {
@@ -162,6 +183,36 @@ mod tests {
         assert_eq!(args.rev.as_deref(), Some("v3.11.3"));
       },
       other => panic!("expected add, got {other:?}"),
+    }
+  }
+
+  #[test]
+  fn parses_remove_command() {
+    let cli = Cli::parse_from(["joy", "remove", "nlohmann/json"]);
+    match cli.command {
+      Commands::Remove(args) => assert_eq!(args.package, "nlohmann/json"),
+      other => panic!("expected remove, got {other:?}"),
+    }
+  }
+
+  #[test]
+  fn parses_update_with_optional_package_and_rev() {
+    let cli = Cli::parse_from(["joy", "update", "nlohmann/json", "--rev", "v1.2.3"]);
+    match cli.command {
+      Commands::Update(args) => {
+        assert_eq!(args.package.as_deref(), Some("nlohmann/json"));
+        assert_eq!(args.rev.as_deref(), Some("v1.2.3"));
+      },
+      other => panic!("expected update, got {other:?}"),
+    }
+  }
+
+  #[test]
+  fn parses_tree_command() {
+    let cli = Cli::parse_from(["joy", "tree"]);
+    match cli.command {
+      Commands::Tree(_) => {},
+      other => panic!("expected tree, got {other:?}"),
     }
   }
 

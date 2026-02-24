@@ -2,8 +2,11 @@ pub mod add;
 pub mod build;
 pub mod init;
 pub mod new;
+pub mod remove;
 pub mod run;
 pub mod sync;
+pub mod tree;
+pub mod update;
 
 use serde_json::Value;
 use std::fs;
@@ -34,6 +37,9 @@ pub fn dispatch(command: Commands, runtime: RuntimeFlags) -> Result<CommandOutpu
     Commands::New(args) => new::handle(args),
     Commands::Init(args) => init::handle(args),
     Commands::Add(args) => add::handle(args, runtime),
+    Commands::Remove(args) => remove::handle(args, runtime),
+    Commands::Update(args) => update::handle(args, runtime),
+    Commands::Tree(args) => tree::handle(args, runtime),
     Commands::Build(args) => build::handle(args, runtime),
     Commands::Sync(args) => sync::handle(args, runtime),
     Commands::Run(args) => run::handle(args, runtime),
