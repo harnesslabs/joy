@@ -3,6 +3,7 @@ pub mod build;
 pub mod init;
 pub mod new;
 pub mod run;
+pub mod sync;
 
 use serde_json::Value;
 use std::fs;
@@ -34,6 +35,7 @@ pub fn dispatch(command: Commands) -> Result<CommandOutput, JoyError> {
     Commands::Init(args) => init::handle(args),
     Commands::Add(args) => add::handle(args),
     Commands::Build(args) => build::handle(args),
+    Commands::Sync(args) => sync::handle(args),
     Commands::Run(args) => run::handle(args),
   }
 }

@@ -29,6 +29,8 @@ pub enum Commands {
   Add(AddArgs),
   /// Build the current project.
   Build(BuildArgs),
+  /// Materialize dependencies and lockfile state without compiling the final binary.
+  Sync(SyncArgs),
   /// Build and run the current project.
   Run(RunArgs),
 }
@@ -55,6 +57,16 @@ pub struct AddArgs {
 
 #[derive(Debug, Args)]
 pub struct BuildArgs {
+  #[arg(long)]
+  pub release: bool,
+  #[arg(long)]
+  pub locked: bool,
+  #[arg(long = "update-lock")]
+  pub update_lock: bool,
+}
+
+#[derive(Debug, Args)]
+pub struct SyncArgs {
   #[arg(long)]
   pub release: bool,
   #[arg(long)]
@@ -144,6 +156,19 @@ mod tests {
         assert_eq!(args.args, vec!["one", "two", "--flag"]);
       },
       other => panic!("expected run, got {other:?}"),
+    }
+  }
+
+  #[test]
+  fn parses_sync_flags() {
+    let cli = Cli::parse_from(["joy", "sync", "--release", "--locked", "--update-lock"]);
+    match cli.command {
+      Commands::Sync(args) => {
+        assert!(args.release);
+        assert!(args.locked);
+        assert!(args.update_lock);
+      },
+      other => panic!("expected sync, got {other:?}"),
     }
   }
 }

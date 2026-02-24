@@ -676,3 +676,69 @@ fn build_locked_rejects_incomplete_and_mismatched_lockfile_package_metadata() {
       .is_some_and(|msg| msg.contains("--update-lock") && msg.contains("joy build --update-lock"))
   );
 }
+
+#[test]
+fn sync_materializes_header_only_dependencies_and_lockfile_without_app_build() {
+  let temp = TempDir::new().expect("tempdir");
+  init_project(&temp);
+  let Some((remote_base, _bare_repo, expected_commit)) = setup_local_github_remote("nlohmann/json")
+  else {
+    return;
+  };
+  let joy_home = temp.path().join("joy-home");
+
+  let mut add = cargo_bin_cmd!("joy");
+  add
+    .current_dir(temp.path())
+    .env("JOY_GITHUB_BASE", remote_base.path())
+    .env("JOY_HOME", &joy_home)
+    .args(["add", "nlohmann/json"])
+    .assert()
+    .success();
+
+  let mut sync = cargo_bin_cmd!("joy");
+  let sync_assert = sync
+    .current_dir(temp.path())
+    .env("JOY_GITHUB_BASE", remote_base.path())
+    .env("JOY_HOME", &joy_home)
+    .args(["--json", "sync"])
+    .assert()
+    .success();
+  let payload = json_stdout(&sync_assert.get_output().stdout);
+
+  assert_eq!(payload["ok"], true);
+  assert_eq!(payload["command"], "sync");
+  assert_eq!(payload["data"]["lockfile_updated"], true);
+  assert_eq!(payload["data"]["toolchain"], Value::Null);
+  assert_eq!(payload["data"]["compiled_dependencies_built"], serde_json::json!([]));
+  assert!(
+    payload["data"]["include_dirs"]
+      .as_array()
+      .expect("include_dirs array")
+      .iter()
+      .any(|v| v.as_str().is_some_and(|s| s.ends_with("/.joy/include/deps/nlohmann_json"))),
+    "expected staged header include dir in sync output"
+  );
+
+  assert!(temp.path().join("joy.lock").is_file(), "expected joy.lock to be written");
+  let lock = read_lockfile_toml(&temp);
+  let pkg = lock["packages"]
+    .as_array()
+    .expect("packages")
+    .iter()
+    .find(|pkg| pkg.get("id").and_then(|v| v.as_str()) == Some("nlohmann/json"))
+    .expect("nlohmann/json lock package");
+  assert_eq!(pkg["resolved_commit"].as_str(), Some(expected_commit.as_str()));
+
+  assert!(
+    !temp.path().join(".joy/build/build.ninja").exists(),
+    "sync should not write build.ninja"
+  );
+  let project_name = temp.path().file_name().and_then(|name| name.to_str()).expect("temp name");
+  let binary_name =
+    if cfg!(windows) { format!("{project_name}.exe") } else { project_name.to_string() };
+  assert!(
+    !temp.path().join(".joy/bin").join(binary_name).exists(),
+    "sync should not compile or emit app binary"
+  );
+}

@@ -72,6 +72,52 @@ impl BuildExecution {
   }
 }
 
+#[derive(Debug, Clone)]
+pub(crate) struct SyncExecution {
+  pub project_root: PathBuf,
+  pub manifest_path: PathBuf,
+  pub include_dirs: Vec<PathBuf>,
+  pub link_dirs: Vec<PathBuf>,
+  pub link_libs: Vec<String>,
+  pub toolchain: Option<toolchain::Toolchain>,
+  pub profile: BuildProfile,
+  pub compiled_dependencies_built: Vec<String>,
+  pub lockfile_path: PathBuf,
+  pub lockfile_updated: bool,
+}
+
+impl SyncExecution {
+  fn profile_name(&self) -> &'static str {
+    match self.profile {
+      BuildProfile::Debug => "debug",
+      BuildProfile::Release => "release",
+    }
+  }
+
+  pub(crate) fn json_data(&self) -> serde_json::Value {
+    let toolchain = self.toolchain.as_ref().map(|toolchain| {
+      json!({
+        "compiler_kind": toolchain.compiler.kind.as_str(),
+        "compiler_version": toolchain.compiler.version,
+        "compiler_path": toolchain.compiler.path.display().to_string(),
+        "ninja_path": toolchain.ninja.path.display().to_string(),
+      })
+    });
+    json!({
+      "project_root": self.project_root.display().to_string(),
+      "manifest_path": self.manifest_path.display().to_string(),
+      "profile": self.profile_name(),
+      "include_dirs": self.include_dirs.iter().map(|p| p.display().to_string()).collect::<Vec<_>>(),
+      "link_dirs": self.link_dirs.iter().map(|p| p.display().to_string()).collect::<Vec<_>>(),
+      "link_libs": self.link_libs.clone(),
+      "compiled_dependencies_built": self.compiled_dependencies_built.clone(),
+      "toolchain": toolchain,
+      "lockfile_path": self.lockfile_path.display().to_string(),
+      "lockfile_updated": self.lockfile_updated,
+    })
+  }
+}
+
 #[derive(Debug, Clone, Copy)]
 pub(crate) struct BuildOptions {
   pub release: bool,
@@ -121,9 +167,9 @@ pub(crate) fn build_project(options: BuildOptions) -> Result<BuildExecution, Joy
   let lockfile_path = project_root.join("joy.lock");
   let env_layout = project_env::ensure_layout(&project_root)
     .map_err(|err| JoyError::new("build", "env_setup_failed", err.to_string(), 1))?;
-  let lock_plan = evaluate_lockfile_plan(&lockfile_path, &manifest_hash, options)?;
+  let lock_plan = evaluate_lockfile_plan("build", &lockfile_path, &manifest_hash, options)?;
 
-  let toolchain = toolchain::discover().map_err(map_toolchain_error)?;
+  let toolchain = toolchain::discover().map_err(|err| map_toolchain_error("build", err))?;
   let profile = BuildProfile::from_release_flag(options.release);
   let source_file = project_root.join(&manifest.project.entry);
   if !source_file.is_file() {
@@ -147,7 +193,7 @@ pub(crate) fn build_project(options: BuildOptions) -> Result<BuildExecution, Joy
   })?;
   let native_link =
     prepare_compiled_dependencies(&manifest, &env_layout.lib_dir, &toolchain, profile)?;
-  validate_locked_package_metadata_if_needed(&lock_plan, &native_link.lockfile_packages)?;
+  validate_locked_package_metadata_if_needed("build", &lock_plan, &native_link.lockfile_packages)?;
   refresh_install_index(&env_layout, &manifest, &native_link)?;
 
   let spec = NinjaBuildSpec {
@@ -171,6 +217,7 @@ pub(crate) fn build_project(options: BuildOptions) -> Result<BuildExecution, Joy
   let ninja_output = run_ninja_build(&toolchain, &project_root, &build_file)?;
 
   let lockfile_updated = write_lockfile_if_needed(
+    "build",
     lock_plan,
     &lockfile_path,
     &manifest_hash,
@@ -191,6 +238,111 @@ pub(crate) fn build_project(options: BuildOptions) -> Result<BuildExecution, Joy
     ninja_status: ninja_output.status_code,
     ninja_stdout: ninja_output.stdout,
     ninja_stderr: ninja_output.stderr,
+    compiled_dependencies_built: native_link.built_packages,
+    lockfile_path,
+    lockfile_updated,
+  })
+}
+
+/// Materialize dependencies and lockfile state without compiling the final application binary.
+pub(crate) fn sync_project(options: BuildOptions) -> Result<SyncExecution, JoyError> {
+  let project_root = env::current_dir().map_err(|err| {
+    JoyError::new("sync", "cwd_unavailable", format!("failed to get cwd: {err}"), 1)
+  })?;
+  let manifest_path = project_root.join("joy.toml");
+  if !manifest_path.is_file() {
+    return Err(JoyError::new(
+      "sync",
+      "manifest_not_found",
+      format!("no `joy.toml` found at {}", manifest_path.display()),
+      1,
+    ));
+  }
+
+  let manifest = Manifest::load(&manifest_path)
+    .map_err(|err| JoyError::new("sync", "manifest_parse_error", err.to_string(), 1))?;
+  let manifest_hash = lockfile::compute_manifest_hash(&manifest_path)
+    .map_err(|err| JoyError::new("sync", "lockfile_hash_failed", err.to_string(), 1))?;
+  let lockfile_path = project_root.join("joy.lock");
+  let env_layout = project_env::ensure_layout(&project_root)
+    .map_err(|err| JoyError::new("sync", "env_setup_failed", err.to_string(), 1))?;
+  let lock_plan = evaluate_lockfile_plan("sync", &lockfile_path, &manifest_hash, options)
+    .map_err(|err| JoyError::new("sync", err.code, err.message, err.exit_code))?;
+  let profile = BuildProfile::from_release_flag(options.release);
+
+  let mut toolchain = None;
+  let native_link = if manifest.dependencies.is_empty() {
+    NativeLinkInputs::default()
+  } else {
+    let resolved_stage = resolve_dependency_stage(&manifest)
+      .map_err(|err| JoyError::new("sync", err.code, err.message, err.exit_code))?;
+    let PrefetchedDependencyStage { all_by_key, build_by_key } =
+      prefetch_dependency_stage(&resolved_stage)
+        .map_err(|err| JoyError::new("sync", err.code, err.message, err.exit_code))?;
+
+    let has_compiled = resolved_stage
+      .build_order_ids
+      .iter()
+      .any(|id| resolved_stage.resolved.package(id).is_some_and(|pkg| !pkg.header_only));
+
+    let compiled_stage = if has_compiled {
+      let discovered = toolchain::discover().map_err(|err| map_toolchain_error("sync", err))?;
+      toolchain = Some(discovered.clone());
+      build_compiled_dependency_stage(
+        &manifest,
+        &env_layout.lib_dir,
+        &discovered,
+        profile,
+        &resolved_stage,
+        build_by_key,
+      )
+      .map_err(|err| JoyError::new("sync", err.code, err.message, err.exit_code))?
+    } else {
+      CompiledDependencyBuildStage::default()
+    };
+
+    let lockfile_packages = assemble_lockfile_packages(
+      &resolved_stage.resolved,
+      &resolved_stage.recipes,
+      &all_by_key,
+      &compiled_stage.compiled_lock_metadata,
+    )
+    .map_err(|err| JoyError::new("sync", err.code, err.message, err.exit_code))?;
+
+    NativeLinkInputs {
+      link_dirs: compiled_stage.link_dirs,
+      link_libs: compiled_stage.link_libs,
+      built_packages: compiled_stage.built_packages,
+      installed_lib_files: compiled_stage.installed_lib_files,
+      lockfile_packages,
+    }
+  };
+
+  validate_locked_package_metadata_if_needed("sync", &lock_plan, &native_link.lockfile_packages)
+    .map_err(|err| JoyError::new("sync", err.code, err.message, err.exit_code))?;
+  refresh_install_index(&env_layout, &manifest, &native_link)
+    .map_err(|err| JoyError::new("sync", err.code, err.message, err.exit_code))?;
+
+  let include_dirs = collect_include_dirs(&env_layout.include_dir).map_err(|err| {
+    JoyError::io("sync", "reading include directories", &env_layout.include_dir, &err)
+  })?;
+  let lockfile_updated = write_lockfile_if_needed(
+    "sync",
+    lock_plan,
+    &lockfile_path,
+    &manifest_hash,
+    &native_link.lockfile_packages,
+  )
+  .map_err(|err| JoyError::new("sync", err.code, err.message, err.exit_code))?;
+
+  Ok(SyncExecution {
+    project_root,
+    manifest_path,
+    include_dirs,
+    link_dirs: native_link.link_dirs,
+    link_libs: native_link.link_libs,
+    toolchain,
+    profile,
     compiled_dependencies_built: native_link.built_packages,
     lockfile_path,
     lockfile_updated,
@@ -668,6 +820,7 @@ struct LockfilePlan {
 }
 
 fn write_lockfile_if_needed(
+  command: &'static str,
   lock_plan: LockfilePlan,
   lockfile_path: &Path,
   manifest_hash: &str,
@@ -685,11 +838,12 @@ fn write_lockfile_if_needed(
   };
   lock
     .save(lockfile_path)
-    .map_err(|err| JoyError::new("build", "lockfile_write_failed", err.to_string(), 1))?;
+    .map_err(|err| JoyError::new(command, "lockfile_write_failed", err.to_string(), 1))?;
   Ok(true)
 }
 
 fn validate_locked_package_metadata_if_needed(
+  command: &'static str,
   lock_plan: &LockfilePlan,
   expected_packages: &[lockfile::LockedPackage],
 ) -> Result<(), JoyError> {
@@ -699,11 +853,11 @@ fn validate_locked_package_metadata_if_needed(
 
   if !expected_packages.is_empty() && lock.packages.is_empty() {
     return Err(JoyError::new(
-      "build",
+      command,
       "lockfile_incomplete",
       lockfile_refresh_message(
         "joy.lock package metadata is missing for current dependencies",
-        lockfile_refresh_example("build"),
+        lockfile_refresh_example(command),
       ),
       1,
     ));
@@ -716,11 +870,11 @@ fn validate_locked_package_metadata_if_needed(
 
   if actual != expected {
     return Err(JoyError::new(
-      "build",
+      command,
       "lockfile_mismatch",
       lockfile_refresh_message(
         "joy.lock package metadata does not match the resolved dependency graph",
-        lockfile_refresh_example("build"),
+        lockfile_refresh_example(command),
       ),
       1,
     ));
@@ -742,13 +896,14 @@ fn lockfile_refresh_message(problem: &str, example_command: String) -> String {
 }
 
 fn evaluate_lockfile_plan(
+  command: &'static str,
   lockfile_path: &Path,
   manifest_hash: &str,
   options: BuildOptions,
 ) -> Result<LockfilePlan, JoyError> {
   if options.locked && options.update_lock {
     return Err(JoyError::new(
-      "build",
+      command,
       "invalid_lock_flags",
       "cannot use --locked and --update-lock together",
       1,
@@ -759,7 +914,7 @@ fn evaluate_lockfile_plan(
   let lock = if lock_exists {
     Some(
       lockfile::Lockfile::load(lockfile_path)
-        .map_err(|err| JoyError::new("build", "lockfile_parse_error", err.to_string(), 1))?,
+        .map_err(|err| JoyError::new(command, "lockfile_parse_error", err.to_string(), 1))?,
     )
   } else {
     None
@@ -768,23 +923,23 @@ fn evaluate_lockfile_plan(
   if options.locked {
     let Some(lock) = lock else {
       return Err(JoyError::new(
-        "build",
+        command,
         "lockfile_missing",
         format!(
           "`--locked` requires `{}` to exist; create or refresh it with `{}` (or rerun with `--update-lock`)",
           lockfile_path.display(),
-          lockfile_refresh_example("build"),
+          lockfile_refresh_example(command),
         ),
         1,
       ));
     };
     if lock.manifest_hash != manifest_hash {
       return Err(JoyError::new(
-        "build",
+        command,
         "lockfile_stale",
         lockfile_refresh_message(
           "joy.lock manifest hash does not match joy.toml",
-          lockfile_refresh_example("build"),
+          lockfile_refresh_example(command),
         ),
         1,
       ));
@@ -797,11 +952,11 @@ fn evaluate_lockfile_plan(
     && !options.update_lock
   {
     return Err(JoyError::new(
-      "build",
+      command,
       "lockfile_stale",
       lockfile_refresh_message(
         "joy.lock manifest hash does not match joy.toml",
-        lockfile_refresh_example("build"),
+        lockfile_refresh_example(command),
       ),
       1,
     ));
@@ -814,7 +969,7 @@ fn evaluate_lockfile_plan(
   })
 }
 
-fn map_toolchain_error(err: toolchain::ToolchainError) -> JoyError {
+fn map_toolchain_error(command: &'static str, err: toolchain::ToolchainError) -> JoyError {
   let message = err.to_string();
   let code = match &err {
     toolchain::ToolchainError::NinjaNotFound | toolchain::ToolchainError::CompilerNotFound => {
@@ -825,5 +980,5 @@ fn map_toolchain_error(err: toolchain::ToolchainError) -> JoyError {
       "toolchain_probe_failed"
     },
   };
-  JoyError::new("build", code, message, 1)
+  JoyError::new(command, code, message, 1)
 }
