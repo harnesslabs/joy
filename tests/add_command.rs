@@ -315,6 +315,20 @@ fn run_git_capture<const N: usize>(cwd: Option<&Path>, args: [&str; N]) -> std::
   }
 }
 
+fn create_bare_tag(bare_repo: &Path, tag: &str, target: &str) {
+  run_git_owned(
+    None,
+    vec![
+      "--git-dir".into(),
+      bare_repo.to_string_lossy().into_owned(),
+      "tag".into(),
+      tag.into(),
+      target.into(),
+    ],
+  )
+  .expect("create bare tag");
+}
+
 #[test]
 fn add_mutates_manifest_and_creates_local_env() {
   let temp = TempDir::new().expect("tempdir");
@@ -1225,6 +1239,148 @@ fn update_changes_manifest_rev_and_warns_stale_lockfile() {
 }
 
 #[test]
+fn add_supports_semver_version_and_records_selected_version_metadata() {
+  let temp = TempDir::new().expect("tempdir");
+  init_project(&temp);
+  let Some((remote_base, bare_repo, commit1, commit2)) =
+    setup_local_github_remote_two_commits("nlohmann/json")
+  else {
+    return;
+  };
+  create_bare_tag(&bare_repo, "v1.0.0", &commit1);
+  create_bare_tag(&bare_repo, "v1.2.0", &commit2);
+  let joy_home = temp.path().join("joy-home");
+
+  let mut cmd = cargo_bin_cmd!("joy");
+  let assert = cmd
+    .current_dir(temp.path())
+    .env("JOY_GITHUB_BASE", remote_base.path())
+    .env("JOY_HOME", &joy_home)
+    .args(["--json", "add", "nlohmann/json", "--version", "^1"])
+    .assert()
+    .success();
+  let payload = json_stdout(&assert.get_output().stdout);
+  assert_eq!(payload["command"], "add");
+  assert_eq!(payload["data"]["package"], "nlohmann/json");
+  assert_eq!(payload["data"]["requested_requirement"], "^1");
+  assert_eq!(payload["data"]["resolved_version"], "1.2.0");
+  assert_eq!(payload["data"]["rev"], "v1.2.0");
+  assert_eq!(payload["data"]["resolved_commit"], commit2);
+
+  let manifest = fs::read_to_string(temp.path().join("joy.toml")).expect("manifest");
+  assert!(manifest.contains("version = \"^1\""));
+  assert!(!manifest.contains("rev = "));
+}
+
+#[test]
+fn update_refreshes_semver_dependency_to_newer_matching_tag_without_manifest_change() {
+  let temp = TempDir::new().expect("tempdir");
+  init_project(&temp);
+  let Some((remote_base, bare_repo, commit1, commit2)) =
+    setup_local_github_remote_two_commits("nlohmann/json")
+  else {
+    return;
+  };
+  create_bare_tag(&bare_repo, "v1.0.0", &commit1);
+  let joy_home = temp.path().join("joy-home");
+
+  let mut add = cargo_bin_cmd!("joy");
+  add
+    .current_dir(temp.path())
+    .env("JOY_GITHUB_BASE", remote_base.path())
+    .env("JOY_HOME", &joy_home)
+    .args(["--json", "add", "nlohmann/json", "--version", "^1"])
+    .assert()
+    .success();
+
+  create_bare_tag(&bare_repo, "v1.2.0", &commit2);
+
+  let mut update = cargo_bin_cmd!("joy");
+  let assert = update
+    .current_dir(temp.path())
+    .env("JOY_GITHUB_BASE", remote_base.path())
+    .env("JOY_HOME", &joy_home)
+    .args(["--json", "update", "nlohmann/json"])
+    .assert()
+    .success();
+  let payload = json_stdout(&assert.get_output().stdout);
+  assert_eq!(payload["command"], "update");
+  assert_eq!(payload["data"]["manifest_changed"], false);
+  assert_eq!(payload["data"]["updated_count"], 1);
+  let item = &payload["data"]["updated"][0];
+  assert_eq!(item["package"], "nlohmann/json");
+  assert_eq!(item["requested_requirement"], "^1");
+  assert_eq!(item["resolved_version"], "1.2.0");
+  assert_eq!(item["rev"], "v1.2.0");
+  assert_eq!(item["resolved_commit"], commit2);
+
+  let manifest = fs::read_to_string(temp.path().join("joy.toml")).expect("manifest");
+  assert!(manifest.contains("version = \"^1\""));
+  assert!(!manifest.contains("rev = "));
+}
+
+#[test]
+fn tree_and_lockfile_include_semver_metadata_for_direct_dependency() {
+  let temp = TempDir::new().expect("tempdir");
+  init_project(&temp);
+  let Some((remote_base, bare_repo, _commit1, commit2)) =
+    setup_local_github_remote_two_commits("nlohmann/json")
+  else {
+    return;
+  };
+  create_bare_tag(&bare_repo, "v1.2.0", &commit2);
+  let joy_home = temp.path().join("joy-home");
+
+  let mut add = cargo_bin_cmd!("joy");
+  add
+    .current_dir(temp.path())
+    .env("JOY_GITHUB_BASE", remote_base.path())
+    .env("JOY_HOME", &joy_home)
+    .args(["--json", "add", "nlohmann/json", "--version", "^1"])
+    .assert()
+    .success();
+
+  let mut tree = cargo_bin_cmd!("joy");
+  let tree_assert = tree
+    .current_dir(temp.path())
+    .env("JOY_GITHUB_BASE", remote_base.path())
+    .env("JOY_HOME", &joy_home)
+    .args(["--json", "tree"])
+    .assert()
+    .success();
+  let tree_payload = json_stdout(&tree_assert.get_output().stdout);
+  let packages = tree_payload["data"]["packages"].as_array().expect("packages");
+  let pkg = packages
+    .iter()
+    .find(|pkg| pkg.get("id").and_then(|v| v.as_str()) == Some("nlohmann/json"))
+    .expect("json package");
+  assert_eq!(pkg["requested_requirement"], "^1");
+  assert_eq!(pkg["resolved_version"], "1.2.0");
+  assert_eq!(pkg["requested_rev"], "v1.2.0");
+  assert_eq!(pkg["resolved_commit"], commit2);
+
+  let mut sync = cargo_bin_cmd!("joy");
+  sync
+    .current_dir(temp.path())
+    .env("JOY_GITHUB_BASE", remote_base.path())
+    .env("JOY_HOME", &joy_home)
+    .args(["sync", "--update-lock"])
+    .assert()
+    .success();
+
+  let lock = read_lockfile_toml(&temp);
+  let packages = lock["packages"].as_array().expect("packages array");
+  let locked = packages
+    .iter()
+    .find(|pkg| pkg.get("id").and_then(|v| v.as_str()) == Some("nlohmann/json"))
+    .expect("locked json package");
+  assert_eq!(locked["requested_requirement"].as_str(), Some("^1"));
+  assert_eq!(locked["resolved_version"].as_str(), Some("1.2.0"));
+  assert_eq!(locked["requested_rev"].as_str(), Some("v1.2.0"));
+  assert_eq!(locked["resolved_commit"].as_str(), Some(commit2.as_str()));
+}
+
+#[test]
 fn tree_outputs_deterministic_json_and_human_for_direct_dependency() {
   let temp = TempDir::new().expect("tempdir");
   init_project(&temp);
@@ -1308,7 +1464,9 @@ fn dependency_command_json_payload_shapes_are_stable() {
       "package",
       "project_root",
       "remote_url",
+      "requested_requirement",
       "resolved_commit",
+      "resolved_version",
       "rev",
       "state_index_path",
       "warnings",

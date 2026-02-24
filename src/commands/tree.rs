@@ -47,6 +47,8 @@ pub fn handle(_args: TreeArgs, runtime: RuntimeFlags) -> Result<CommandOutput, J
         "direct": pkg.direct,
         "header_only": pkg.header_only,
         "requested_rev": pkg.requested_rev,
+        "requested_requirement": pkg.requested_requirement,
+        "resolved_version": pkg.resolved_version,
         "resolved_commit": pkg.resolved_commit,
         "recipe": pkg.recipe_slug,
         "deps": deps,
@@ -98,10 +100,24 @@ fn render_tree_node(
   };
   let indent = "  ".repeat(depth);
   let kind = if pkg.header_only { "header-only" } else { "compiled" };
-  lines.push(format!(
-    "{indent}- {} ({kind}, rev {}, commit {})",
-    pkg.id, pkg.requested_rev, pkg.resolved_commit
-  ));
+  if let Some(req) = pkg.requested_requirement.as_deref() {
+    if let Some(version) = pkg.resolved_version.as_deref() {
+      lines.push(format!(
+        "{indent}- {} ({kind}, req {req}, version {version}, tag {}, commit {})",
+        pkg.id, pkg.requested_rev, pkg.resolved_commit
+      ));
+    } else {
+      lines.push(format!(
+        "{indent}- {} ({kind}, req {req}, tag {}, commit {})",
+        pkg.id, pkg.requested_rev, pkg.resolved_commit
+      ));
+    }
+  } else {
+    lines.push(format!(
+      "{indent}- {} ({kind}, rev {}, commit {})",
+      pkg.id, pkg.requested_rev, pkg.resolved_commit
+    ));
+  }
 
   if !stack_guard.insert(id.to_string()) {
     lines.push(format!("{indent}  - <cycle prevented>"));
@@ -123,6 +139,12 @@ fn map_resolver_error(err: resolver::ResolverError) -> JoyError {
     },
     resolver::ResolverError::Fetch { source, .. } if source.is_offline_network_disabled() => {
       "offline_network_disabled"
+    },
+    resolver::ResolverError::Fetch { source, .. } if source.is_invalid_version_requirement() => {
+      "invalid_version_requirement"
+    },
+    resolver::ResolverError::Fetch { source, .. } if source.is_version_not_found() => {
+      "version_not_found"
     },
     _ => "dependency_resolve_failed",
   };

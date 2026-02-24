@@ -167,6 +167,12 @@ fn human_error_hint(command: &str, err: &JoyError) -> Option<String> {
     "offline_network_disabled" => {
       Some("Rerun without `--offline` / `--frozen`, or ensure the cache is already warm.".into())
     },
+    "invalid_version_requirement" => {
+      Some("Use a valid semver requirement such as `^1`, `~1.2`, or `>=1.2, <2.0`.".into())
+    },
+    "version_not_found" => Some(
+      "Check available tags for the dependency (or relax the version range) and rerun online to refresh the mirror.".into(),
+    ),
     "recipe_load_failed" => {
       Some("Run `joy doctor` to validate the bundled recipe store and local environment.".into())
     },

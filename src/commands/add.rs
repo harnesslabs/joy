@@ -24,6 +24,14 @@ pub fn handle(args: AddArgs, runtime: RuntimeFlags) -> Result<CommandOutput, Joy
       1,
     ));
   }
+  if args.rev.is_some() && args.version.is_some() {
+    return Err(JoyError::new(
+      "add",
+      "invalid_add_args",
+      "`--rev` and `--version` are mutually exclusive; choose one dependency requirement style",
+      1,
+    ));
+  }
 
   let _fetch_runtime = fetch::push_runtime_options(fetch::RuntimeOptions {
     offline: runtime.offline,
@@ -53,24 +61,35 @@ pub fn handle(args: AddArgs, runtime: RuntimeFlags) -> Result<CommandOutput, Joy
   let mut manifest = Manifest::load(&manifest_path)
     .map_err(|err| JoyError::new("add", "manifest_parse_error", err.to_string(), 1))?;
 
-  let rev = args.rev.unwrap_or_else(|| "HEAD".to_string());
   let env_layout = project_env::ensure_layout(&cwd)
     .map_err(|err| JoyError::new("add", "env_setup_failed", err.to_string(), 1))?;
 
   let cache = GlobalCache::resolve()
     .map_err(|err| JoyError::new("add", "cache_setup_failed", err.to_string(), 1))?;
-  let fetched = fetch::fetch_github_with_cache(&package, &rev, &cache)
-    .map_err(|err| map_fetch_error("add", err))?;
+  let (manifest_spec, fetched) = if let Some(version_req) = args.version.as_ref() {
+    let fetched = fetch::fetch_github_semver_with_cache(&package, version_req, &cache)
+      .map_err(|err| map_fetch_error("add", err))?;
+    (
+      DependencySpec {
+        source: DependencySource::Github,
+        rev: String::new(),
+        version: Some(version_req.clone()),
+      },
+      fetched,
+    )
+  } else {
+    let rev = args.rev.clone().unwrap_or_else(|| "HEAD".to_string());
+    let fetched = fetch::fetch_github_with_cache(&package, &rev, &cache)
+      .map_err(|err| map_fetch_error("add", err))?;
+    (DependencySpec { source: DependencySource::Github, rev, version: None }, fetched)
+  };
   if runtime.progress {
     progress_detail(&format!("Installing headers for `{package}`"));
   }
   let installed = linking::install_headers(&env_layout.include_dir, &package, &fetched.source_dir)
     .map_err(|err| JoyError::new("add", "header_install_failed", err.to_string(), 1))?;
 
-  let changed = manifest.add_dependency(
-    package.as_str().to_string(),
-    DependencySpec { source: DependencySource::Github, rev: rev.clone() },
-  );
+  let changed = manifest.add_dependency(package.as_str().to_string(), manifest_spec.clone());
   if changed && let Err(err) = manifest.save(&manifest_path) {
     let rollback_err = remove_installed_header_path(&installed.link_path);
     let mut message = err.to_string();
@@ -99,10 +118,19 @@ pub fn handle(args: AddArgs, runtime: RuntimeFlags) -> Result<CommandOutput, Joy
     HumanMessageBuilder::new(format!("Added dependency `{}`", args.package))
   } else {
     HumanMessageBuilder::new(format!("Dependency `{}` already present", args.package))
+  };
+  if let Some(req) = fetched.requested_requirement.as_deref() {
+    human_builder = human_builder.kv("requested version", format!("`{req}`"));
+    if let Some(version) = fetched.resolved_version.as_deref() {
+      human_builder = human_builder.kv("resolved version", version.to_string());
+    }
+    human_builder = human_builder.kv("selected tag", format!("`{}`", fetched.requested_rev));
+  } else {
+    human_builder = human_builder.kv("requested rev", format!("`{}`", fetched.requested_rev));
   }
-  .kv("requested rev", format!("`{rev}`"))
-  .kv("resolved commit", fetched.resolved_commit.clone())
-  .kv("headers installed", installed.link_path.display().to_string());
+  human_builder = human_builder
+    .kv("resolved commit", fetched.resolved_commit.clone())
+    .kv("headers installed", installed.link_path.display().to_string());
   if let Some(warning) = &lockfile_warning {
     human_builder = human_builder.warning(warning.clone());
   }
@@ -116,7 +144,9 @@ pub fn handle(args: AddArgs, runtime: RuntimeFlags) -> Result<CommandOutput, Joy
     human_message,
     json!({
       "package": args.package,
-      "rev": rev,
+      "rev": fetched.requested_rev,
+      "requested_requirement": fetched.requested_requirement,
+      "resolved_version": fetched.resolved_version,
       "changed": changed,
       "resolved_commit": fetched.resolved_commit,
       "remote_url": fetched.remote_url,
@@ -139,6 +169,10 @@ fn map_fetch_error(command: &'static str, err: fetch::FetchError) -> JoyError {
     "offline_cache_miss"
   } else if err.is_offline_network_disabled() {
     "offline_network_disabled"
+  } else if err.is_invalid_version_requirement() {
+    "invalid_version_requirement"
+  } else if err.is_version_not_found() {
+    "version_not_found"
   } else {
     "fetch_failed"
   };

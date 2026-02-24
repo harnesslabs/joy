@@ -28,7 +28,7 @@ JSON output always uses one of two top-level envelopes:
 - `--json` / `--machine` mode is the stable automation interface and should be used by tools, scripts, and agents.
 - Human-mode regressions should be tested selectively (section presence / key phrases), not by freezing every full output string.
 
-## Dependency Command Payloads (Phase 11)
+## Dependency Command Payloads (Phase 11 + Phase 16/17 additive fields)
 
 Phase 16 adds additive workspace-routing metadata to project-scoped command payloads:
 
@@ -43,6 +43,8 @@ The following payload keys are covered by integration shape assertions in `/User
 
 - `package`
 - `rev`
+- `requested_requirement` (string or `null`; semver range for direct semver dependencies)
+- `resolved_version` (string or `null`; concrete semver selected from tags)
 - `changed`
 - `resolved_commit`
 - `remote_url`
@@ -86,6 +88,8 @@ Each `updated[]` item contains:
 
 - `package`
 - `rev`
+- `requested_requirement` (string or `null`)
+- `resolved_version` (string or `null`)
 - `resolved_commit`
 - `cache_hit`
 - `header_link_path`
@@ -105,6 +109,8 @@ Each `packages[]` item contains:
 - `direct`
 - `header_only`
 - `requested_rev`
+- `requested_requirement` (string or `null`)
+- `resolved_version` (string or `null`)
 - `resolved_commit`
 - `recipe`
 - `deps`

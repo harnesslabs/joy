@@ -883,6 +883,8 @@ fn assemble_lockfile_packages(
       id: pkg.id.to_string(),
       source: dependency_source_name(&pkg.source).to_string(),
       requested_rev: pkg.requested_rev.clone(),
+      requested_requirement: pkg.requested_requirement.clone(),
+      resolved_version: pkg.resolved_version.clone(),
       resolved_commit: pkg.resolved_commit.clone(),
       resolved_ref: None,
       recipe: pkg.recipe_slug.clone(),
@@ -1153,6 +1155,10 @@ fn map_fetch_error(command: &'static str, err: fetch::FetchError) -> JoyError {
     "offline_cache_miss"
   } else if err.is_offline_network_disabled() {
     "offline_network_disabled"
+  } else if err.is_invalid_version_requirement() {
+    "invalid_version_requirement"
+  } else if err.is_version_not_found() {
+    "version_not_found"
   } else {
     "fetch_failed"
   };
@@ -1166,6 +1172,12 @@ fn map_dependency_resolve_error(err: resolver::ResolverError) -> JoyError {
     },
     resolver::ResolverError::Fetch { source, .. } if source.is_offline_network_disabled() => {
       "offline_network_disabled"
+    },
+    resolver::ResolverError::Fetch { source, .. } if source.is_invalid_version_requirement() => {
+      "invalid_version_requirement"
+    },
+    resolver::ResolverError::Fetch { source, .. } if source.is_version_not_found() => {
+      "version_not_found"
     },
     _ => "dependency_resolve_failed",
   };

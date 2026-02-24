@@ -14,14 +14,15 @@ Native C++ package and build manager with a `cargo`-like CLI and a local project
 
 ## Status / Caveats
 
-`joy` is a functional pre-1.0 implementation that has completed Phases 7-14 of the current roadmap wave.
+`joy` is a functional pre-1.0 implementation that has completed Phases 7-17 of the current roadmap wave.
 
 Current constraints:
 
-- dependency versions are exact refs (`HEAD`, tag, branch, or commit SHA); there is no semver solver yet
+- direct dependencies support exact refs (`rev`) or semver ranges (`version`) resolved from Git tags
+- transitive recipe dependencies remain exact-rev metadata in the current phase
 - Windows local builds are supported via both MinGW GNU and MSVC (`cl.exe` + Ninja)
 - GitHub release artifacts currently publish the Windows GNU target (`x86_64-pc-windows-gnu`)
-- no workspace/multi-target project model yet (single binary target per manifest)
+- registry/index-backed package sources are not implemented yet (GitHub shorthand remains the source path)
 - package-manager channels (Homebrew tap / Scoop bucket) are template-driven and release-managed
 
 ## Install
@@ -114,12 +115,16 @@ Notes:
 
 ```bash
 joy add fmtlib/fmt --rev 11.0.2
+joy add fmtlib/fmt --version ^11
 joy update fmtlib/fmt --rev 11.1.0
+joy update fmtlib/fmt --version ^11
 joy remove fmtlib/fmt
 joy tree --json
 ```
 
 `joy tree` reports the resolved dependency graph (human or JSON mode) using deterministic ordering.
+
+For semver-managed direct dependencies, `joy` stores the requested range in `joy.toml` and records the selected tag/version/commit in `joy.lock`.
 
 ## Multi-File Project Builds
 

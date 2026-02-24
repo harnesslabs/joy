@@ -13,7 +13,7 @@ use petgraph::graph::{DiGraph, NodeIndex};
 use thiserror::Error;
 
 use crate::fetch;
-use crate::manifest::{DependencySource, Manifest};
+use crate::manifest::{DependencyRequirementRef, DependencySource, Manifest};
 use crate::package_id::{PackageId, PackageIdError};
 use crate::recipes::RecipeStore;
 
@@ -23,6 +23,8 @@ pub struct ResolvedPackage {
   pub id: PackageId,
   pub source: DependencySource,
   pub requested_rev: String,
+  pub requested_requirement: Option<String>,
+  pub resolved_version: Option<String>,
   pub resolved_commit: String,
   pub recipe_slug: Option<String>,
   pub header_only: bool,
@@ -88,17 +90,34 @@ pub fn resolve_manifest(
   manifest: &Manifest,
   recipes: &RecipeStore,
 ) -> Result<ResolvedGraph, ResolverError> {
-  resolve_manifest_with(manifest, recipes, |package, requested_rev| {
+  resolve_manifest_with_selector(manifest, recipes, |package, request| {
     match manifest
       .dependencies
       .get(package.as_str())
       .map(|spec| &spec.source)
       .unwrap_or(&DependencySource::Github)
     {
-      DependencySource::Github => {
-        let fetched = fetch::fetch_github(package, requested_rev)
-          .map_err(|source| ResolverError::Fetch { package: package.to_string(), source })?;
-        Ok(fetched.resolved_commit)
+      DependencySource::Github => match request {
+        ResolveRequest::Rev(requested_rev) => {
+          let fetched = fetch::fetch_github(package, requested_rev)
+            .map_err(|source| ResolverError::Fetch { package: package.to_string(), source })?;
+          Ok(ResolvedSelection {
+            requested_rev: fetched.requested_rev,
+            requested_requirement: None,
+            resolved_version: None,
+            resolved_commit: fetched.resolved_commit,
+          })
+        },
+        ResolveRequest::Version(version_req) => {
+          let fetched = fetch::fetch_github_semver(package, version_req)
+            .map_err(|source| ResolverError::Fetch { package: package.to_string(), source })?;
+          Ok(ResolvedSelection {
+            requested_rev: fetched.requested_rev,
+            requested_requirement: fetched.requested_requirement,
+            resolved_version: fetched.resolved_version,
+            resolved_commit: fetched.resolved_commit,
+          })
+        },
       },
     }
   })
@@ -116,6 +135,29 @@ pub fn resolve_manifest_with<F>(
 where
   F: FnMut(&PackageId, &str) -> Result<String, ResolverError>,
 {
+  resolve_manifest_with_selector(manifest, recipes, |package, request| {
+    let requested = match request {
+      ResolveRequest::Rev(rev) | ResolveRequest::Version(rev) => rev.as_str(),
+    };
+    let resolved_commit = resolve_commit(package, requested)?;
+    Ok(ResolvedSelection {
+      requested_rev: requested.to_string(),
+      requested_requirement: None,
+      resolved_version: None,
+      resolved_commit,
+    })
+  })
+}
+
+/// Resolve a manifest with an injected request-selection function (exact rev or semver range).
+fn resolve_manifest_with_selector<F>(
+  manifest: &Manifest,
+  recipes: &RecipeStore,
+  mut resolve_selection: F,
+) -> Result<ResolvedGraph, ResolverError>
+where
+  F: FnMut(&PackageId, &ResolveRequest) -> Result<ResolvedSelection, ResolverError>,
+{
   // TODO(phase7): Split graph construction from transitive queue expansion to make semver-range
   // resolution pluggable without rewriting conflict/cycle handling.
   let mut graph = DiGraph::<ResolvedPackage, ()>::new();
@@ -125,12 +167,14 @@ where
   for (raw_id, spec) in &manifest.dependencies {
     let package = PackageId::parse(raw_id)
       .map_err(|source| ResolverError::InvalidPackageId { package: raw_id.clone(), source })?;
-    let requested_rev =
-      if spec.rev.trim().is_empty() { "HEAD".to_string() } else { spec.rev.clone() };
     queue.push_back(PendingDependency {
       package,
       source: spec.source.clone(),
-      requested_rev,
+      request: match manifest.dependency_requirement(raw_id.as_str()) {
+        Some(DependencyRequirementRef::Version(version)) => ResolveRequest::Version(version.into()),
+        Some(DependencyRequirementRef::Rev(rev)) => ResolveRequest::Rev(rev.into()),
+        None => ResolveRequest::Rev("HEAD".into()),
+      },
       dependent: None,
       direct: true,
       requested_by: None,
@@ -138,7 +182,9 @@ where
   }
 
   while let Some(pending) = queue.pop_front() {
-    let resolved_commit = resolve_commit(&pending.package, &pending.requested_rev)?;
+    let selection = resolve_selection(&pending.package, &pending.request)?;
+    let requested_rev = selection.requested_rev.clone();
+    let resolved_commit = selection.resolved_commit.clone();
     let key = pending.package.to_string();
 
     let node_idx = if let Some(existing_idx) = by_id.get(&key).copied() {
@@ -148,7 +194,7 @@ where
           package: key.clone(),
           existing_requested_rev: existing.requested_rev.clone(),
           existing_resolved_commit: existing.resolved_commit.clone(),
-          new_requested_rev: pending.requested_rev.clone(),
+          new_requested_rev: requested_rev.clone(),
           new_resolved_commit: resolved_commit,
           requested_by: pending.requested_by.unwrap_or_else(|| "<direct>".to_string()),
         })));
@@ -156,13 +202,21 @@ where
       if pending.direct {
         existing.direct = true;
       }
+      if existing.requested_requirement.is_none() && selection.requested_requirement.is_some() {
+        existing.requested_requirement = selection.requested_requirement.clone();
+      }
+      if existing.resolved_version.is_none() && selection.resolved_version.is_some() {
+        existing.resolved_version = selection.resolved_version.clone();
+      }
       existing_idx
     } else {
       let recipe = recipes.get(&pending.package);
       let node = ResolvedPackage {
         id: pending.package.clone(),
         source: pending.source.clone(),
-        requested_rev: pending.requested_rev.clone(),
+        requested_rev,
+        requested_requirement: selection.requested_requirement.clone(),
+        resolved_version: selection.resolved_version.clone(),
         resolved_commit: resolved_commit.clone(),
         recipe_slug: recipe.map(|r| r.slug.clone()),
         header_only: recipe.map(|r| r.is_header_only()).unwrap_or(true),
@@ -183,7 +237,7 @@ where
           queue.push_back(PendingDependency {
             package,
             source: DependencySource::Github,
-            requested_rev,
+            request: ResolveRequest::Rev(requested_rev),
             dependent: Some(idx),
             direct: false,
             requested_by: Some(key.clone()),
@@ -213,10 +267,24 @@ where
 struct PendingDependency {
   package: PackageId,
   source: DependencySource,
-  requested_rev: String,
+  request: ResolveRequest,
   dependent: Option<NodeIndex>,
   direct: bool,
   requested_by: Option<String>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+enum ResolveRequest {
+  Rev(String),
+  Version(String),
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+struct ResolvedSelection {
+  requested_rev: String,
+  requested_requirement: Option<String>,
+  resolved_version: Option<String>,
+  resolved_commit: String,
 }
 
 #[derive(Debug, Error)]
@@ -267,7 +335,10 @@ mod tests {
 
   use tempfile::TempDir;
 
-  use super::{ResolverError, resolve_manifest_with};
+  use super::{
+    ResolveRequest, ResolvedSelection, ResolverError, resolve_manifest_with,
+    resolve_manifest_with_selector,
+  };
   use crate::manifest::{DependencySource, DependencySpec, Manifest, ProjectSection};
   use crate::recipes::RecipeStore;
 
@@ -330,9 +401,56 @@ libs = ["z"]
     let fmt = resolved.package("fmtlib/fmt").expect("fmt package");
     assert_eq!(fmt.recipe_slug.as_deref(), Some("fmt"));
     assert!(!fmt.header_only);
+    assert_eq!(fmt.requested_requirement, None);
+    assert_eq!(fmt.resolved_version, None);
     let json = resolved.package("nlohmann/json").expect("json package");
     assert!(json.header_only);
     assert!(json.direct);
+  }
+
+  #[test]
+  fn resolves_direct_semver_dependency_and_records_selected_version_metadata() {
+    let temp = TempDir::new().expect("tempdir");
+    write_recipe_store(
+      temp.path(),
+      &[(
+        "fmt",
+        "fmtlib/fmt",
+        r#"
+kind = "header_only"
+[headers]
+include_roots = ["include"]
+"#,
+      )],
+    );
+    let recipes = RecipeStore::load_from_dir(temp.path()).expect("recipes");
+    let mut manifest = manifest_with_deps([]);
+    manifest.dependencies.insert(
+      "fmtlib/fmt".into(),
+      DependencySpec {
+        source: DependencySource::Github,
+        rev: String::new(),
+        version: Some("^11".into()),
+      },
+    );
+
+    let resolved =
+      resolve_manifest_with_selector(&manifest, &recipes, |pkg, request| match request {
+        ResolveRequest::Version(req) if pkg.as_str() == "fmtlib/fmt" => Ok(ResolvedSelection {
+          requested_rev: "v11.1.2".into(),
+          requested_requirement: Some(req.clone()),
+          resolved_version: Some("11.1.2".into()),
+          resolved_commit: "commit-fmt-11-1-2".into(),
+        }),
+        other => panic!("unexpected request: {other:?}"),
+      })
+      .expect("resolve semver");
+
+    let fmt = resolved.package("fmtlib/fmt").expect("fmt");
+    assert_eq!(fmt.requested_rev, "v11.1.2");
+    assert_eq!(fmt.requested_requirement.as_deref(), Some("^11"));
+    assert_eq!(fmt.resolved_version.as_deref(), Some("11.1.2"));
+    assert_eq!(fmt.resolved_commit, "commit-fmt-11-1-2");
   }
 
   #[test]
@@ -418,7 +536,7 @@ packages = [{ id = "cycle/a", rev = "HEAD" }]
     for (id, rev) in deps {
       dependencies.insert(
         id.to_string(),
-        DependencySpec { source: DependencySource::Github, rev: rev.to_string() },
+        DependencySpec { source: DependencySource::Github, rev: rev.to_string(), version: None },
       );
     }
     Manifest {

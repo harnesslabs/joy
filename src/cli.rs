@@ -118,6 +118,8 @@ pub struct AddArgs {
   pub package: String,
   #[arg(long)]
   pub rev: Option<String>,
+  #[arg(long)]
+  pub version: Option<String>,
 }
 
 #[derive(Debug, Args)]
@@ -130,6 +132,8 @@ pub struct UpdateArgs {
   pub package: Option<String>,
   #[arg(long)]
   pub rev: Option<String>,
+  #[arg(long)]
+  pub version: Option<String>,
 }
 
 #[derive(Debug, Args)]
@@ -234,6 +238,7 @@ mod tests {
       Commands::Add(args) => {
         assert_eq!(args.package, "nlohmann/json");
         assert_eq!(args.rev.as_deref(), Some("v3.11.3"));
+        assert_eq!(args.version, None);
       },
       other => panic!("expected add, got {other:?}"),
     }
@@ -255,8 +260,22 @@ mod tests {
       Commands::Update(args) => {
         assert_eq!(args.package.as_deref(), Some("nlohmann/json"));
         assert_eq!(args.rev.as_deref(), Some("v1.2.3"));
+        assert_eq!(args.version, None);
       },
       other => panic!("expected update, got {other:?}"),
+    }
+  }
+
+  #[test]
+  fn parses_add_with_semver_version() {
+    let cli = Cli::parse_from(["joy", "add", "fmtlib/fmt", "--version", "^11"]);
+    match cli.command {
+      Commands::Add(args) => {
+        assert_eq!(args.package, "fmtlib/fmt");
+        assert_eq!(args.version.as_deref(), Some("^11"));
+        assert_eq!(args.rev, None);
+      },
+      other => panic!("expected add, got {other:?}"),
     }
   }
 

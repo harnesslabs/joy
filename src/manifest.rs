@@ -68,7 +68,10 @@ pub struct ProjectTarget {
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
 pub struct DependencySpec {
   pub source: DependencySource,
+  #[serde(default, skip_serializing_if = "String::is_empty")]
   pub rev: String,
+  #[serde(default, skip_serializing_if = "Option::is_none")]
+  pub version: Option<String>,
 }
 
 /// Supported dependency source backends for direct manifest entries.
@@ -140,6 +143,20 @@ impl Manifest {
       return Err(ManifestError::Validation(
         "project.include_dirs entries must not be empty".into(),
       ));
+    }
+    for (id, spec) in &self.dependencies {
+      let has_rev = !spec.rev.trim().is_empty();
+      let has_version = spec.version.as_deref().is_some_and(|v| !v.trim().is_empty());
+      if has_rev && has_version {
+        return Err(ManifestError::Validation(format!(
+          "dependency `{id}` cannot set both `rev` and `version`"
+        )));
+      }
+      if !has_rev && !has_version {
+        return Err(ManifestError::Validation(format!(
+          "dependency `{id}` must set either `rev` or `version`"
+        )));
+      }
     }
     let mut target_names = std::collections::BTreeSet::new();
     for target in &self.project.targets {
@@ -270,6 +287,27 @@ impl Manifest {
       is_default: false,
     })
   }
+
+  /// Return the dependency request as an exact rev (when present) or semver range.
+  pub fn dependency_requirement<'a>(
+    &'a self,
+    package: &str,
+  ) -> Option<DependencyRequirementRef<'a>> {
+    let spec = self.dependencies.get(package)?;
+    if let Some(version) = spec.version.as_deref()
+      && !version.trim().is_empty()
+    {
+      return Some(DependencyRequirementRef::Version(version));
+    }
+    Some(DependencyRequirementRef::Rev(if spec.rev.trim().is_empty() { "HEAD" } else { &spec.rev }))
+  }
+}
+
+/// Borrowed dependency requirement view used by resolver/commands.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum DependencyRequirementRef<'a> {
+  Rev(&'a str),
+  Version(&'a str),
 }
 
 /// Errors produced when loading, validating, or writing `joy.toml`.
@@ -301,12 +339,13 @@ pub enum ManifestError {
 
 #[cfg(test)]
 mod tests {
+  use std::collections::BTreeMap;
   use std::path::PathBuf;
   use tempfile::TempDir;
 
   use super::{
-    DependencySource, DependencySpec, Manifest, ManifestDocument, ProjectSection, ProjectTarget,
-    WorkspaceManifest,
+    DependencyRequirementRef, DependencySource, DependencySpec, Manifest, ManifestDocument,
+    ProjectSection, ProjectTarget, WorkspaceManifest,
   };
 
   #[test]
@@ -330,7 +369,7 @@ mod tests {
     };
     manifest.dependencies.insert(
       "nlohmann/json".into(),
-      DependencySpec { source: DependencySource::Github, rev: "HEAD".into() },
+      DependencySpec { source: DependencySource::Github, rev: "HEAD".into(), version: None },
     );
 
     let raw = toml::to_string_pretty(&manifest).expect("serialize");
@@ -419,5 +458,42 @@ default_member = "apps/a"
     assert!(!tool.is_default);
     assert_eq!(tool.entry, "src/tool.cpp");
     assert_eq!(tool.extra_sources, vec!["src/shared.cpp"]);
+  }
+
+  #[test]
+  fn dependency_requirement_prefers_semver_when_present() {
+    let manifest = Manifest {
+      project: ProjectSection {
+        name: "demo".into(),
+        version: "0.1.0".into(),
+        cpp_standard: "c++20".into(),
+        entry: "src/main.cpp".into(),
+        extra_sources: vec![],
+        include_dirs: vec![],
+        targets: vec![],
+      },
+      dependencies: BTreeMap::from([
+        (
+          "fmtlib/fmt".into(),
+          DependencySpec {
+            source: DependencySource::Github,
+            rev: String::new(),
+            version: Some("^11".into()),
+          },
+        ),
+        (
+          "nlohmann/json".into(),
+          DependencySpec { source: DependencySource::Github, rev: "HEAD".into(), version: None },
+        ),
+      ]),
+    };
+    assert_eq!(
+      manifest.dependency_requirement("fmtlib/fmt"),
+      Some(DependencyRequirementRef::Version("^11"))
+    );
+    assert_eq!(
+      manifest.dependency_requirement("nlohmann/json"),
+      Some(DependencyRequirementRef::Rev("HEAD"))
+    );
   }
 }

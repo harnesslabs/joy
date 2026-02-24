@@ -60,6 +60,8 @@ The machine contract is defined by `/Users/autoparallel/Code/joy/src/error.rs` (
 - `fetch_failed`
 - `offline_cache_miss`
 - `offline_network_disabled`
+- `invalid_version_requirement`
+- `version_not_found`
 
 ## Toolchain / Build Execution
 
@@ -91,6 +93,7 @@ The machine contract is defined by `/Users/autoparallel/Code/joy/src/error.rs` (
 ### `add`
 
 - `frozen_disallows_add`
+- `invalid_add_args`
 
 ### `remove`
 

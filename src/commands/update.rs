@@ -17,6 +17,8 @@ use crate::project_env;
 struct UpdatedDependency {
   package: String,
   requested_rev: String,
+  requested_requirement: Option<String>,
+  resolved_version: Option<String>,
   resolved_commit: String,
   cache_hit: bool,
   header_link_path: String,
@@ -36,6 +38,22 @@ pub fn handle(args: UpdateArgs, runtime: RuntimeFlags) -> Result<CommandOutput, 
       "update",
       "invalid_update_args",
       "`--rev` requires a specific package (`joy update <package> --rev <rev>`)",
+      1,
+    ));
+  }
+  if args.version.is_some() && args.package.is_none() {
+    return Err(JoyError::new(
+      "update",
+      "invalid_update_args",
+      "`--version` requires a specific package (`joy update <package> --version <range>`)",
+      1,
+    ));
+  }
+  if args.rev.is_some() && args.version.is_some() {
+    return Err(JoyError::new(
+      "update",
+      "invalid_update_args",
+      "`--rev` and `--version` are mutually exclusive; choose one dependency requirement style",
       1,
     ));
   }
@@ -120,30 +138,48 @@ pub fn handle(args: UpdateArgs, runtime: RuntimeFlags) -> Result<CommandOutput, 
       ));
     }
 
-    let requested_rev = if let Some(rev) = args.rev.as_ref() {
-      rev.clone()
-    } else if spec.rev.trim().is_empty() {
-      "HEAD".to_string()
+    let (desired_spec, fetched) = if let Some(version_req) = args.version.as_ref() {
+      let fetched = fetch::fetch_github_semver_with_cache(&package, version_req, &cache)
+        .map_err(|err| map_fetch_error("update", err))?;
+      (
+        DependencySpec {
+          source: DependencySource::Github,
+          rev: String::new(),
+          version: Some(version_req.clone()),
+        },
+        fetched,
+      )
+    } else if let Some(rev) = args.rev.as_ref() {
+      let fetched = fetch::fetch_github_with_cache(&package, rev, &cache)
+        .map_err(|err| map_fetch_error("update", err))?;
+      (
+        DependencySpec { source: DependencySource::Github, rev: rev.clone(), version: None },
+        fetched,
+      )
+    } else if let Some(version_req) = spec.version.as_deref().filter(|v| !v.trim().is_empty()) {
+      let fetched = fetch::fetch_github_semver_with_cache(&package, version_req, &cache)
+        .map_err(|err| map_fetch_error("update", err))?;
+      (spec.clone(), fetched)
     } else {
-      spec.rev.clone()
+      let requested_rev =
+        if spec.rev.trim().is_empty() { "HEAD".to_string() } else { spec.rev.clone() };
+      let fetched = fetch::fetch_github_with_cache(&package, &requested_rev, &cache)
+        .map_err(|err| map_fetch_error("update", err))?;
+      (spec.clone(), fetched)
     };
-
-    let fetched = fetch::fetch_github_with_cache(&package, &requested_rev, &cache)
-      .map_err(|err| map_fetch_error("update", err))?;
     let installed =
       linking::install_headers(&env_layout.include_dir, &package, &fetched.source_dir)
         .map_err(|err| JoyError::new("update", "header_install_failed", err.to_string(), 1))?;
 
-    if spec.rev != requested_rev {
-      manifest_changed |= manifest.add_dependency(
-        package.as_str().to_string(),
-        DependencySpec { source: DependencySource::Github, rev: requested_rev.clone() },
-      );
+    if spec != desired_spec {
+      manifest_changed |= manifest.add_dependency(package.as_str().to_string(), desired_spec);
     }
 
     updated.push(UpdatedDependency {
       package: package.as_str().to_string(),
-      requested_rev,
+      requested_rev: fetched.requested_rev,
+      requested_requirement: fetched.requested_requirement,
+      resolved_version: fetched.resolved_version,
       resolved_commit: fetched.resolved_commit,
       cache_hit: fetched.cache_hit,
       header_link_path: installed.link_path.display().to_string(),
@@ -198,6 +234,8 @@ pub fn handle(args: UpdateArgs, runtime: RuntimeFlags) -> Result<CommandOutput, 
       "updated": updated.iter().map(|item| json!({
         "package": item.package,
         "rev": item.requested_rev,
+        "requested_requirement": item.requested_requirement,
+        "resolved_version": item.resolved_version,
         "resolved_commit": item.resolved_commit,
         "cache_hit": item.cache_hit,
         "header_link_path": item.header_link_path,
@@ -212,6 +250,10 @@ fn map_fetch_error(command: &'static str, err: fetch::FetchError) -> JoyError {
     "offline_cache_miss"
   } else if err.is_offline_network_disabled() {
     "offline_network_disabled"
+  } else if err.is_invalid_version_requirement() {
+    "invalid_version_requirement"
+  } else if err.is_version_not_found() {
+    "version_not_found"
   } else {
     "fetch_failed"
   };
