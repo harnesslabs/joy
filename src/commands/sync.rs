@@ -5,11 +5,15 @@ use crate::error::JoyError;
 use super::build;
 
 pub fn handle(args: SyncArgs, runtime: RuntimeFlags) -> Result<CommandOutput, JoyError> {
+  if runtime.progress {
+    eprintln!("Synchronizing dependencies and lockfile...");
+  }
   let execution = build::sync_project(build::BuildOptions {
     release: args.release,
     locked: args.locked || runtime.frozen,
     update_lock: args.update_lock,
     offline: runtime.offline,
+    progress: runtime.progress,
   })?;
 
   let human_message = if let Some(toolchain) = &execution.toolchain {

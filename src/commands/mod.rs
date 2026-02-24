@@ -1,5 +1,6 @@
 pub mod add;
 pub mod build;
+pub mod doctor;
 pub mod init;
 pub mod new;
 pub mod recipe_check;
@@ -9,6 +10,7 @@ pub mod sync;
 pub mod tree;
 pub mod update;
 
+use serde::Serialize;
 use serde_json::Value;
 use std::fs;
 use std::path::{Path, PathBuf};
@@ -30,6 +32,23 @@ impl CommandOutput {
   pub fn new(command: &'static str, human_message: impl Into<String>, data: Value) -> Self {
     Self { command, human_message: human_message.into(), data }
   }
+
+  /// Create a command output payload from any serializable response type.
+  pub fn from_data<T: Serialize>(
+    command: &'static str,
+    human_message: impl Into<String>,
+    data: &T,
+  ) -> Result<Self, JoyError> {
+    let data = serde_json::to_value(data).map_err(|err| {
+      JoyError::new(
+        command,
+        "output_serialize_failed",
+        format!("failed to serialize output: {err}"),
+        1,
+      )
+    })?;
+    Ok(Self::new(command, human_message, data))
+  }
 }
 
 /// Dispatch the parsed CLI subcommand to its handler.
@@ -42,6 +61,7 @@ pub fn dispatch(command: Commands, runtime: RuntimeFlags) -> Result<CommandOutpu
     Commands::Update(args) => update::handle(args, runtime),
     Commands::Tree(args) => tree::handle(args, runtime),
     Commands::RecipeCheck(args) => recipe_check::handle(args),
+    Commands::Doctor(args) => doctor::handle(args),
     Commands::Build(args) => build::handle(args, runtime),
     Commands::Sync(args) => sync::handle(args, runtime),
     Commands::Run(args) => run::handle(args, runtime),

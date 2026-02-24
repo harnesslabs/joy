@@ -24,8 +24,14 @@ pub fn handle(args: AddArgs, runtime: RuntimeFlags) -> Result<CommandOutput, Joy
     ));
   }
 
-  let _fetch_runtime =
-    fetch::push_runtime_options(fetch::RuntimeOptions { offline: runtime.offline });
+  let _fetch_runtime = fetch::push_runtime_options(fetch::RuntimeOptions {
+    offline: runtime.offline,
+    progress: runtime.progress,
+  });
+
+  if runtime.progress {
+    eprintln!("Resolving and fetching `{}`...", args.package);
+  }
 
   let package = PackageId::parse(&args.package)
     .map_err(|err| JoyError::new("add", "invalid_package_id", err.to_string(), 1))?;
@@ -54,6 +60,9 @@ pub fn handle(args: AddArgs, runtime: RuntimeFlags) -> Result<CommandOutput, Joy
     .map_err(|err| JoyError::new("add", "cache_setup_failed", err.to_string(), 1))?;
   let fetched = fetch::fetch_github_with_cache(&package, &rev, &cache)
     .map_err(|err| map_fetch_error("add", err))?;
+  if runtime.progress {
+    eprintln!("Installing headers for `{}`...", package);
+  }
   let installed = linking::install_headers(&env_layout.include_dir, &package, &fetched.source_dir)
     .map_err(|err| JoyError::new("add", "header_install_failed", err.to_string(), 1))?;
 

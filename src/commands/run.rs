@@ -13,6 +13,7 @@ pub fn handle(args: RunArgs, runtime: RuntimeFlags) -> Result<CommandOutput, Joy
     locked: args.locked || runtime.frozen,
     update_lock: args.update_lock,
     offline: runtime.offline,
+    progress: runtime.progress,
   })
   .map_err(remap_build_error_for_run)?;
 

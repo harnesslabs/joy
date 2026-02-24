@@ -11,8 +11,10 @@ use crate::recipes::RecipeStore;
 use crate::resolver;
 
 pub fn handle(_args: TreeArgs, runtime: RuntimeFlags) -> Result<CommandOutput, JoyError> {
-  let _fetch_runtime =
-    fetch::push_runtime_options(fetch::RuntimeOptions { offline: runtime.offline });
+  let _fetch_runtime = fetch::push_runtime_options(fetch::RuntimeOptions {
+    offline: runtime.offline,
+    progress: runtime.progress,
+  });
   let cwd = env::current_dir().map_err(|err| {
     JoyError::new("tree", "cwd_unavailable", format!("failed to get cwd: {err}"), 1)
   })?;

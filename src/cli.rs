@@ -27,7 +27,7 @@ impl Cli {
   }
 
   pub fn runtime_flags(&self) -> RuntimeFlags {
-    RuntimeFlags { offline: self.offline || self.frozen, frozen: self.frozen }
+    RuntimeFlags { offline: self.offline || self.frozen, frozen: self.frozen, progress: !self.json }
   }
 }
 
@@ -35,6 +35,7 @@ impl Cli {
 pub struct RuntimeFlags {
   pub offline: bool,
   pub frozen: bool,
+  pub progress: bool,
 }
 
 #[derive(Debug, Subcommand)]
@@ -53,6 +54,8 @@ pub enum Commands {
   Tree(TreeArgs),
   /// Validate bundled recipe metadata (for local checks and CI).
   RecipeCheck(RecipeCheckArgs),
+  /// Diagnose local toolchain, cache, and recipe environment health.
+  Doctor(DoctorArgs),
   /// Build the current project.
   Build(BuildArgs),
   /// Materialize dependencies and lockfile state without compiling the final binary.
@@ -98,6 +101,9 @@ pub struct TreeArgs {}
 
 #[derive(Debug, Args)]
 pub struct RecipeCheckArgs {}
+
+#[derive(Debug, Args)]
+pub struct DoctorArgs {}
 
 #[derive(Debug, Args)]
 pub struct BuildArgs {
@@ -227,6 +233,15 @@ mod tests {
     match cli.command {
       Commands::RecipeCheck(_) => {},
       other => panic!("expected recipe-check, got {other:?}"),
+    }
+  }
+
+  #[test]
+  fn parses_doctor_command() {
+    let cli = Cli::parse_from(["joy", "doctor"]);
+    match cli.command {
+      Commands::Doctor(_) => {},
+      other => panic!("expected doctor, got {other:?}"),
     }
   }
 

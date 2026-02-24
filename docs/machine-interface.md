@@ -18,6 +18,7 @@ JSON output always uses one of two top-level envelopes:
 - Existing command payload keys are additive-only within the current roadmap phase series.
 - New commands may introduce new payload shapes, but should preserve deterministic ordering where practical.
 - Stable machine consumers should key off `error.code`, not free-form `error.message`.
+- See `/Users/autoparallel/Code/joy/docs/error-codes.md` for the current documented error-code catalog (grounded in the `JoyError` machine contract defined in `/Users/autoparallel/Code/joy/src/error.rs`).
 
 ## Dependency Command Payloads (Phase 11)
 
@@ -94,3 +95,28 @@ Each `packages[]` item contains:
 - `resolved_commit`
 - `recipe`
 - `deps`
+
+## `joy doctor --json` (Phase 13)
+
+`data` keys:
+
+- `ok`
+- `cwd`
+- `env`
+- `tools`
+- `toolchain`
+- `cache`
+- `recipes`
+
+Selected nested fields:
+
+- `env.path_present`
+- `env.joy_home`
+- `tools.<tool>.ok`
+- `tools.<tool>.path`
+- `toolchain.ok`
+- `toolchain.compiler_kind` (when available)
+- `cache.ok`
+- `cache.root`
+- `recipes.ok`
+- `recipes.recipe_count`

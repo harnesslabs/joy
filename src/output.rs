@@ -39,10 +39,10 @@ pub fn print_success(mode: OutputMode, result: &CommandOutput) -> io::Result<()>
       println!("{}", result.human_message);
       Ok(())
     },
-    OutputMode::Json => write_json(
-      &mut io::stdout(),
-      &SuccessEnvelope { ok: true, command: result.command, data: &result.data },
-    ),
+    OutputMode::Json => {
+      let envelope = success_envelope(result);
+      write_json(&mut io::stdout(), &envelope)
+    },
   }
 }
 
@@ -69,8 +69,10 @@ fn write_json<T: Serialize>(writer: &mut impl Write, value: &T) -> io::Result<()
   writer.flush()
 }
 
-// TODO(phase7): Consolidate command success/error JSON envelope shaping in one module so command
-// handlers can return typed payloads instead of raw `serde_json::Value`.
+fn success_envelope<'a>(result: &'a CommandOutput) -> SuccessEnvelope<'a> {
+  SuccessEnvelope { ok: true, command: result.command, data: &result.data }
+}
+
 fn error_envelope<'a>(command: &'a str, err: &'a JoyError) -> ErrorEnvelope<'a> {
   ErrorEnvelope {
     ok: false,
@@ -83,7 +85,8 @@ fn error_envelope<'a>(command: &'a str, err: &'a JoyError) -> ErrorEnvelope<'a> 
 mod tests {
   use serde_json::json;
 
-  use super::error_envelope;
+  use super::{error_envelope, success_envelope};
+  use crate::commands::CommandOutput;
   use crate::error::JoyError;
 
   #[test]
@@ -100,6 +103,22 @@ mod tests {
               "code": "toolchain_not_found",
               "message": "No compiler found"
           }
+      })
+    );
+  }
+
+  #[test]
+  fn json_success_envelope_shape_is_stable() {
+    let result = CommandOutput::new("recipe-check", "ok", json!({"recipe_count": 9}));
+    let value = serde_json::to_value(success_envelope(&result)).expect("serialize envelope");
+    assert_eq!(
+      value,
+      json!({
+        "ok": true,
+        "command": "recipe-check",
+        "data": {
+          "recipe_count": 9
+        }
       })
     );
   }

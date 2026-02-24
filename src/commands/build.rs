@@ -127,15 +127,20 @@ pub(crate) struct BuildOptions {
   pub locked: bool,
   pub update_lock: bool,
   pub offline: bool,
+  pub progress: bool,
 }
 
 /// Handle `joy build` by executing the local build pipeline and returning a CLI output payload.
 pub fn handle(args: BuildArgs, runtime: RuntimeFlags) -> Result<CommandOutput, JoyError> {
+  if runtime.progress {
+    eprintln!("Starting build...");
+  }
   let execution = build_project(BuildOptions {
     release: args.release,
     locked: args.locked || runtime.frozen,
     update_lock: args.update_lock,
     offline: runtime.offline,
+    progress: runtime.progress,
   })?;
 
   Ok(CommandOutput::new(
@@ -152,8 +157,10 @@ pub fn handle(args: BuildArgs, runtime: RuntimeFlags) -> Result<CommandOutput, J
 
 /// Build the current project and return the execution metadata reused by `joy run`.
 pub(crate) fn build_project(options: BuildOptions) -> Result<BuildExecution, JoyError> {
-  let _fetch_runtime =
-    fetch::push_runtime_options(fetch::RuntimeOptions { offline: options.offline });
+  let _fetch_runtime = fetch::push_runtime_options(fetch::RuntimeOptions {
+    offline: options.offline,
+    progress: options.progress,
+  });
   let project_root = env::current_dir().map_err(|err| {
     JoyError::new("build", "cwd_unavailable", format!("failed to get cwd: {err}"), 1)
   })?;
@@ -208,6 +215,10 @@ pub(crate) fn build_project(options: BuildOptions) -> Result<BuildExecution, Joy
   validate_locked_package_metadata_if_needed("build", &lock_plan, &native_link.lockfile_packages)?;
   refresh_install_index(&env_layout, &manifest, &native_link)?;
 
+  if options.progress {
+    eprintln!("Generating build graph...");
+  }
+
   let spec = NinjaBuildSpec {
     compiler_executable: toolchain.compiler.executable_name.clone(),
     cpp_standard: manifest.project.cpp_standard.clone(),
@@ -225,6 +236,9 @@ pub(crate) fn build_project(options: BuildOptions) -> Result<BuildExecution, Joy
   ninja::write_build_ninja(&build_file, &spec)
     .map_err(|err| JoyError::new("build", "ninja_file_write_failed", err.to_string(), 1))?;
 
+  if options.progress {
+    eprintln!("Compiling and linking...");
+  }
   let ninja_output = run_ninja_build(&toolchain, &project_root, &build_file)?;
 
   let lockfile_updated = write_lockfile_if_needed(
@@ -258,8 +272,10 @@ pub(crate) fn build_project(options: BuildOptions) -> Result<BuildExecution, Joy
 
 /// Materialize dependencies and lockfile state without compiling the final application binary.
 pub(crate) fn sync_project(options: BuildOptions) -> Result<SyncExecution, JoyError> {
-  let _fetch_runtime =
-    fetch::push_runtime_options(fetch::RuntimeOptions { offline: options.offline });
+  let _fetch_runtime = fetch::push_runtime_options(fetch::RuntimeOptions {
+    offline: options.offline,
+    progress: options.progress,
+  });
   let project_root = env::current_dir().map_err(|err| {
     JoyError::new("sync", "cwd_unavailable", format!("failed to get cwd: {err}"), 1)
   })?;

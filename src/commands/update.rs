@@ -39,8 +39,10 @@ pub fn handle(args: UpdateArgs, runtime: RuntimeFlags) -> Result<CommandOutput, 
     ));
   }
 
-  let _fetch_runtime =
-    fetch::push_runtime_options(fetch::RuntimeOptions { offline: runtime.offline });
+  let _fetch_runtime = fetch::push_runtime_options(fetch::RuntimeOptions {
+    offline: runtime.offline,
+    progress: runtime.progress,
+  });
 
   let cwd = env::current_dir().map_err(|err| {
     JoyError::new("update", "cwd_unavailable", format!("failed to get cwd: {err}"), 1)
@@ -95,6 +97,9 @@ pub fn handle(args: UpdateArgs, runtime: RuntimeFlags) -> Result<CommandOutput, 
   let mut updated = Vec::new();
 
   for package_raw in targets {
+    if runtime.progress {
+      eprintln!("Refreshing `{package_raw}`...");
+    }
     let package = PackageId::parse(&package_raw)
       .map_err(|err| JoyError::new("update", "invalid_package_id", err.to_string(), 1))?;
     let spec = manifest.dependencies.get(package.as_str()).cloned().ok_or_else(|| {

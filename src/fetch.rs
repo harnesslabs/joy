@@ -20,6 +20,7 @@ use crate::global_cache::{GlobalCache, GlobalCacheError};
 use crate::package_id::PackageId;
 
 const FETCH_FLAG_OFFLINE: u8 = 1 << 0;
+const FETCH_FLAG_PROGRESS: u8 = 1 << 1;
 const TRANSIENT_RETRY_ATTEMPTS: usize = 3;
 static FETCH_RUNTIME_FLAGS: AtomicU8 = AtomicU8::new(0);
 
@@ -27,6 +28,7 @@ static FETCH_RUNTIME_FLAGS: AtomicU8 = AtomicU8::new(0);
 #[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
 pub struct RuntimeOptions {
   pub offline: bool,
+  pub progress: bool,
 }
 
 /// RAII guard that restores the previous fetch runtime options on drop.
@@ -49,12 +51,19 @@ pub fn push_runtime_options(options: RuntimeOptions) -> RuntimeOptionsGuard {
   if options.offline {
     flags |= FETCH_FLAG_OFFLINE;
   }
+  if options.progress {
+    flags |= FETCH_FLAG_PROGRESS;
+  }
   let previous_flags = FETCH_RUNTIME_FLAGS.swap(flags, Ordering::SeqCst);
   RuntimeOptionsGuard { previous_flags }
 }
 
 fn runtime_offline_enabled() -> bool {
   FETCH_RUNTIME_FLAGS.load(Ordering::SeqCst) & FETCH_FLAG_OFFLINE != 0
+}
+
+fn runtime_progress_enabled() -> bool {
+  FETCH_RUNTIME_FLAGS.load(Ordering::SeqCst) & FETCH_FLAG_PROGRESS != 0
 }
 
 /// Result of fetching a package source tree (or reusing an existing cached checkout).
@@ -366,7 +375,7 @@ fn materialize_checkout(
 }
 
 fn emit_progress(message: &str) {
-  if std::io::stderr().is_terminal() {
+  if runtime_progress_enabled() && std::io::stderr().is_terminal() {
     eprintln!("{message}...");
   }
 }

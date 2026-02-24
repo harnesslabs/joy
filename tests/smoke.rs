@@ -58,3 +58,18 @@ fn recipe_check_json_validates_bundled_recipes() {
       .any(|v| v.as_str() == Some("nlohmann/json"))
   );
 }
+
+#[test]
+fn doctor_json_reports_environment_checks() {
+  let mut cmd = cargo_bin_cmd!("joy");
+  let assert = cmd.args(["--json", "doctor"]).assert().success();
+  let payload = json_stdout(&assert.get_output().stdout);
+
+  assert_eq!(payload["ok"], true);
+  assert_eq!(payload["command"], "doctor");
+  assert!(payload["data"]["env"]["path_present"].is_boolean());
+  assert!(payload["data"]["tools"]["git"]["ok"].is_boolean());
+  assert!(payload["data"]["cache"]["ok"].is_boolean());
+  assert!(payload["data"]["recipes"]["ok"].is_boolean());
+  assert!(payload["data"]["toolchain"]["ok"].is_boolean());
+}
