@@ -1,7 +1,9 @@
 pub mod cli;
 pub mod commands;
 pub mod error;
+pub mod manifest;
 pub mod output;
+pub mod project_env;
 pub mod templates;
 
 use clap::Parser;

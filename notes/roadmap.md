@@ -4,10 +4,10 @@ Source: user-provided master roadmap (Feb 24, 2026) and the decision-complete ex
 
 ## Current Status
 
-- Current phase: Phase 1 CLI foundation & scaffolding
+- Current phase: Phase 2 manifest parsing & local environment
 - Active branch: `codex/phase1-cli-foundation`
-- Last completed milestone: bootstrap tracker + CLI shell (`7edc164`)
-- Current focus: commit `new/init` scaffolding implementation and Phase 1 integration tests
+- Last completed milestone: Phase 1 scaffolding + integration tests (`b7b8b6b`)
+- Current focus: commit Phase 2 manifest parsing, `joy add`, and `.joy` environment creation
 
 ## Locked Decisions
 
@@ -21,7 +21,7 @@ Source: user-provided master roadmap (Feb 24, 2026) and the decision-complete ex
 ## Phase Checklist
 
 - [x] Phase 0: prep/bootstrap (tracker, justfile, crate split, baseline deps/tests)
-- [ ] Phase 1: CLI foundation & scaffolding
+- [x] Phase 1: CLI foundation & scaffolding
 - [ ] Phase 2: manifest parsing & local `.joy` environment
 - [ ] Phase 3: fetcher & header-only packages
 - [ ] Phase 4: compiler discovery & local build engine
@@ -32,8 +32,11 @@ Source: user-provided master roadmap (Feb 24, 2026) and the decision-complete ex
 
 - [x] Phase 0 tracker/bootstrap commit (combined with early Phase 1 shell in `7edc164`)
 - [x] Phase 1 CLI shape + JSON output commit (combined in `7edc164`)
-- [ ] Phase 1 scaffolding implementation commit
-- [ ] Phase 1 integration tests + justfile polish commit
+- [x] Phase 1 scaffolding implementation commit (`b7b8b6b`)
+- [x] Phase 1 integration tests + justfile polish commit (`b7b8b6b`)
+- [ ] Phase 2 manifest parsing commit
+- [ ] Phase 2 `joy add` + `.joy` env commit
+- [ ] Phase 2 tests/snapshots commit
 
 ## Notes Convention
 

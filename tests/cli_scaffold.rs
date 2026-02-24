@@ -152,9 +152,7 @@ fn joy_new_json_returns_success_envelope() {
 #[test]
 fn stub_commands_return_json_not_implemented() {
   let temp = TempDir::new().expect("tempdir");
-  for (command, args) in
-    [("add", vec!["add", "nlohmann/json"]), ("build", vec!["build"]), ("run", vec!["run"])]
-  {
+  for (command, args) in [("build", vec!["build"]), ("run", vec!["run"])] {
     let mut cmd = cargo_bin_cmd!("joy");
     let assert = cmd.current_dir(temp.path()).arg("--json").args(args).assert().code(2);
 
