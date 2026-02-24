@@ -4,10 +4,10 @@ Source: user-provided master roadmap (Feb 24, 2026) and the decision-complete ex
 
 ## Current Status
 
-- Current phase: Phase 5 dependency graph & compiled libraries (in progress)
+- Current phase: Phase 6 lockfiles & production polish (next)
 - Active branch: `codex/phase5-compiled-deps`
-- Last completed milestone: Phase 5 CMake adapter + compiled library installer core (`cc12f5e`)
-- Current focus: wire resolver/recipes/CMake cache outputs into `joy build`/`joy run`
+- Last completed milestone: Phase 5 compiled dependency build integration (`ed5f6b2`)
+- Current focus: implement `joy.lock` core schema + build-time enforcement
 
 ## Locked Decisions
 
@@ -25,7 +25,7 @@ Source: user-provided master roadmap (Feb 24, 2026) and the decision-complete ex
 - [x] Phase 2: manifest parsing & local `.joy` environment
 - [x] Phase 3: fetcher & header-only packages
 - [x] Phase 4: compiler discovery & local build engine
-- [ ] Phase 5: dependency graph & compiled libraries
+- [x] Phase 5: dependency graph & compiled libraries
 - [ ] Phase 6: lockfiles & production polish
 
 ## Immediate Milestones (Execution Order)
@@ -46,13 +46,19 @@ Source: user-provided master roadmap (Feb 24, 2026) and the decision-complete ex
 - [x] Phase 4 `joy build`/`joy run` execution + E2E tests (`14aabda`)
 - [x] Phase 5 recipes + resolver + DAG (`264fce9`)
 - [x] Phase 5 ABI hash + cache build layout (`a1d2cc3`)
-- [ ] Phase 5 CMake adapter + linking (command integration pending)
+- [x] Phase 5 CMake adapter + linking (`cc12f5e`, `ed5f6b2`)
 
 ## Phase 5 Progress Notes
 
 - [x] CMake adapter builds local CMake projects into ABI cache and writes cache manifests (`cc12f5e`)
 - [x] Compiled library artifact installer copies cache libs into project `.joy/lib` and provides linker inputs (`cc12f5e`)
-- [ ] Integrate resolver + ABI cache + CMake adapter into `joy build` / `joy run`
+- [x] Integrate resolver + ABI cache + CMake adapter into `joy build` / `joy run` (`ed5f6b2`)
+
+## Phase 6 Immediate Milestones
+
+- [ ] Phase 6 lockfile core (`joy.lock` schema + manifest hash)
+- [ ] Phase 6 build/run lockfile enforcement (`--locked`, `--update-lock`)
+- [ ] Phase 6 parallel fetch + cache cleanup
 
 ## Notes Convention
 
