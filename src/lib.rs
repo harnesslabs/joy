@@ -49,11 +49,19 @@ where
   I: IntoIterator<Item = T>,
   T: Into<OsString> + Clone,
 {
-  let cli = match Cli::try_parse_from(args) {
+  let argv: Vec<OsString> = args.into_iter().map(Into::into).collect();
+  let requested_json = args_request_json_mode(&argv);
+
+  let cli = match Cli::try_parse_from(argv) {
     Ok(cli) => cli,
     Err(err) => {
       let code = err.exit_code();
-      let _ = err.print();
+      if requested_json && code != 0 {
+        let joy_err = crate::error::JoyError::new("cli", "cli_parse_error", err.to_string(), 2);
+        let _ = crate::output::print_error(crate::output::OutputMode::Json, "cli", &joy_err);
+      } else {
+        let _ = err.print();
+      }
       return to_exit_code(code);
     },
   };
@@ -80,4 +88,15 @@ where
 fn to_exit_code(code: i32) -> ExitCode {
   let bounded = code.clamp(0, u8::MAX as i32) as u8;
   ExitCode::from(bounded)
+}
+
+fn args_request_json_mode(args: &[OsString]) -> bool {
+  args.iter().skip(1).any(|arg| {
+    matches!(
+      arg.to_str(),
+      Some("--json")
+        | Some("--machine")
+        | Some("-j") // future-proof if added
+    )
+  })
 }
