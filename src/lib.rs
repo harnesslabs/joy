@@ -9,6 +9,8 @@ pub mod ninja;
 pub mod output;
 pub mod package_id;
 pub mod project_env;
+pub mod recipes;
+pub mod resolver;
 pub mod templates;
 pub mod toolchain;
 

@@ -1,0 +1,10 @@
+id = "nlohmann/json"
+slug = "nlohmann_json"
+source = "github"
+kind = "header_only"
+
+[headers]
+include_roots = ["include", "single_include"]
+
+[deps]
+packages = []

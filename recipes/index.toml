@@ -1,0 +1,13 @@
+version = 1
+
+[[packages]]
+id = "nlohmann/json"
+slug = "nlohmann_json"
+
+[[packages]]
+id = "fmtlib/fmt"
+slug = "fmt"
+
+[[packages]]
+id = "madler/zlib"
+slug = "zlib"
