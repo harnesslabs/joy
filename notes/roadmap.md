@@ -4,10 +4,10 @@ Source: user-provided master roadmap (Feb 24, 2026) and the decision-complete ex
 
 ## Current Status
 
-- Current phase: Phase 3 fetcher & header-only ecosystem (next)
-- Active branch: `codex/phase1-cli-foundation`
-- Last completed milestone: Phase 2 manifest parsing + `joy add` + local env (`dbdcb0e`)
-- Current focus: begin global cache + fetch abstraction (Phase 3)
+- Current phase: Phase 3 fetcher & header-only ecosystem (in progress)
+- Active branch: `codex/phase3-fetcher-header-only`
+- Last completed milestone: Phase 3 git cache + header-only install MVP (`68f879a`)
+- Current focus: finish Phase 3 archive fetch backend (`reqwest`/`tar`/`flate2`) and broader link fallback coverage
 
 ## Locked Decisions
 
@@ -37,6 +37,10 @@ Source: user-provided master roadmap (Feb 24, 2026) and the decision-complete ex
 - [x] Phase 2 manifest parsing commit (delivered in `dbdcb0e`)
 - [x] Phase 2 `joy add` + `.joy` env commit (delivered in `dbdcb0e`)
 - [x] Phase 2 tests/snapshots commit (completed with `dbdcb0e` + `fe7d586`)
+- [x] Phase 3 cache/fetch core commit (`68f879a`) - git mirror cache + commit materialization
+- [x] Phase 3 header linking + `joy add` integration commit (`68f879a`) - `.joy/include/deps/<slug>` install path
+- [ ] Phase 3 archive fetch backend + mockito tests
+- [ ] Phase 3 cross-platform symlink/copy fallback assertions
 
 ## Notes Convention
 
