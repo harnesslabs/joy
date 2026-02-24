@@ -4,10 +4,10 @@ Source: user-provided master roadmap (Feb 24, 2026) and the decision-complete ex
 
 ## Current Status
 
-- Current phase: Phase 0 / Phase 1 bootstrap
+- Current phase: Phase 1 CLI foundation & scaffolding
 - Active branch: `codex/phase1-cli-foundation`
-- Last completed milestone: none
-- Current focus: establish tracker, `justfile`, crate structure, and CLI skeleton
+- Last completed milestone: bootstrap tracker + CLI shell (`7edc164`)
+- Current focus: commit `new/init` scaffolding implementation and Phase 1 integration tests
 
 ## Locked Decisions
 
@@ -20,7 +20,7 @@ Source: user-provided master roadmap (Feb 24, 2026) and the decision-complete ex
 
 ## Phase Checklist
 
-- [ ] Phase 0: prep/bootstrap (tracker, justfile, crate split, baseline deps/tests)
+- [x] Phase 0: prep/bootstrap (tracker, justfile, crate split, baseline deps/tests)
 - [ ] Phase 1: CLI foundation & scaffolding
 - [ ] Phase 2: manifest parsing & local `.joy` environment
 - [ ] Phase 3: fetcher & header-only packages
@@ -30,8 +30,8 @@ Source: user-provided master roadmap (Feb 24, 2026) and the decision-complete ex
 
 ## Immediate Milestones (Execution Order)
 
-- [ ] Phase 0 tracker/bootstrap commit
-- [ ] Phase 1 CLI shape + JSON output commit
+- [x] Phase 0 tracker/bootstrap commit (combined with early Phase 1 shell in `7edc164`)
+- [x] Phase 1 CLI shape + JSON output commit (combined in `7edc164`)
 - [ ] Phase 1 scaffolding implementation commit
 - [ ] Phase 1 integration tests + justfile polish commit
 

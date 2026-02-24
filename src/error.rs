@@ -22,4 +22,13 @@ impl JoyError {
   pub fn not_implemented(command: &'static str) -> Self {
     Self::new(command, "not_implemented", format!("`joy {command}` is not implemented yet"), 2)
   }
+
+  pub fn io(
+    command: &'static str,
+    action: &str,
+    path: &std::path::Path,
+    err: &std::io::Error,
+  ) -> Self {
+    Self::new(command, "io_error", format!("{action} `{}` failed: {err}", path.display()), 1)
+  }
 }
