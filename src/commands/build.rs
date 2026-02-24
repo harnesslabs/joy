@@ -7,6 +7,7 @@ use std::process::Command;
 use crate::cli::BuildArgs;
 use crate::commands::CommandOutput;
 use crate::error::JoyError;
+use crate::lockfile;
 use crate::manifest::Manifest;
 use crate::ninja::{BuildProfile, NinjaBuildSpec};
 use crate::recipes::{Linkage as RecipeLinkage, RecipeStore};
@@ -28,10 +29,23 @@ pub(crate) struct BuildExecution {
   pub ninja_stdout: String,
   pub ninja_stderr: String,
   pub compiled_dependencies_built: Vec<String>,
+  pub lockfile_path: PathBuf,
+  pub lockfile_updated: bool,
+}
+
+#[derive(Debug, Clone, Copy)]
+pub(crate) struct BuildOptions {
+  pub release: bool,
+  pub locked: bool,
+  pub update_lock: bool,
 }
 
 pub fn handle(args: BuildArgs) -> Result<CommandOutput, JoyError> {
-  let execution = build_project(args.release)?;
+  let execution = build_project(BuildOptions {
+    release: args.release,
+    locked: args.locked,
+    update_lock: args.update_lock,
+  })?;
 
   Ok(CommandOutput::new(
     "build",
@@ -61,11 +75,13 @@ pub fn handle(args: BuildArgs) -> Result<CommandOutput, JoyError> {
       "ninja_status": execution.ninja_status,
       "ninja_stdout": execution.ninja_stdout,
       "ninja_stderr": execution.ninja_stderr,
+      "lockfile_path": execution.lockfile_path.display().to_string(),
+      "lockfile_updated": execution.lockfile_updated,
     }),
   ))
 }
 
-pub(crate) fn build_project(release: bool) -> Result<BuildExecution, JoyError> {
+pub(crate) fn build_project(options: BuildOptions) -> Result<BuildExecution, JoyError> {
   let project_root = env::current_dir().map_err(|err| {
     JoyError::new("build", "cwd_unavailable", format!("failed to get cwd: {err}"), 1)
   })?;
@@ -81,8 +97,12 @@ pub(crate) fn build_project(release: bool) -> Result<BuildExecution, JoyError> {
 
   let manifest = Manifest::load(&manifest_path)
     .map_err(|err| JoyError::new("build", "manifest_parse_error", err.to_string(), 1))?;
+  let manifest_hash = lockfile::compute_manifest_hash(&manifest_path)
+    .map_err(|err| JoyError::new("build", "lockfile_hash_failed", err.to_string(), 1))?;
+  let lockfile_path = project_root.join("joy.lock");
   let env_layout = project_env::ensure_layout(&project_root)
     .map_err(|err| JoyError::new("build", "env_setup_failed", err.to_string(), 1))?;
+  let lock_plan = evaluate_lockfile_plan(&lockfile_path, &manifest_hash, options)?;
 
   let toolchain = toolchain::discover().map_err(map_toolchain_error)?;
   let source_file = project_root.join(&manifest.project.entry);
@@ -109,7 +129,7 @@ pub(crate) fn build_project(release: bool) -> Result<BuildExecution, JoyError> {
     &manifest,
     &env_layout.lib_dir,
     &toolchain,
-    BuildProfile::from_release_flag(release),
+    BuildProfile::from_release_flag(options.release),
   )?;
 
   let spec = NinjaBuildSpec {
@@ -125,7 +145,7 @@ pub(crate) fn build_project(release: bool) -> Result<BuildExecution, JoyError> {
       .map(|dir| relative_or_absolute(&project_root, dir))
       .collect(),
     link_libs: native_link.link_libs.clone(),
-    profile: BuildProfile::from_release_flag(release),
+    profile: BuildProfile::from_release_flag(options.release),
   };
   ninja::write_build_ninja(&build_file, &spec)
     .map_err(|err| JoyError::new("build", "ninja_file_write_failed", err.to_string(), 1))?;
@@ -154,6 +174,20 @@ pub(crate) fn build_project(release: bool) -> Result<BuildExecution, JoyError> {
     ));
   }
 
+  let mut lockfile_updated = false;
+  if lock_plan.write_after_build {
+    let lock = lockfile::Lockfile {
+      version: lockfile::Lockfile::VERSION,
+      manifest_hash,
+      generated_by: lockfile::generated_by_string(),
+      packages: Vec::new(),
+    };
+    lock
+      .save(&lockfile_path)
+      .map_err(|err| JoyError::new("build", "lockfile_write_failed", err.to_string(), 1))?;
+    lockfile_updated = true;
+  }
+
   Ok(BuildExecution {
     project_root,
     manifest_path,
@@ -164,11 +198,13 @@ pub(crate) fn build_project(release: bool) -> Result<BuildExecution, JoyError> {
     link_dirs: native_link.link_dirs,
     link_libs: native_link.link_libs,
     toolchain,
-    profile: BuildProfile::from_release_flag(release),
+    profile: BuildProfile::from_release_flag(options.release),
     ninja_status: output.status.code().unwrap_or_default(),
     ninja_stdout,
     ninja_stderr,
     compiled_dependencies_built: native_link.built_packages,
+    lockfile_path,
+    lockfile_updated,
   })
 }
 
@@ -349,6 +385,74 @@ fn target_triple_guess() -> String {
     };
     format!("{}-{env_suffix}", std::env::consts::ARCH)
   })
+}
+
+#[derive(Debug, Clone, Copy)]
+struct LockfilePlan {
+  write_after_build: bool,
+}
+
+fn evaluate_lockfile_plan(
+  lockfile_path: &Path,
+  manifest_hash: &str,
+  options: BuildOptions,
+) -> Result<LockfilePlan, JoyError> {
+  if options.locked && options.update_lock {
+    return Err(JoyError::new(
+      "build",
+      "invalid_lock_flags",
+      "cannot use --locked and --update-lock together",
+      1,
+    ));
+  }
+
+  let lock_exists = lockfile_path.is_file();
+  let lock = if lock_exists {
+    Some(
+      lockfile::Lockfile::load(lockfile_path)
+        .map_err(|err| JoyError::new("build", "lockfile_parse_error", err.to_string(), 1))?,
+    )
+  } else {
+    None
+  };
+
+  if options.locked {
+    let Some(lock) = lock else {
+      return Err(JoyError::new(
+        "build",
+        "lockfile_missing",
+        format!(
+          "`--locked` requires `{}` to exist; run `joy build --update-lock` first",
+          lockfile_path.display()
+        ),
+        1,
+      ));
+    };
+    if lock.manifest_hash != manifest_hash {
+      return Err(JoyError::new(
+        "build",
+        "lockfile_stale",
+        "lockfile manifest hash does not match joy.toml; rerun with --update-lock".to_string(),
+        1,
+      ));
+    }
+    return Ok(LockfilePlan { write_after_build: false });
+  }
+
+  if let Some(ref lock) = lock
+    && lock.manifest_hash != manifest_hash
+    && !options.update_lock
+  {
+    return Err(JoyError::new(
+      "build",
+      "lockfile_stale",
+      "lockfile manifest hash does not match joy.toml; rerun with --update-lock".to_string(),
+      1,
+    ));
+  }
+
+  let stale = lock.as_ref().is_some_and(|l| l.manifest_hash != manifest_hash);
+  Ok(LockfilePlan { write_after_build: options.update_lock || !lock_exists || stale })
 }
 
 fn map_toolchain_error(err: toolchain::ToolchainError) -> JoyError {

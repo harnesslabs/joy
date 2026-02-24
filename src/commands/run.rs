@@ -8,7 +8,12 @@ use crate::error::JoyError;
 use super::build;
 
 pub fn handle(args: RunArgs) -> Result<CommandOutput, JoyError> {
-  let execution = build::build_project(args.release).map_err(remap_build_error_for_run)?;
+  let execution = build::build_project(build::BuildOptions {
+    release: args.release,
+    locked: args.locked,
+    update_lock: args.update_lock,
+  })
+  .map_err(remap_build_error_for_run)?;
 
   let output = Command::new(&execution.binary_path).args(&args.args).output().map_err(|err| {
     JoyError::new(
@@ -65,6 +70,8 @@ pub fn handle(args: RunArgs) -> Result<CommandOutput, JoyError> {
       "exit_code": exit_code,
       "stdout": stdout_text,
       "stderr": stderr_text,
+      "lockfile_path": execution.lockfile_path.display().to_string(),
+      "lockfile_updated": execution.lockfile_updated,
     }),
   ))
 }

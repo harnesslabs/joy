@@ -6,6 +6,7 @@ pub mod error;
 pub mod fetch;
 pub mod global_cache;
 pub mod linking;
+pub mod lockfile;
 pub mod manifest;
 pub mod ninja;
 pub mod output;
