@@ -6,8 +6,8 @@ Source: user-provided master roadmap (Feb 24, 2026) and the decision-complete ex
 
 - Current phase: Phase 6 lockfiles & production polish (in progress)
 - Active branch: `codex/phase6-lockfiles-polish`
-- Last completed milestone: Phase 6 local install-index cleanup (`0502b1a`)
-- Current focus: parallelize fetch/extract work (tokio bounded concurrency)
+- Last completed milestone: Phase 6 parallel dependency prefetch (`038afdf`)
+- Current focus: CI hardening for compiled-dependency coverage and final polish
 
 ## Locked Decisions
 
@@ -58,13 +58,14 @@ Source: user-provided master roadmap (Feb 24, 2026) and the decision-complete ex
 
 - [x] Phase 6 lockfile core (`joy.lock` schema + manifest hash) (`4205f6e`)
 - [x] Phase 6 build/run lockfile enforcement (`--locked`, `--update-lock`) (`4205f6e`)
-- [ ] Phase 6 parallel fetch + cache cleanup (parallel fetch remaining)
+- [x] Phase 6 parallel fetch + cache cleanup (`0502b1a`, `038afdf`)
 
 ## Phase 6 Progress Notes
 
 - [x] `joy.lock` core schema + manifest-hash enforcement in build/run (`4205f6e`)
 - [x] `.joy/state/install-index.json` tracking and orphan cleanup for tracked headers/libs (`0502b1a`)
-- [ ] Parallelize fetch/extract work with bounded concurrency
+- [x] Parallelize fetch/extract work with bounded concurrency (`038afdf`)
+- [ ] CI hardening / compiled-dependency coverage job
 
 ## Notes Convention
 
