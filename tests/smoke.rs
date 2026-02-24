@@ -10,5 +10,6 @@ fn help_smoke_test() {
     .success()
     .stdout(predicate::str::contains("Native C++ package and build manager"))
     .stdout(predicate::str::contains("new"))
-    .stdout(predicate::str::contains("--json"));
+    .stdout(predicate::str::contains("--json"))
+    .stdout(predicate::str::contains("--machine"));
 }
