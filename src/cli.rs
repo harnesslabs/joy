@@ -6,7 +6,7 @@ use crate::output::OutputMode;
 #[command(name = "joy", version, about = "Native C++ package and build manager")]
 pub struct Cli {
   /// Emit machine-readable JSON output.
-  #[arg(long, alias = "machine", global = true)]
+  #[arg(long, visible_alias = "machine", global = true)]
   pub json: bool,
 
   #[command(subcommand)]

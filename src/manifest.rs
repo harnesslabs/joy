@@ -42,7 +42,7 @@ impl Manifest {
   /// Load, parse, and validate a manifest from disk.
   pub fn load(path: &Path) -> Result<Self, ManifestError> {
     let raw = fs::read_to_string(path)
-      .map_err(|source| ManifestError::Io { path: path.to_path_buf(), source })?;
+      .map_err(|source| ManifestError::ReadIo { path: path.to_path_buf(), source })?;
     let manifest: Self = toml::from_str(&raw).map_err(|source| ManifestError::Parse {
       path: path.to_path_buf(),
       source: Box::new(source),
@@ -60,7 +60,8 @@ impl Manifest {
     if !raw.ends_with('\n') {
       raw.push('\n');
     }
-    fs::write(path, raw).map_err(|source| ManifestError::Io { path: path.to_path_buf(), source })
+    fs::write(path, raw)
+      .map_err(|source| ManifestError::WriteIo { path: path.to_path_buf(), source })
   }
 
   /// Insert or replace a dependency entry.
@@ -91,7 +92,13 @@ impl Manifest {
 #[derive(Debug, Error)]
 pub enum ManifestError {
   #[error("failed to read manifest `{path}`: {source}")]
-  Io {
+  ReadIo {
+    path: PathBuf,
+    #[source]
+    source: std::io::Error,
+  },
+  #[error("failed to write manifest `{path}`: {source}")]
+  WriteIo {
     path: PathBuf,
     #[source]
     source: std::io::Error,
@@ -110,6 +117,8 @@ pub enum ManifestError {
 
 #[cfg(test)]
 mod tests {
+  use std::path::PathBuf;
+
   use super::{DependencySource, DependencySpec, Manifest, ProjectSection};
 
   #[test]
@@ -132,5 +141,14 @@ mod tests {
     let reparsed: Manifest = toml::from_str(&raw).expect("parse");
 
     assert_eq!(reparsed, manifest);
+  }
+
+  #[test]
+  fn write_io_error_mentions_write_action() {
+    let err = super::ManifestError::WriteIo {
+      path: PathBuf::from("joy.toml"),
+      source: std::io::Error::new(std::io::ErrorKind::PermissionDenied, "denied"),
+    };
+    assert!(err.to_string().contains("failed to write manifest"));
   }
 }

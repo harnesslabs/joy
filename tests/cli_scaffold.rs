@@ -150,6 +150,20 @@ fn joy_new_json_returns_success_envelope() {
 }
 
 #[test]
+fn joy_new_uses_target_directory_basename_for_manifest_name_when_given_absolute_path() {
+  let temp = TempDir::new().expect("tempdir");
+  let root = temp.path().join("abs_project");
+  let root_arg = root.to_str().expect("utf-8 temp path");
+
+  let mut cmd = cargo_bin_cmd!("joy");
+  cmd.current_dir(temp.path()).args(["new", root_arg]).assert().success();
+
+  let manifest = read_to_string(root.join("joy.toml"));
+  assert!(manifest.contains("name = \"abs_project\""));
+  assert!(!manifest.contains(root_arg));
+}
+
+#[test]
 fn build_and_run_return_manifest_not_found_in_empty_directory() {
   let temp = TempDir::new().expect("tempdir");
   for (command, args) in [("build", vec!["build"]), ("run", vec!["run"])] {

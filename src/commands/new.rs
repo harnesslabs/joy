@@ -1,6 +1,7 @@
 use serde_json::json;
 use std::env;
 use std::fs;
+use std::path::Path;
 
 use crate::cli::NewArgs;
 use crate::commands::{CommandOutput, dir_is_empty, scaffold_files};
@@ -11,6 +12,7 @@ pub fn handle(args: NewArgs) -> Result<CommandOutput, JoyError> {
     JoyError::new("new", "cwd_unavailable", format!("failed to get cwd: {err}"), 1)
   })?;
   let root = cwd.join(&args.name);
+  let project_name = project_name_from_root(&root);
 
   if root.exists() {
     let metadata =
@@ -35,7 +37,7 @@ pub fn handle(args: NewArgs) -> Result<CommandOutput, JoyError> {
     }
   }
 
-  let summary = scaffold_files("new", &root, &args.name, args.force)?;
+  let summary = scaffold_files("new", &root, &project_name, args.force)?;
   let created_paths: Vec<String> =
     summary.created.iter().map(|path| path.display().to_string()).collect();
   let overwritten_paths: Vec<String> =
@@ -43,12 +45,20 @@ pub fn handle(args: NewArgs) -> Result<CommandOutput, JoyError> {
 
   Ok(CommandOutput::new(
     "new",
-    format!("Created joy project `{}` at {}", args.name, summary.root.display()),
+    format!("Created joy project `{}` at {}", project_name, summary.root.display()),
     json!({
-      "project_name": args.name,
+      "project_name": project_name,
       "project_root": summary.root.display().to_string(),
       "created_paths": created_paths,
       "overwritten_paths": overwritten_paths
     }),
   ))
+}
+
+fn project_name_from_root(root: &Path) -> String {
+  root
+    .file_name()
+    .map(|name| name.to_string_lossy().into_owned())
+    .filter(|name| !name.trim().is_empty())
+    .unwrap_or_else(|| root.to_string_lossy().into_owned())
 }

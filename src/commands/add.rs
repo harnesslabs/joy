@@ -1,5 +1,7 @@
 use serde_json::json;
 use std::env;
+use std::fs;
+use std::path::Path;
 
 use crate::cli::AddArgs;
 use crate::commands::CommandOutput;
@@ -47,10 +49,16 @@ pub fn handle(args: AddArgs) -> Result<CommandOutput, JoyError> {
     package.as_str().to_string(),
     DependencySpec { source: DependencySource::Github, rev: rev.clone() },
   );
-  if changed {
-    manifest
-      .save(&manifest_path)
-      .map_err(|err| JoyError::new("add", "manifest_write_error", err.to_string(), 1))?;
+  if changed && let Err(err) = manifest.save(&manifest_path) {
+    let rollback_err = remove_installed_header_path(&installed.link_path);
+    let mut message = err.to_string();
+    if let Err(clean_err) = rollback_err {
+      message.push_str(&format!(
+        "\nrollback failed: could not remove installed headers at `{}`: {clean_err}",
+        installed.link_path.display()
+      ));
+    }
+    return Err(JoyError::new("add", "manifest_write_error", message, 1));
   }
 
   let lockfile_warning = cwd.join("joy.lock").is_file().then_some(
@@ -107,4 +115,29 @@ pub fn handle(args: AddArgs) -> Result<CommandOutput, JoyError> {
       "warnings": lockfile_warning.map(|w| vec![w]).unwrap_or_default(),
     }),
   ))
+}
+
+fn remove_installed_header_path(path: &Path) -> std::io::Result<()> {
+  match fs::symlink_metadata(path) {
+    Ok(metadata) => {
+      if metadata.file_type().is_symlink() || metadata.is_file() {
+        fs::remove_file(path).or_else(|err| {
+          if matches!(
+            err.kind(),
+            std::io::ErrorKind::PermissionDenied | std::io::ErrorKind::IsADirectory
+          ) {
+            fs::remove_dir(path)
+          } else {
+            Err(err)
+          }
+        })
+      } else if metadata.is_dir() {
+        fs::remove_dir_all(path)
+      } else {
+        fs::remove_file(path)
+      }
+    },
+    Err(err) if err.kind() == std::io::ErrorKind::NotFound => Ok(()),
+    Err(err) => Err(err),
+  }
 }
