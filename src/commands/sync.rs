@@ -11,6 +11,7 @@ pub fn handle(args: SyncArgs, runtime: RuntimeFlags) -> Result<CommandOutput, Jo
   }
   let execution = build::sync_project(build::BuildOptions {
     release: args.release,
+    target: None,
     locked: args.locked || runtime.frozen,
     update_lock: args.update_lock,
     offline: runtime.offline,

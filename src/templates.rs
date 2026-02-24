@@ -7,6 +7,11 @@ cpp_standard = "c++20"
 entry = "src/main.cpp"
 # extra_sources = ["src/lib.cpp", "src/feature/main.cpp"]
 # include_dirs = ["include"]
+# [[project.targets]]
+# name = "tool"
+# entry = "src/tool.cpp"
+# extra_sources = ["src/shared.cpp"]
+# include_dirs = ["tools/include"]
 
 [dependencies]
 "#
@@ -48,6 +53,11 @@ cpp_standard = "c++20"
 entry = "src/main.cpp"
 # extra_sources = ["src/lib.cpp", "src/feature/main.cpp"]
 # include_dirs = ["include"]
+# [[project.targets]]
+# name = "tool"
+# entry = "src/tool.cpp"
+# extra_sources = ["src/shared.cpp"]
+# include_dirs = ["tools/include"]
 
 [dependencies]
 "#

@@ -40,6 +40,9 @@ The machine contract is defined by `/Users/autoparallel/Code/joy/src/error.rs` (
 - `path_exists`
 - `invalid_package_id`
 - `dependency_not_found`
+- `workspace_member_invalid`
+- `workspace_member_required`
+- `workspace_member_not_found`
 
 ## Lockfile / Reproducibility
 

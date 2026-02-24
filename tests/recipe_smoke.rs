@@ -137,6 +137,7 @@ libs = ["leaf"]
       entry: "src/main.cpp".to_string(),
       extra_sources: Vec::new(),
       include_dirs: Vec::new(),
+      targets: Vec::new(),
     },
     dependencies: deps,
   };

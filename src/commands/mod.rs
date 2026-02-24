@@ -12,11 +12,13 @@ pub mod update;
 
 use serde::Serialize;
 use serde_json::Value;
+use std::env;
 use std::fs;
 use std::path::{Path, PathBuf};
 
 use crate::cli::{Commands, RuntimeFlags};
 use crate::error::JoyError;
+use crate::manifest::{Manifest, ManifestDocument, WorkspaceManifest};
 use crate::templates;
 
 /// Unified command result used by the output renderer for human and JSON modes.
@@ -56,15 +58,190 @@ pub fn dispatch(command: Commands, runtime: RuntimeFlags) -> Result<CommandOutpu
   match command {
     Commands::New(args) => new::handle(args),
     Commands::Init(args) => init::handle(args),
-    Commands::Add(args) => add::handle(args, runtime),
-    Commands::Remove(args) => remove::handle(args, runtime),
-    Commands::Update(args) => update::handle(args, runtime),
-    Commands::Tree(args) => tree::handle(args, runtime),
+    Commands::Add(args) => {
+      dispatch_project_scoped("add", runtime, |runtime| add::handle(args, runtime))
+    },
+    Commands::Remove(args) => {
+      dispatch_project_scoped("remove", runtime, |runtime| remove::handle(args, runtime))
+    },
+    Commands::Update(args) => {
+      dispatch_project_scoped("update", runtime, |runtime| update::handle(args, runtime))
+    },
+    Commands::Tree(args) => {
+      dispatch_project_scoped("tree", runtime, |runtime| tree::handle(args, runtime))
+    },
     Commands::RecipeCheck(args) => recipe_check::handle(args),
     Commands::Doctor(args) => doctor::handle(args),
-    Commands::Build(args) => build::handle(args, runtime),
-    Commands::Sync(args) => sync::handle(args, runtime),
-    Commands::Run(args) => run::handle(args, runtime),
+    Commands::Build(args) => {
+      dispatch_project_scoped("build", runtime, |runtime| build::handle(args, runtime))
+    },
+    Commands::Sync(args) => {
+      dispatch_project_scoped("sync", runtime, |runtime| sync::handle(args, runtime))
+    },
+    Commands::Run(args) => {
+      dispatch_project_scoped("run", runtime, |runtime| run::handle(args, runtime))
+    },
+  }
+}
+
+#[derive(Debug, Clone, Default)]
+struct WorkspaceCommandContext {
+  workspace_root: Option<PathBuf>,
+  workspace_member: Option<String>,
+  project_root_override: Option<PathBuf>,
+}
+
+fn dispatch_project_scoped<F>(
+  command: &'static str,
+  runtime: RuntimeFlags,
+  f: F,
+) -> Result<CommandOutput, JoyError>
+where
+  F: FnOnce(RuntimeFlags) -> Result<CommandOutput, JoyError>,
+{
+  let ctx = resolve_workspace_context(command, runtime.workspace_package.as_deref())?;
+  let mut result = if let Some(project_root) = &ctx.project_root_override {
+    with_current_dir(project_root, || f(runtime.clone()))?
+  } else {
+    f(runtime.clone())?
+  };
+  attach_workspace_metadata(&mut result, &ctx);
+  Ok(result)
+}
+
+fn resolve_workspace_context(
+  command: &'static str,
+  requested_member: Option<&str>,
+) -> Result<WorkspaceCommandContext, JoyError> {
+  let cwd = env::current_dir().map_err(|err| {
+    JoyError::new(command, "cwd_unavailable", format!("failed to get cwd: {err}"), 1)
+  })?;
+  let manifest_path = cwd.join("joy.toml");
+  if !manifest_path.is_file() {
+    if requested_member.is_some() {
+      return Err(JoyError::new(
+        command,
+        "workspace_member_invalid",
+        "cannot use `-p/--package` outside a workspace root; no `joy.toml` found in the current directory",
+        1,
+      ));
+    }
+    return Ok(WorkspaceCommandContext::default());
+  }
+
+  let doc = ManifestDocument::load(&manifest_path)
+    .map_err(|err| JoyError::new(command, "manifest_parse_error", err.to_string(), 1))?;
+  match doc {
+    ManifestDocument::Project(_) => {
+      if let Some(member) = requested_member {
+        return Err(JoyError::new(
+          command,
+          "workspace_member_invalid",
+          format!(
+            "cannot use `-p/--package {member}` from a non-workspace project directory; rerun in a workspace root"
+          ),
+          1,
+        ));
+      }
+      Ok(WorkspaceCommandContext::default())
+    },
+    ManifestDocument::Workspace(ws) => {
+      resolve_workspace_member_context(command, &cwd, ws, requested_member)
+    },
+  }
+}
+
+fn resolve_workspace_member_context(
+  command: &'static str,
+  workspace_root: &Path,
+  ws: WorkspaceManifest,
+  requested_member: Option<&str>,
+) -> Result<WorkspaceCommandContext, JoyError> {
+  let selected = requested_member
+    .map(ToOwned::to_owned)
+    .or(ws.workspace.default_member.clone())
+    .ok_or_else(|| {
+      JoyError::new(
+        command,
+        "workspace_member_required",
+        "this command was run from a workspace root; select a member with `-p/--package <member>`",
+        1,
+      )
+    })?;
+
+  if !ws.workspace.members.iter().any(|m| m == &selected) {
+    return Err(JoyError::new(
+      command,
+      "workspace_member_not_found",
+      format!(
+        "workspace member `{selected}` is not listed in `workspace.members`; available members: {}",
+        ws.workspace.members.join(", ")
+      ),
+      1,
+    ));
+  }
+
+  let member_root = workspace_root.join(&selected);
+  let member_manifest_path = member_root.join("joy.toml");
+  if !member_manifest_path.is_file() {
+    return Err(JoyError::new(
+      command,
+      "workspace_member_not_found",
+      format!(
+        "workspace member `{selected}` does not contain a project manifest at `{}`",
+        member_manifest_path.display()
+      ),
+      1,
+    ));
+  }
+  let member_doc = ManifestDocument::load(&member_manifest_path)
+    .map_err(|err| JoyError::new(command, "manifest_parse_error", err.to_string(), 1))?;
+  match member_doc {
+    ManifestDocument::Project(Manifest { .. }) => Ok(WorkspaceCommandContext {
+      workspace_root: Some(workspace_root.to_path_buf()),
+      workspace_member: Some(selected),
+      project_root_override: Some(member_root),
+    }),
+    ManifestDocument::Workspace(_) => Err(JoyError::new(
+      command,
+      "workspace_member_not_found",
+      format!(
+        "workspace member `{selected}` points to another workspace root; nested workspace routing is not supported"
+      ),
+      1,
+    )),
+  }
+}
+
+fn with_current_dir<T>(dir: &Path, f: impl FnOnce() -> Result<T, JoyError>) -> Result<T, JoyError> {
+  let old = env::current_dir().map_err(|err| {
+    JoyError::new("cli", "cwd_unavailable", format!("failed to get cwd: {err}"), 1)
+  })?;
+  env::set_current_dir(dir).map_err(|err| JoyError::io("cli", "changing directory", dir, &err))?;
+  let result = f();
+  let restore_result = env::set_current_dir(&old)
+    .map_err(|err| JoyError::io("cli", "restoring directory", &old, &err));
+  match (result, restore_result) {
+    (Ok(value), Ok(())) => Ok(value),
+    (Err(err), Ok(())) => Err(err),
+    (Ok(_), Err(err)) => Err(err),
+    (Err(primary), Err(_restore)) => Err(primary),
+  }
+}
+
+fn attach_workspace_metadata(result: &mut CommandOutput, ctx: &WorkspaceCommandContext) {
+  let Some(obj) = result.data.as_object_mut() else {
+    return;
+  };
+  match (&ctx.workspace_root, &ctx.workspace_member) {
+    (Some(root), Some(member)) => {
+      obj.insert("workspace_root".into(), Value::String(root.display().to_string()));
+      obj.insert("workspace_member".into(), Value::String(member.clone()));
+    },
+    _ => {
+      obj.insert("workspace_root".into(), Value::Null);
+      obj.insert("workspace_member".into(), Value::Null);
+    },
   }
 }
 

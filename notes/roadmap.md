@@ -10,15 +10,16 @@ Archived milestone (Phase 1–6):
 
 - Roadmap umbrella tracker: [#60](https://github.com/harnesslabs/joy/issues/60)
 - Umbrella tracker status: open (Phase 15–18 roadmap wave)
-- Current phase: Phase 16 (Workspace Support and Multiple Targets)
-- Current phase tracker: [#62](https://github.com/harnesslabs/joy/issues/62)
-- Completed phases in this wave: 15
+- Current phase: Phase 17 (Semver Ranges and Solver Integration)
+- Current phase tracker: [#63](https://github.com/harnesslabs/joy/issues/63)
+- Completed phases in this wave: 15, 16
 - Previously completed wave: Phase 7–14 (tracker [#13](https://github.com/harnesslabs/joy/issues/13), closed)
 - Latest completed milestone notes:
   - `/Users/autoparallel/Code/joy/notes/active/2026-02-24_windows-msvc-parity-phase10.md`
   - `/Users/autoparallel/Code/joy/notes/active/2026-02-24_ux-machine-interface-stability-phase13.md`
   - `/Users/autoparallel/Code/joy/notes/active/2026-02-24_release-and-distribution-readiness-phase14.md`
   - `/Users/autoparallel/Code/joy/notes/active/2026-02-24_phase15-cli-human-ux-and-helpfulness.md`
+  - `/Users/autoparallel/Code/joy/notes/active/2026-02-24_phase16-workspace-support-and-multiple-targets.md`
 - Roadmap bootstrap note: `/Users/autoparallel/Code/joy/notes/active/2026-02-24_phase7-14-roadmap-bootstrap-and-github-seeding.md`
 
 ## Phase 15–18 Milestones
@@ -43,13 +44,12 @@ Archived milestone (Phase 1–6):
 
 Start the new wave with Phase 15 (CLI human UX) and proceed issue-by-issue on the single wave branch:
 
-1. [#70](https://github.com/harnesslabs/joy/issues/70) `[manifest]` workspace manifest schema + project target schema
-2. [#71](https://github.com/harnesslabs/joy/issues/71) `[cli][cmd]` member/target selection flags and routing
-3. [#72](https://github.com/harnesslabs/joy/issues/72) `[build][ninja]` named binary targets per project
-4. [#73](https://github.com/harnesslabs/joy/issues/73) workspace state/lockfile semantics + output metadata
-5. [#74](https://github.com/harnesslabs/joy/issues/74) workspace/multi-target docs and scaffold examples
-6. Phase 17 tracker [#63](https://github.com/harnesslabs/joy/issues/63)
-7. Phase 18 tracker [#64](https://github.com/harnesslabs/joy/issues/64)
+1. [#75](https://github.com/harnesslabs/joy/issues/75) `[manifest]` exact ref vs semver requirement model
+2. [#76](https://github.com/harnesslabs/joy/issues/76) `[resolver]` solver seam and candidate selection split
+3. [#77](https://github.com/harnesslabs/joy/issues/77) `[fetch][semver]` semver range resolution from Git tags
+4. [#78](https://github.com/harnesslabs/joy/issues/78) `[lockfile][ux]` semver lock metadata + diagnostics
+5. [#79](https://github.com/harnesslabs/joy/issues/79) semver CLI/tree/docs payload additions
+6. Phase 18 tracker [#64](https://github.com/harnesslabs/joy/issues/64)
 
 ## Phase Issue Inventory (Seeded)
 
@@ -61,7 +61,7 @@ Start the new wave with Phase 15 (CLI human UX) and proceed issue-by-issue on th
 - Phase 13 tracker [#20](https://github.com/harnesslabs/joy/issues/20) (closed): `#51`, `#52`, `#53`, `#54`
 - Phase 14 tracker [#21](https://github.com/harnesslabs/joy/issues/21) (closed): `#55`, `#56`, `#57`, `#58`
 - Phase 15 tracker [#61](https://github.com/harnesslabs/joy/issues/61) (closed): `#65`, `#66`, `#67`, `#68`, `#69`
-- Phase 16 tracker [#62](https://github.com/harnesslabs/joy/issues/62) (open): `#70`, `#71`, `#72`, `#73`, `#74`
+- Phase 16 tracker [#62](https://github.com/harnesslabs/joy/issues/62) (closed): `#70`, `#71`, `#72`, `#73`, `#74`
 - Phase 17 tracker [#63](https://github.com/harnesslabs/joy/issues/63) (open): `#75`, `#76`, `#77`, `#78`, `#79`
 - Phase 18 tracker [#64](https://github.com/harnesslabs/joy/issues/64) (open): `#80`, `#81`, `#82`, `#83`, `#84`
 

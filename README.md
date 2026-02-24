@@ -139,6 +139,47 @@ include_dirs = ["include"]
 "fmtlib/fmt" = { source = "github", rev = "11.0.2" }
 ```
 
+## Multiple Targets (Phase 16)
+
+Projects can define additional named binary targets using `[[project.targets]]` and select them with `joy build --target <name>` / `joy run --target <name>`.
+
+```toml
+[project]
+name = "demo"
+version = "0.1.0"
+cpp_standard = "c++20"
+entry = "src/main.cpp"
+
+[[project.targets]]
+name = "tool"
+entry = "src/tool.cpp"
+```
+
+```bash
+joy build --target tool
+joy run --target tool
+```
+
+## Workspaces (Phase 16)
+
+`joy` supports a workspace root manifest with member projects. Run project-scoped commands from the workspace root using `-p/--package <member>`.
+
+Workspace root `joy.toml`:
+
+```toml
+[workspace]
+members = ["apps/app", "tools/tooling"]
+default_member = "apps/app" # optional
+```
+
+Examples:
+
+```bash
+joy -p apps/app tree
+joy -p apps/app build
+joy -p apps/app run --target tool
+```
+
 ## Compiled Dependency Recipes
 
 `joy` ships a curated recipe index in `/Users/autoparallel/Code/joy/recipes` with recipe files under `/Users/autoparallel/Code/joy/recipes/packages`.
@@ -242,7 +283,7 @@ Release and distribution process docs:
 
 - No semver range solving (exact refs only)
 - Windows release artifacts are GNU-only for now (MSVC build/test support exists)
-- No workspace support / multiple binary targets
+- Registry/index support beyond GitHub shorthand is not implemented yet
 - Package-manager channels are template-driven until dedicated tap/bucket repos are maintained
 
 ## Roadmap Milestones and Notes

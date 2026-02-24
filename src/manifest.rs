@@ -15,12 +15,48 @@ pub struct Manifest {
   pub dependencies: BTreeMap<String, DependencySpec>,
 }
 
+/// Parsed workspace root `joy.toml` manifest.
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+pub struct WorkspaceManifest {
+  pub workspace: WorkspaceSection,
+}
+
+/// Workspace-level configuration for multi-project routing.
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+pub struct WorkspaceSection {
+  #[serde(default)]
+  pub members: Vec<String>,
+  #[serde(default)]
+  pub default_member: Option<String>,
+}
+
+/// Top-level manifest document, either a project manifest or a workspace root manifest.
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(untagged)]
+pub enum ManifestDocument {
+  Project(Manifest),
+  Workspace(WorkspaceManifest),
+}
+
 /// Project-level build configuration.
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
 pub struct ProjectSection {
   pub name: String,
   pub version: String,
   pub cpp_standard: String,
+  pub entry: String,
+  #[serde(default, skip_serializing_if = "Vec::is_empty")]
+  pub extra_sources: Vec<String>,
+  #[serde(default, skip_serializing_if = "Vec::is_empty")]
+  pub include_dirs: Vec<String>,
+  #[serde(default, skip_serializing_if = "Vec::is_empty")]
+  pub targets: Vec<ProjectTarget>,
+}
+
+/// Additional named binary targets for a project manifest.
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+pub struct ProjectTarget {
+  pub name: String,
   pub entry: String,
   #[serde(default, skip_serializing_if = "Vec::is_empty")]
   pub extra_sources: Vec<String>,
@@ -105,7 +141,134 @@ impl Manifest {
         "project.include_dirs entries must not be empty".into(),
       ));
     }
+    let mut target_names = std::collections::BTreeSet::new();
+    for target in &self.project.targets {
+      if target.name.trim().is_empty() {
+        return Err(ManifestError::Validation("project.targets[].name must not be empty".into()));
+      }
+      if !target_names.insert(target.name.clone()) {
+        return Err(ManifestError::Validation(format!(
+          "duplicate project target `{}`",
+          target.name
+        )));
+      }
+      if target.entry.trim().is_empty() {
+        return Err(ManifestError::Validation(format!(
+          "project.targets[`{}`].entry must not be empty",
+          target.name
+        )));
+      }
+      if target.extra_sources.iter().any(|path| path.trim().is_empty()) {
+        return Err(ManifestError::Validation(format!(
+          "project.targets[`{}`].extra_sources entries must not be empty",
+          target.name
+        )));
+      }
+      if target.include_dirs.iter().any(|path| path.trim().is_empty()) {
+        return Err(ManifestError::Validation(format!(
+          "project.targets[`{}`].include_dirs entries must not be empty",
+          target.name
+        )));
+      }
+    }
     Ok(())
+  }
+}
+
+impl WorkspaceManifest {
+  /// Load, parse, and validate a workspace root manifest from disk.
+  pub fn load(path: &Path) -> Result<Self, ManifestError> {
+    let doc = ManifestDocument::load(path)?;
+    match doc {
+      ManifestDocument::Workspace(ws) => Ok(ws),
+      ManifestDocument::Project(_) => Err(ManifestError::Validation(
+        "expected a workspace root manifest with `[workspace]`".into(),
+      )),
+    }
+  }
+
+  fn validate(&self) -> Result<(), ManifestError> {
+    if self.workspace.members.is_empty() {
+      return Err(ManifestError::Validation(
+        "workspace.members must contain at least one member".into(),
+      ));
+    }
+    if self.workspace.members.iter().any(|m| m.trim().is_empty()) {
+      return Err(ManifestError::Validation("workspace.members entries must not be empty".into()));
+    }
+    let mut seen = std::collections::BTreeSet::new();
+    for member in &self.workspace.members {
+      if !seen.insert(member) {
+        return Err(ManifestError::Validation(format!("duplicate workspace member `{member}`")));
+      }
+    }
+    if let Some(default) = &self.workspace.default_member
+      && !self.workspace.members.iter().any(|m| m == default)
+    {
+      return Err(ManifestError::Validation(format!(
+        "workspace.default_member `{default}` must be listed in workspace.members"
+      )));
+    }
+    Ok(())
+  }
+}
+
+impl ManifestDocument {
+  /// Load a manifest document and determine whether it is a project or workspace manifest.
+  pub fn load(path: &Path) -> Result<Self, ManifestError> {
+    let raw = fs::read_to_string(path)
+      .map_err(|source| ManifestError::ReadIo { path: path.to_path_buf(), source })?;
+    let doc: Self = toml::from_str(&raw).map_err(|source| ManifestError::Parse {
+      path: path.to_path_buf(),
+      source: Box::new(source),
+    })?;
+    match &doc {
+      Self::Project(project) => project.validate()?,
+      Self::Workspace(workspace) => workspace.validate()?,
+    }
+    Ok(doc)
+  }
+}
+
+/// Selected target configuration merged with project defaults.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct SelectedTarget {
+  pub name: String,
+  pub entry: String,
+  pub extra_sources: Vec<String>,
+  pub include_dirs: Vec<String>,
+  pub is_default: bool,
+}
+
+impl Manifest {
+  /// Return the default target derived from the top-level `project` fields.
+  pub fn default_target(&self) -> SelectedTarget {
+    SelectedTarget {
+      name: self.project.name.clone(),
+      entry: self.project.entry.clone(),
+      extra_sources: self.project.extra_sources.clone(),
+      include_dirs: self.project.include_dirs.clone(),
+      is_default: true,
+    }
+  }
+
+  /// Resolve a named target, or the default target when `None`.
+  pub fn select_target(&self, name: Option<&str>) -> Result<SelectedTarget, ManifestError> {
+    let Some(name) = name else {
+      return Ok(self.default_target());
+    };
+    let Some(target) = self.project.targets.iter().find(|t| t.name == name) else {
+      return Err(ManifestError::Validation(format!(
+        "unknown project target `{name}`; define it under `[[project.targets]]`"
+      )));
+    };
+    Ok(SelectedTarget {
+      name: target.name.clone(),
+      entry: target.entry.clone(),
+      extra_sources: target.extra_sources.clone(),
+      include_dirs: target.include_dirs.clone(),
+      is_default: false,
+    })
   }
 }
 
@@ -139,8 +302,12 @@ pub enum ManifestError {
 #[cfg(test)]
 mod tests {
   use std::path::PathBuf;
+  use tempfile::TempDir;
 
-  use super::{DependencySource, DependencySpec, Manifest, ProjectSection};
+  use super::{
+    DependencySource, DependencySpec, Manifest, ManifestDocument, ProjectSection, ProjectTarget,
+    WorkspaceManifest,
+  };
 
   #[test]
   fn manifest_roundtrip_serialization() {
@@ -152,6 +319,12 @@ mod tests {
         entry: "src/main.cpp".into(),
         extra_sources: vec!["src/lib.cpp".into()],
         include_dirs: vec!["include".into()],
+        targets: vec![ProjectTarget {
+          name: "tool".into(),
+          entry: "src/tool.cpp".into(),
+          extra_sources: vec![],
+          include_dirs: vec![],
+        }],
       },
       dependencies: Default::default(),
     };
@@ -192,5 +365,59 @@ entry = "src/main.cpp"
 
     assert!(manifest.project.extra_sources.is_empty());
     assert!(manifest.project.include_dirs.is_empty());
+    assert!(manifest.project.targets.is_empty());
+  }
+
+  #[test]
+  fn parses_workspace_manifest_document() {
+    let temp = TempDir::new().expect("tempdir");
+    let path = temp.path().join("joy.toml");
+    std::fs::write(
+      &path,
+      r#"
+[workspace]
+members = ["apps/a", "apps/b"]
+default_member = "apps/a"
+"#,
+    )
+    .expect("write manifest");
+
+    let doc = ManifestDocument::load(&path).expect("load doc");
+    match doc {
+      ManifestDocument::Workspace(WorkspaceManifest { workspace }) => {
+        assert_eq!(workspace.members.len(), 2);
+        assert_eq!(workspace.default_member.as_deref(), Some("apps/a"));
+      },
+      other => panic!("expected workspace doc, got {other:?}"),
+    }
+  }
+
+  #[test]
+  fn selects_named_project_target() {
+    let manifest = Manifest {
+      project: ProjectSection {
+        name: "demo".into(),
+        version: "0.1.0".into(),
+        cpp_standard: "c++20".into(),
+        entry: "src/main.cpp".into(),
+        extra_sources: vec![],
+        include_dirs: vec!["include".into()],
+        targets: vec![ProjectTarget {
+          name: "tool".into(),
+          entry: "src/tool.cpp".into(),
+          extra_sources: vec!["src/shared.cpp".into()],
+          include_dirs: vec!["tools/include".into()],
+        }],
+      },
+      dependencies: Default::default(),
+    };
+
+    let default = manifest.select_target(None).expect("default target");
+    assert!(default.is_default);
+    assert_eq!(default.name, "demo");
+    let tool = manifest.select_target(Some("tool")).expect("tool target");
+    assert!(!tool.is_default);
+    assert_eq!(tool.entry, "src/tool.cpp");
+    assert_eq!(tool.extra_sources, vec!["src/shared.cpp"]);
   }
 }

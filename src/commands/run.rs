@@ -11,6 +11,7 @@ use super::build;
 pub fn handle(args: RunArgs, runtime: RuntimeFlags) -> Result<CommandOutput, JoyError> {
   let execution = build::build_project(build::BuildOptions {
     release: args.release,
+    target: args.target.clone(),
     locked: args.locked || runtime.frozen,
     update_lock: args.update_lock,
     offline: runtime.offline,
@@ -74,6 +75,8 @@ pub fn handle(args: RunArgs, runtime: RuntimeFlags) -> Result<CommandOutput, Joy
         "ninja_path": execution.toolchain.ninja.path.display().to_string(),
       },
       "profile": match execution.profile { crate::ninja::BuildProfile::Debug => "debug", crate::ninja::BuildProfile::Release => "release" },
+      "target": execution.target_name,
+      "target_default": execution.target_default,
       "args": args.args,
       "exit_code": exit_code,
       "stdout": stdout_text,

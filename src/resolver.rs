@@ -429,6 +429,7 @@ packages = [{ id = "cycle/a", rev = "HEAD" }]
         entry: "src/main.cpp".into(),
         extra_sources: Vec::new(),
         include_dirs: Vec::new(),
+        targets: Vec::new(),
       },
       dependencies,
     }

@@ -38,6 +38,11 @@ fn init_project(temp: &TempDir) {
   cmd.current_dir(temp.path()).arg("init").assert().success();
 }
 
+fn init_project_at(path: &Path) {
+  let mut cmd = cargo_bin_cmd!("joy");
+  cmd.current_dir(path).arg("init").assert().success();
+}
+
 fn append_manifest_dependency(temp: &TempDir, package: &str, rev: &str) {
   let manifest_path = temp.path().join("joy.toml");
   let mut manifest = fs::read_to_string(&manifest_path).expect("read joy.toml");
@@ -1306,7 +1311,9 @@ fn dependency_command_json_payload_shapes_are_stable() {
       "resolved_commit",
       "rev",
       "state_index_path",
-      "warnings"
+      "warnings",
+      "workspace_member",
+      "workspace_root"
     ]
   );
 
@@ -1321,7 +1328,14 @@ fn dependency_command_json_payload_shapes_are_stable() {
   let tree_payload = json_stdout(&tree_assert.get_output().stdout);
   assert_eq!(
     json_object_keys(&tree_payload["data"]),
-    vec!["manifest_path", "packages", "project_root", "roots"]
+    vec![
+      "manifest_path",
+      "packages",
+      "project_root",
+      "roots",
+      "workspace_member",
+      "workspace_root"
+    ]
   );
 
   let mut update = cargo_bin_cmd!("joy");
@@ -1342,7 +1356,9 @@ fn dependency_command_json_payload_shapes_are_stable() {
       "state_index_path",
       "updated",
       "updated_count",
-      "warnings"
+      "warnings",
+      "workspace_member",
+      "workspace_root"
     ]
   );
 
@@ -1364,7 +1380,89 @@ fn dependency_command_json_payload_shapes_are_stable() {
       "project_root",
       "removed",
       "state_index_path",
-      "warnings"
+      "warnings",
+      "workspace_member",
+      "workspace_root"
     ]
   );
+}
+
+#[test]
+fn workspace_root_requires_member_when_no_default_member_is_set() {
+  let temp = TempDir::new().expect("tempdir");
+  let member = temp.path().join("apps").join("app");
+  fs::create_dir_all(&member).expect("member dir");
+  init_project_at(&member);
+  fs::write(
+    temp.path().join("joy.toml"),
+    r#"[workspace]
+members = ["apps/app"]
+"#,
+  )
+  .expect("write workspace manifest");
+
+  let mut cmd = cargo_bin_cmd!("joy");
+  let assert = cmd.current_dir(temp.path()).args(["--json", "tree"]).assert().failure();
+  let payload = json_stdout(&assert.get_output().stdout);
+  assert_eq!(payload["error"]["code"], "workspace_member_required");
+}
+
+#[test]
+fn workspace_root_routes_tree_to_default_member_and_emits_workspace_metadata() {
+  let temp = TempDir::new().expect("tempdir");
+  let member = temp.path().join("apps").join("app");
+  fs::create_dir_all(&member).expect("member dir");
+  init_project_at(&member);
+  fs::write(
+    temp.path().join("joy.toml"),
+    r#"[workspace]
+members = ["apps/app"]
+default_member = "apps/app"
+"#,
+  )
+  .expect("write workspace manifest");
+
+  let mut cmd = cargo_bin_cmd!("joy");
+  let assert = cmd.current_dir(temp.path()).args(["--json", "tree"]).assert().success();
+  let payload = json_stdout(&assert.get_output().stdout);
+  assert_eq!(payload["command"], "tree");
+  assert_eq!(payload["data"]["workspace_member"], "apps/app");
+  let ws_root = payload["data"]["workspace_root"].as_str().expect("workspace_root");
+  let ws_root = fs::canonicalize(ws_root).expect("canonicalize workspace_root");
+  assert_eq!(ws_root, fs::canonicalize(temp.path()).expect("canonical temp"));
+}
+
+#[test]
+fn workspace_root_add_routes_to_selected_member() {
+  let temp = TempDir::new().expect("tempdir");
+  let member = temp.path().join("apps").join("app");
+  fs::create_dir_all(&member).expect("member dir");
+  init_project_at(&member);
+  fs::write(
+    temp.path().join("joy.toml"),
+    r#"[workspace]
+members = ["apps/app"]
+"#,
+  )
+  .expect("write workspace manifest");
+
+  let Some((remote_base, _bare_repo, _commit)) = setup_local_github_remote("nlohmann/json") else {
+    return;
+  };
+  let joy_home = temp.path().join("joy-home");
+
+  let mut add = cargo_bin_cmd!("joy");
+  let assert = add
+    .current_dir(temp.path())
+    .env("JOY_GITHUB_BASE", remote_base.path())
+    .env("JOY_HOME", &joy_home)
+    .args(["--json", "-p", "apps/app", "add", "nlohmann/json"])
+    .assert()
+    .success();
+  let payload = json_stdout(&assert.get_output().stdout);
+  assert_eq!(payload["command"], "add");
+  assert_eq!(payload["data"]["workspace_member"], "apps/app");
+  assert!(member.join("joy.toml").is_file());
+  let member_manifest = fs::read_to_string(member.join("joy.toml")).expect("read member manifest");
+  assert!(member_manifest.contains("\"nlohmann/json\""));
 }

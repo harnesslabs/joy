@@ -28,6 +28,10 @@ pub struct Cli {
   #[arg(long, visible_alias = "machine", global = true)]
   pub json: bool,
 
+  /// Workspace member package to operate on when running from a workspace root.
+  #[arg(long, short = 'p', global = true)]
+  pub workspace_package: Option<String>,
+
   /// Resolve and build using only locally cached dependency data.
   #[arg(long, global = true)]
   pub offline: bool,
@@ -46,15 +50,21 @@ impl Cli {
   }
 
   pub fn runtime_flags(&self) -> RuntimeFlags {
-    RuntimeFlags { offline: self.offline || self.frozen, frozen: self.frozen, progress: !self.json }
+    RuntimeFlags {
+      offline: self.offline || self.frozen,
+      frozen: self.frozen,
+      progress: !self.json,
+      workspace_package: self.workspace_package.clone(),
+    }
   }
 }
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq, Eq)]
 pub struct RuntimeFlags {
   pub offline: bool,
   pub frozen: bool,
   pub progress: bool,
+  pub workspace_package: Option<String>,
 }
 
 #[derive(Debug, Subcommand)]
@@ -136,6 +146,8 @@ pub struct BuildArgs {
   #[arg(long)]
   pub release: bool,
   #[arg(long)]
+  pub target: Option<String>,
+  #[arg(long)]
   pub locked: bool,
   #[arg(long = "update-lock")]
   pub update_lock: bool,
@@ -155,6 +167,8 @@ pub struct SyncArgs {
 pub struct RunArgs {
   #[arg(long)]
   pub release: bool,
+  #[arg(long)]
+  pub target: Option<String>,
   #[arg(long)]
   pub locked: bool,
   #[arg(long = "update-lock")]
@@ -200,11 +214,13 @@ mod tests {
 
   #[test]
   fn parses_global_offline_and_frozen_flags() {
-    let cli = Cli::parse_from(["joy", "--offline", "--frozen", "sync"]);
+    let cli = Cli::parse_from(["joy", "-p", "app", "--offline", "--frozen", "sync"]);
+    assert_eq!(cli.workspace_package.as_deref(), Some("app"));
     assert!(cli.offline);
     assert!(cli.frozen);
     assert!(cli.runtime_flags().offline);
     assert!(cli.runtime_flags().frozen);
+    assert_eq!(cli.runtime_flags().workspace_package.as_deref(), Some("app"));
     match cli.command {
       Commands::Sync(_) => {},
       other => panic!("expected sync, got {other:?}"),
@@ -273,10 +289,19 @@ mod tests {
 
   #[test]
   fn parses_build_flags() {
-    let cli = Cli::parse_from(["joy", "build", "--release", "--locked", "--update-lock"]);
+    let cli = Cli::parse_from([
+      "joy",
+      "build",
+      "--release",
+      "--target",
+      "tool",
+      "--locked",
+      "--update-lock",
+    ]);
     match cli.command {
       Commands::Build(args) => {
         assert!(args.release);
+        assert_eq!(args.target.as_deref(), Some("tool"));
         assert!(args.locked);
         assert!(args.update_lock);
       },
@@ -286,10 +311,21 @@ mod tests {
 
   #[test]
   fn parses_run_with_passthrough_args() {
-    let cli = Cli::parse_from(["joy", "run", "--release", "--", "one", "two", "--flag"]);
+    let cli = Cli::parse_from([
+      "joy",
+      "run",
+      "--release",
+      "--target",
+      "tool",
+      "--",
+      "one",
+      "two",
+      "--flag",
+    ]);
     match cli.command {
       Commands::Run(args) => {
         assert!(args.release);
+        assert_eq!(args.target.as_deref(), Some("tool"));
         assert_eq!(args.args, vec!["one", "two", "--flag"]);
       },
       other => panic!("expected run, got {other:?}"),
