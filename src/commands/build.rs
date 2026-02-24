@@ -701,7 +701,10 @@ fn validate_locked_package_metadata_if_needed(
     return Err(JoyError::new(
       "build",
       "lockfile_incomplete",
-      "lockfile package metadata is missing for current dependencies; rerun with --update-lock",
+      lockfile_refresh_message(
+        "joy.lock package metadata is missing for current dependencies",
+        lockfile_refresh_example("build"),
+      ),
       1,
     ));
   }
@@ -715,7 +718,10 @@ fn validate_locked_package_metadata_if_needed(
     return Err(JoyError::new(
       "build",
       "lockfile_mismatch",
-      "lockfile package metadata does not match resolved dependency graph; rerun with --update-lock",
+      lockfile_refresh_message(
+        "joy.lock package metadata does not match the resolved dependency graph",
+        lockfile_refresh_example("build"),
+      ),
       1,
     ));
   }
@@ -725,6 +731,14 @@ fn validate_locked_package_metadata_if_needed(
 
 fn sort_locked_packages(packages: &mut [lockfile::LockedPackage]) {
   packages.sort_by(|a, b| a.id.cmp(&b.id).then_with(|| a.requested_rev.cmp(&b.requested_rev)));
+}
+
+fn lockfile_refresh_example(command: &'static str) -> String {
+  format!("joy {command} --update-lock")
+}
+
+fn lockfile_refresh_message(problem: &str, example_command: String) -> String {
+  format!("{problem}; rerun with `--update-lock` (for example `{example_command}`)")
 }
 
 fn evaluate_lockfile_plan(
@@ -757,8 +771,9 @@ fn evaluate_lockfile_plan(
         "build",
         "lockfile_missing",
         format!(
-          "`--locked` requires `{}` to exist; run `joy build --update-lock` first",
-          lockfile_path.display()
+          "`--locked` requires `{}` to exist; create or refresh it with `{}` (or rerun with `--update-lock`)",
+          lockfile_path.display(),
+          lockfile_refresh_example("build"),
         ),
         1,
       ));
@@ -767,7 +782,10 @@ fn evaluate_lockfile_plan(
       return Err(JoyError::new(
         "build",
         "lockfile_stale",
-        "lockfile manifest hash does not match joy.toml; rerun with --update-lock".to_string(),
+        lockfile_refresh_message(
+          "joy.lock manifest hash does not match joy.toml",
+          lockfile_refresh_example("build"),
+        ),
         1,
       ));
     }
@@ -781,7 +799,10 @@ fn evaluate_lockfile_plan(
     return Err(JoyError::new(
       "build",
       "lockfile_stale",
-      "lockfile manifest hash does not match joy.toml; rerun with --update-lock".to_string(),
+      lockfile_refresh_message(
+        "joy.lock manifest hash does not match joy.toml",
+        lockfile_refresh_example("build"),
+      ),
       1,
     ));
   }

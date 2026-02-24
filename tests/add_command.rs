@@ -636,6 +636,11 @@ fn build_locked_rejects_incomplete_and_mismatched_lockfile_package_metadata() {
     .failure();
   let incomplete_payload = json_stdout(&incomplete_assert.get_output().stdout);
   assert_eq!(incomplete_payload["error"]["code"], "lockfile_incomplete");
+  assert!(
+    incomplete_payload["error"]["message"]
+      .as_str()
+      .is_some_and(|msg| msg.contains("--update-lock") && msg.contains("joy build --update-lock"))
+  );
 
   let mut refresh = cargo_bin_cmd!("joy");
   refresh
@@ -665,4 +670,9 @@ fn build_locked_rejects_incomplete_and_mismatched_lockfile_package_metadata() {
     .failure();
   let mismatch_payload = json_stdout(&mismatch_assert.get_output().stdout);
   assert_eq!(mismatch_payload["error"]["code"], "lockfile_mismatch");
+  assert!(
+    mismatch_payload["error"]["message"]
+      .as_str()
+      .is_some_and(|msg| msg.contains("--update-lock") && msg.contains("joy build --update-lock"))
+  );
 }
