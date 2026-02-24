@@ -5,6 +5,8 @@ name = "{project_name}"
 version = "0.1.0"
 cpp_standard = "c++20"
 entry = "src/main.cpp"
+# extra_sources = ["src/lib.cpp", "src/feature/main.cpp"]
+# include_dirs = ["include"]
 
 [dependencies]
 "#
@@ -44,6 +46,8 @@ name = "demo"
 version = "0.1.0"
 cpp_standard = "c++20"
 entry = "src/main.cpp"
+# extra_sources = ["src/lib.cpp", "src/feature/main.cpp"]
+# include_dirs = ["include"]
 
 [dependencies]
 "#

@@ -1,9 +1,17 @@
-use serde_json::json;
+use serde::Serialize;
 use std::env;
 
 use crate::cli::InitArgs;
 use crate::commands::{CommandOutput, scaffold_files};
 use crate::error::JoyError;
+
+#[derive(Debug, Serialize)]
+struct InitResponse {
+  project_name: String,
+  project_root: String,
+  created_paths: Vec<String>,
+  overwritten_paths: Vec<String>,
+}
 
 pub fn handle(args: InitArgs) -> Result<CommandOutput, JoyError> {
   let root = env::current_dir().map_err(|err| {
@@ -32,14 +40,14 @@ pub fn handle(args: InitArgs) -> Result<CommandOutput, JoyError> {
   let overwritten_paths: Vec<String> =
     summary.overwritten.iter().map(|path| path.display().to_string()).collect();
 
-  Ok(CommandOutput::new(
+  CommandOutput::from_data(
     "init",
     format!("Initialized joy project `{project_name}` in {}", summary.root.display()),
-    json!({
-      "project_name": project_name,
-      "project_root": summary.root.display().to_string(),
-      "created_paths": created_paths,
-      "overwritten_paths": overwritten_paths
-    }),
-  ))
+    &InitResponse {
+      project_name,
+      project_root: summary.root.display().to_string(),
+      created_paths,
+      overwritten_paths,
+    },
+  )
 }

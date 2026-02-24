@@ -33,6 +33,11 @@ fn build_locked_requires_existing_lockfile() {
   let payload = json_stdout(&assert.get_output().stdout);
   assert_eq!(payload["command"], "build");
   assert_eq!(payload["error"]["code"], "lockfile_missing");
+  assert!(
+    payload["error"]["message"]
+      .as_str()
+      .is_some_and(|msg| msg.contains("--update-lock") && msg.contains("joy build --update-lock"))
+  );
 }
 
 #[test]
@@ -66,6 +71,11 @@ fn build_creates_lockfile_and_update_lock_refreshes_stale_manifest_hash() {
   let stale_assert = stale.current_dir(temp.path()).args(["--json", "build"]).assert().failure();
   let stale_payload = json_stdout(&stale_assert.get_output().stdout);
   assert_eq!(stale_payload["error"]["code"], "lockfile_stale");
+  assert!(
+    stale_payload["error"]["message"]
+      .as_str()
+      .is_some_and(|msg| msg.contains("--update-lock") && msg.contains("joy build --update-lock"))
+  );
 
   let mut refresh = cargo_bin_cmd!("joy");
   let refresh_assert =

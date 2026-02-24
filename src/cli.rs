@@ -9,6 +9,14 @@ pub struct Cli {
   #[arg(long, visible_alias = "machine", global = true)]
   pub json: bool,
 
+  /// Resolve and build using only locally cached dependency data.
+  #[arg(long, global = true)]
+  pub offline: bool,
+
+  /// CI-safe mode: no network access and no lockfile changes (`--offline` + `--locked`).
+  #[arg(long, global = true)]
+  pub frozen: bool,
+
   #[command(subcommand)]
   pub command: Commands,
 }
@@ -17,6 +25,17 @@ impl Cli {
   pub fn output_mode(&self) -> OutputMode {
     if self.json { OutputMode::Json } else { OutputMode::Human }
   }
+
+  pub fn runtime_flags(&self) -> RuntimeFlags {
+    RuntimeFlags { offline: self.offline || self.frozen, frozen: self.frozen, progress: !self.json }
+  }
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct RuntimeFlags {
+  pub offline: bool,
+  pub frozen: bool,
+  pub progress: bool,
 }
 
 #[derive(Debug, Subcommand)]
@@ -27,8 +46,20 @@ pub enum Commands {
   Init(InitArgs),
   /// Add a package dependency to the current project.
   Add(AddArgs),
+  /// Remove a package dependency from the current project.
+  Remove(RemoveArgs),
+  /// Refresh dependency sources and optionally update exact refs.
+  Update(UpdateArgs),
+  /// Show the resolved dependency graph.
+  Tree(TreeArgs),
+  /// Validate bundled recipe metadata (for local checks and CI).
+  RecipeCheck(RecipeCheckArgs),
+  /// Diagnose local toolchain, cache, and recipe environment health.
+  Doctor(DoctorArgs),
   /// Build the current project.
   Build(BuildArgs),
+  /// Materialize dependencies and lockfile state without compiling the final binary.
+  Sync(SyncArgs),
   /// Build and run the current project.
   Run(RunArgs),
 }
@@ -54,7 +85,38 @@ pub struct AddArgs {
 }
 
 #[derive(Debug, Args)]
+pub struct RemoveArgs {
+  pub package: String,
+}
+
+#[derive(Debug, Args)]
+pub struct UpdateArgs {
+  pub package: Option<String>,
+  #[arg(long)]
+  pub rev: Option<String>,
+}
+
+#[derive(Debug, Args)]
+pub struct TreeArgs {}
+
+#[derive(Debug, Args)]
+pub struct RecipeCheckArgs {}
+
+#[derive(Debug, Args)]
+pub struct DoctorArgs {}
+
+#[derive(Debug, Args)]
 pub struct BuildArgs {
+  #[arg(long)]
+  pub release: bool,
+  #[arg(long)]
+  pub locked: bool,
+  #[arg(long = "update-lock")]
+  pub update_lock: bool,
+}
+
+#[derive(Debug, Args)]
+pub struct SyncArgs {
   #[arg(long)]
   pub release: bool,
   #[arg(long)]
@@ -111,6 +173,19 @@ mod tests {
   }
 
   #[test]
+  fn parses_global_offline_and_frozen_flags() {
+    let cli = Cli::parse_from(["joy", "--offline", "--frozen", "sync"]);
+    assert!(cli.offline);
+    assert!(cli.frozen);
+    assert!(cli.runtime_flags().offline);
+    assert!(cli.runtime_flags().frozen);
+    match cli.command {
+      Commands::Sync(_) => {},
+      other => panic!("expected sync, got {other:?}"),
+    }
+  }
+
+  #[test]
   fn parses_add_with_rev() {
     let cli = Cli::parse_from(["joy", "add", "nlohmann/json", "--rev", "v3.11.3"]);
     match cli.command {
@@ -119,6 +194,54 @@ mod tests {
         assert_eq!(args.rev.as_deref(), Some("v3.11.3"));
       },
       other => panic!("expected add, got {other:?}"),
+    }
+  }
+
+  #[test]
+  fn parses_remove_command() {
+    let cli = Cli::parse_from(["joy", "remove", "nlohmann/json"]);
+    match cli.command {
+      Commands::Remove(args) => assert_eq!(args.package, "nlohmann/json"),
+      other => panic!("expected remove, got {other:?}"),
+    }
+  }
+
+  #[test]
+  fn parses_update_with_optional_package_and_rev() {
+    let cli = Cli::parse_from(["joy", "update", "nlohmann/json", "--rev", "v1.2.3"]);
+    match cli.command {
+      Commands::Update(args) => {
+        assert_eq!(args.package.as_deref(), Some("nlohmann/json"));
+        assert_eq!(args.rev.as_deref(), Some("v1.2.3"));
+      },
+      other => panic!("expected update, got {other:?}"),
+    }
+  }
+
+  #[test]
+  fn parses_tree_command() {
+    let cli = Cli::parse_from(["joy", "tree"]);
+    match cli.command {
+      Commands::Tree(_) => {},
+      other => panic!("expected tree, got {other:?}"),
+    }
+  }
+
+  #[test]
+  fn parses_recipe_check_command() {
+    let cli = Cli::parse_from(["joy", "recipe-check"]);
+    match cli.command {
+      Commands::RecipeCheck(_) => {},
+      other => panic!("expected recipe-check, got {other:?}"),
+    }
+  }
+
+  #[test]
+  fn parses_doctor_command() {
+    let cli = Cli::parse_from(["joy", "doctor"]);
+    match cli.command {
+      Commands::Doctor(_) => {},
+      other => panic!("expected doctor, got {other:?}"),
     }
   }
 
@@ -144,6 +267,19 @@ mod tests {
         assert_eq!(args.args, vec!["one", "two", "--flag"]);
       },
       other => panic!("expected run, got {other:?}"),
+    }
+  }
+
+  #[test]
+  fn parses_sync_flags() {
+    let cli = Cli::parse_from(["joy", "sync", "--release", "--locked", "--update-lock"]);
+    match cli.command {
+      Commands::Sync(args) => {
+        assert!(args.release);
+        assert!(args.locked);
+        assert!(args.update_lock);
+      },
+      other => panic!("expected sync, got {other:?}"),
     }
   }
 }

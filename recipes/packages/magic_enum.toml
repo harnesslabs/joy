@@ -1,0 +1,7 @@
+id = "Neargye/magic_enum"
+slug = "magic_enum"
+source = "github"
+kind = "header_only"
+
+[headers]
+include_roots = ["include"]

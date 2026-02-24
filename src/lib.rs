@@ -67,7 +67,8 @@ where
   };
 
   let mode = cli.output_mode();
-  match dispatch(cli.command) {
+  let runtime = cli.runtime_flags();
+  match dispatch(cli.command, runtime) {
     Ok(result) => {
       if let Err(err) = print_success(mode, &result) {
         eprintln!("failed to write output: {err}");

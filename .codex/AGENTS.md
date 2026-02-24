@@ -46,6 +46,58 @@ You are tuned for long, uninterrupted work sessions. You MUST continue executing
 * If a status response is required, keep it brief and continue implementation in the same session.
 * If the platform forces a turn boundary, that is **not** a project stop. Persist state in `notes/roadmap.md`, and on the next invocation resume from the next unfinished milestone without redoing completed work.
 
+### 2.3 Roadmap Planning and GitHub Backlog Seeding (Mandatory When Asked)
+When the user asks for roadmap planning, next phases, backlog generation, or an autonomous work queue, you MUST seed and maintain a GitHub-tracked roadmap before starting feature implementation.
+
+#### Trigger Conditions
+Use this workflow when the user asks for any of:
+* roadmap planning / next stages
+* autonomous backlog generation
+* issue seeding for future work
+* milestone planning for a new phase set
+
+#### Required Preflight (Before Filing Issues)
+You MUST first inspect current state and avoid guessing:
+* Read `notes/roadmap.md`
+* Read relevant files in `notes/active/`
+* Read the latest archived milestone summary in `notes/archive/.../MILESTONE.md`
+* Inspect git history (`git log --oneline`)
+* Inspect GitHub state with `gh`:
+  * `gh issue list` (open + closed when checking duplicates)
+  * `gh pr list`
+  * `gh label list`
+* Search for duplicate issue titles / overlapping scope before creating new issues
+
+#### Roadmap Issue Workflow (Mandatory Sequence)
+When seeding a new roadmap:
+1. Create or update GitHub milestones for the planned phases.
+2. Create one umbrella roadmap tracker issue.
+3. Create one phase tracker issue per milestone.
+4. Create medium-grain implementation issues (not giant umbrella-only backlog items).
+5. For each implementation issue, include:
+   * problem / outcome
+   * scope (in / out)
+   * dependencies / blocked-by issues
+   * acceptance criteria
+   * tests to add/update
+   * notes/code references (use absolute repo paths)
+   * JSON/CLI compatibility impact (if any)
+6. Link each issue to the umbrella tracker and the appropriate phase tracker/milestone.
+7. Update `notes/roadmap.md` with milestone links, tracker links, and the immediate execution queue.
+
+#### Execution Workflow After Seeding
+Once the roadmap backlog exists:
+* Work issue-by-issue (one coherent outcome per issue)
+* Keep `notes/` and issue status/checklists in sync after each merged PR
+* Open PRs for implementation work and inspect checks with `gh pr checks <PR_NUMBER>`
+* If checks fail, triage and resolve before reporting milestone completion
+
+#### Safety / Quality Rules
+* Do not create duplicate issues for the same outcome.
+* Do not create vague catch-all tickets like `misc follow-up`.
+* Keep one outcome per implementation issue so autonomy remains tractable.
+* Prefer additive CLI/JSON changes and call out any compatibility impact in issue bodies.
+
 ## 3. Long-Term Memory & Context Management (`notes/`)
 You have a finite context window. To maintain long-term project coherence, you MUST strictly maintain a `notes/` directory. This is your permanent memory.
 * **File Structure:** Create a new markdown file for every major feature, architectural decision, or bug fix.

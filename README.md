@@ -1,102 +1,129 @@
 # joy
 
-Native C++ package and build manager with a `cargo`-like CLI (`new`, `add`, `build`, `run`) and a local `.joy/` environment.
+Native C++ package and build manager with a `cargo`-like CLI and a local project environment (`.joy/`).
 
 `joy` currently supports:
+
 - project scaffolding (`joy new`, `joy init`)
-- manifest + local environment management (`joy.toml`, `.joy/`)
-- header-only dependency fetching/install from GitHub shorthand IDs (for example `nlohmann/json`)
-- recipe-backed compiled dependencies via CMake + Ninja (for example `fmtlib/fmt`, `madler/zlib`)
+- dependency management (`joy add`, `joy remove`, `joy update`, `joy tree`)
+- reproducible dependency materialization (`joy sync`, `--locked`, `--offline`, `--frozen`)
+- header-only and recipe-backed compiled dependencies (CMake + Ninja)
+- multi-file project builds (`project.entry`, `project.extra_sources`, `project.include_dirs`)
 - machine-readable JSON output (`--json` / `--machine`)
-- lockfile manifest-hash enforcement (`joy.lock`, `--locked`, `--update-lock`)
+- diagnostics and metadata validation (`joy doctor`, `joy recipe-check`)
 
 ## Status / Caveats
 
-This is an early but functional implementation of the Phase 1–6 roadmap milestone.
+`joy` is a functional pre-1.0 implementation that has completed Phases 7-14 of the current roadmap wave.
 
 Current constraints:
-- dependency versions are exact refs (`HEAD`, tag, branch, or commit SHA); there is no semver solver yet
-- Windows support is currently optimized for MinGW (`x86_64-pc-windows-gnu`) first
-- user project build support is currently a single entry translation unit (`src/main.cpp`)
-- lockfile enforcement is implemented, but lockfile package population is still minimal (manifest-hash is the primary gate)
 
-## Install / Build From Source
+- dependency versions are exact refs (`HEAD`, tag, branch, or commit SHA); there is no semver solver yet
+- Windows local builds are supported via both MinGW GNU and MSVC (`cl.exe` + Ninja)
+- GitHub release artifacts currently publish the Windows GNU target (`x86_64-pc-windows-gnu`)
+- no workspace/multi-target project model yet (single binary target per manifest)
+- package-manager channels (Homebrew tap / Scoop bucket) are template-driven and release-managed
+
+## Install
+
+### Build From Source (All Platforms)
 
 ```bash
-# Build the CLI
 cargo build --workspace
-
-# Or install it locally from this repo
 cargo install --path /Users/autoparallel/Code/joy
 ```
 
-You will also need host tools for full builds:
+### GitHub Release Binaries (Recommended for end users)
+
+Phase 14 adds a tagged release workflow that publishes versioned artifacts to GitHub Releases.
+
+Artifact naming:
+
+- `joy-vX.Y.Z-x86_64-unknown-linux-gnu.tar.gz`
+- `joy-vX.Y.Z-aarch64-apple-darwin.tar.gz`
+- `joy-vX.Y.Z-x86_64-pc-windows-gnu.zip`
+
+Release process details: `/Users/autoparallel/Code/joy/docs/releasing.md`
+
+### Homebrew / Scoop Metadata (Template-Based)
+
+This repo now includes package-manager metadata templates:
+
+- Homebrew formula template: `/Users/autoparallel/Code/joy/packaging/homebrew/joy.rb`
+- Scoop manifest template: `/Users/autoparallel/Code/joy/packaging/scoop/joy.json`
+- Packaging notes: `/Users/autoparallel/Code/joy/packaging/README.md`
+
+After updating the template version + SHA256 values for a published release, you can test locally:
+
+```bash
+# macOS/Linux (Homebrew installed)
+brew install --formula ./packaging/homebrew/joy.rb
+
+# Windows (Scoop installed)
+scoop install .\packaging\scoop\joy.json
+```
+
+## Host Tools (for `joy build` / `joy run`)
+
+You will need host tools for local C++ builds and compiled recipe dependencies:
+
 - a C++ compiler (`clang++` or `g++`; MinGW `g++` on Windows)
 - `ninja`
 - `cmake` (for compiled recipe-backed dependencies)
 - `git` (for package fetching)
 
-## Quickstart (New Project)
+Use `joy doctor` to inspect tool availability and local cache/recipe health.
+
+## Quickstart
 
 ```bash
 joy new hello_cpp
 cd hello_cpp
+joy add nlohmann/json
 joy run
+joy tree
 ```
 
-Expected output (human mode):
+Expected run output (human mode):
 
 ```text
 Hello from joy!
 Ran `.../.joy/bin/hello_cpp` (exit 0)
 ```
 
-## Add a Header-Only Dependency (`nlohmann/json`)
+## Reproducible Workflows (`sync`, `--locked`, `--offline`, `--frozen`)
 
 ```bash
-joy add nlohmann/json
+# Refresh dependency/cache/materialized state without compiling the app
+joy sync
+
+# CI-safe mode: locked + offline (no lockfile writes, no network)
+joy --frozen build
+
+# Warm-cache local rebuild with no network access
+joy --offline run
 ```
 
-What `joy add` currently does:
-- validates `owner/repo`
-- updates `joy.toml`
-- creates local `.joy/` directories (if missing)
-- fetches the dependency source into the global cache (`~/.joy/cache/...` or `JOY_HOME` override)
-- installs headers into `.joy/include/deps/<slug>` (symlink preferred, copy fallback)
+Notes:
 
-Example `src/main.cpp` using `nlohmann/json`:
+- `--frozen` implies `--offline` and `--locked`
+- `--offline` fails with a stable machine error when a dependency is missing from cache
+- `joy sync` refreshes `.joy/` and `joy.lock` without compiling the final project binary
 
-```cpp
-#include <iostream>
-#include <nlohmann/json.hpp>
-
-int main() {
-  nlohmann::json payload = {
-    {"project", "joy"},
-    {"features", {"fetch", "build", "run"}}
-  };
-
-  std::cout << payload.dump(2) << std::endl;
-  return 0;
-}
-```
-
-Then build/run:
+## Dependency Commands
 
 ```bash
-joy run
+joy add fmtlib/fmt --rev 11.0.2
+joy update fmtlib/fmt --rev 11.1.0
+joy remove fmtlib/fmt
+joy tree --json
 ```
 
-## Build and Run
+`joy tree` reports the resolved dependency graph (human or JSON mode) using deterministic ordering.
 
-```bash
-joy build
-joy run -- --example-flag value
-```
+## Multi-File Project Builds
 
-`joy run` forwards everything after `--` to the compiled binary.
-
-## Example `joy.toml`
+`joy` now supports multi-file user projects while keeping `project.entry` as the required entry point.
 
 ```toml
 [project]
@@ -104,72 +131,62 @@ name = "hello_cpp"
 version = "0.1.0"
 cpp_standard = "c++20"
 entry = "src/main.cpp"
+extra_sources = ["src/lib/math.cpp", "src/feature/print.cpp"]
+include_dirs = ["include"]
 
 [dependencies]
 "nlohmann/json" = { source = "github", rev = "HEAD" }
 "fmtlib/fmt" = { source = "github", rev = "11.0.2" }
 ```
 
-## Compiled Dependency Example (`fmtlib/fmt`)
+## Compiled Dependency Recipes
 
 `joy` ships a curated recipe index in `/Users/autoparallel/Code/joy/recipes` with recipe files under `/Users/autoparallel/Code/joy/recipes/packages`.
 
-Included examples:
-- `nlohmann/json` (header-only)
-- `fmtlib/fmt` (CMake / compiled)
-- `madler/zlib` (CMake / compiled)
+Examples currently include header-only and compiled packages such as:
 
-Example:
+- `nlohmann/json`
+- `fmtlib/fmt`
+- `madler/zlib`
+- `gabime/spdlog`
+- `Neargye/magic_enum`
+- `jarro2783/cxxopts`
 
-```bash
-joy add fmtlib/fmt
-joy build
-```
-
-At build time, `joy` resolves recipe metadata, computes an ABI hash, builds into the global cache (`~/.joy/cache/builds/<abi_hash>`), and installs library artifacts into `.joy/lib` for linking.
+Use `joy recipe-check` to validate bundled recipe metadata locally or in CI.
 
 ## Machine Mode (`--json` / `--machine`)
 
 All commands support machine-readable JSON output.
 
 ```bash
-joy --json new demo_json
+joy --json doctor
+joy --json tree
+joy --json build
 ```
 
-Example response (paths shortened):
+Machine interface docs:
 
-```json
-{
-  "ok": true,
-  "command": "new",
-  "data": {
-    "created_paths": [".../demo_json", ".../demo_json/src", ".../demo_json/joy.toml", ".../demo_json/src/main.cpp", ".../demo_json/.gitignore"],
-    "overwritten_paths": [],
-    "project_name": "demo_json",
-    "project_root": ".../demo_json"
-  }
-}
-```
+- `/Users/autoparallel/Code/joy/docs/machine-interface.md`
+- `/Users/autoparallel/Code/joy/docs/error-codes.md`
 
-Errors also use JSON envelopes (non-zero exit code still applies):
+The JSON envelope shape is stable and additive for existing commands in the current roadmap wave.
 
-```json
-{
-  "ok": false,
-  "command": "build",
-  "error": {
-    "code": "manifest_not_found",
-    "message": "no `joy.toml` found at /path/to/joy.toml"
-  }
-}
-```
+## Platform Support Matrix (Current)
+
+| Platform | Status | Notes |
+| --- | --- | --- |
+| Linux (x86_64 GNU) | Supported | CI build/lint/test + release artifact |
+| macOS (Apple Silicon) | Supported | CI build/lint/test + release artifact |
+| Windows (MinGW GNU) | Supported | CI build/lint/test + release artifact |
+| Windows (MSVC) | Supported | CI build/lint/test + compiled-e2e; release artifact currently GNU-only |
 
 ## How It Works (High-Level)
 
-1. `joy add` fetches and caches package sources, then installs headers into `.joy/include/deps`.
-2. `joy build` loads `joy.toml`, enforces/updates `joy.lock`, discovers toolchain (`ninja` + compiler), and generates a Ninja build file.
-3. For compiled dependencies, `joy` loads recipes, resolves a dependency DAG, prefetches sources, computes ABI hashes, builds with CMake+Ninja into the global cache, and installs libraries into `.joy/lib`.
-4. `joy run` reuses the same build pipeline, then executes the produced binary.
+1. `joy add` / `joy update` fetch and cache package sources, then install headers into `.joy/include/deps` as needed.
+2. `joy sync` and `joy build` load `joy.toml`, resolve dependency metadata, enforce/refresh `joy.lock`, and materialize dependency state.
+3. For compiled dependencies, `joy` loads recipes, resolves a dependency DAG, computes ABI hashes, builds with CMake+Ninja into the global cache, and installs artifacts into `.joy/lib`.
+4. `joy build` generates a Ninja file for the user project and compiles/links the final binary.
+5. `joy run` reuses the same build pipeline, then executes the produced binary.
 
 ## Project Layout
 
@@ -210,33 +227,31 @@ From `/Users/autoparallel/Code/joy`:
 ```bash
 just build
 just lint
+just recipe-check
 just test
-just ci      # lint + test
-just clean
+just ci
+joy --json doctor
 ```
 
-## Testing Notes
+Release and distribution process docs:
 
-- Unit tests cover manifest parsing, recipes, resolver/DAG behavior, ABI hashing, linking, and cache management.
-- Integration tests cover CLI scaffolding, `add`, `build`, `run`, and lockfile enforcement.
-- Some tests are toolchain-dependent (compiler, Ninja, CMake) and skip with explicit messages when tools are unavailable.
-- CI includes a compiled-dependency focused matrix job in `/Users/autoparallel/Code/joy/.github/workflows/check.yaml`.
+- `/Users/autoparallel/Code/joy/docs/releasing.md`
+- `/Users/autoparallel/Code/joy/packaging/README.md`
 
-## Current Limitations / Known Gaps
+## Current Limitations / Next Big Gaps
 
 - No semver range solving (exact refs only)
-- No first-class MSVC build path yet (detection exists; MinGW-first support)
-- Single-translation-unit user build model for now (`src/main.cpp`)
-- Lockfile package records are not fully populated yet
-- Recipe set is intentionally small and curated in-repo
+- Windows release artifacts are GNU-only for now (MSVC build/test support exists)
+- No workspace support / multiple binary targets
+- Package-manager channels are template-driven until dedicated tap/bucket repos are maintained
 
-## Roadmap Milestone Archive
+## Roadmap Milestones and Notes
 
-The completed Phase 1–6 execution notes and roadmap tracker are archived in:
-
-- `/Users/autoparallel/Code/joy/notes/archive/2026-phase1-6-roadmap-delivered/MILESTONE.md`
-- `/Users/autoparallel/Code/joy/notes/archive/2026-phase1-6-roadmap-delivered/source-notes/`
+- Active roadmap tracker: `/Users/autoparallel/Code/joy/notes/roadmap.md`
+- Completed Phase 1-6 milestone archive:
+  - `/Users/autoparallel/Code/joy/notes/archive/2026-phase1-6-roadmap-delivered/MILESTONE.md`
+  - `/Users/autoparallel/Code/joy/notes/archive/2026-phase1-6-roadmap-delivered/source-notes/`
 
 ## Contributing
 
-See `/Users/autoparallel/Code/joy/CONTRIBUTING.md` for development workflow and notes/archival conventions.
+See `/Users/autoparallel/Code/joy/CONTRIBUTING.md` for development workflow, release process pointers, and notes/archival conventions.

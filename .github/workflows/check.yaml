@@ -13,6 +13,37 @@ env:
   CARGO_TERM_COLOR: always
 
 jobs:
+  recipes:
+    name: recipes
+    runs-on: ubuntu-latest
+    continue-on-error: true
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Install Rust
+        uses: dtolnay/rust-toolchain@nightly
+
+      - name: Rust Cache
+        uses: Swatinem/rust-cache@v2
+        with:
+          key: check/recipes
+
+      - name: Validate bundled recipes
+        run: cargo run --quiet -- recipe-check --json
+
+  distribution-metadata:
+    name: distribution-metadata
+    runs-on: ubuntu-latest
+    continue-on-error: true
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Validate Homebrew formula syntax
+        run: ruby -c packaging/homebrew/joy.rb
+
+      - name: Validate Scoop manifest JSON
+        run: jq empty packaging/scoop/joy.json
+
   format:
     name: fmt
     runs-on: ubuntu-latest
@@ -59,6 +90,12 @@ jobs:
           - job: lint
             os: windows-latest
             target: x86_64-pc-windows-gnu
+          - job: build
+            os: windows-latest
+            target: x86_64-pc-windows-msvc
+          - job: lint
+            os: windows-latest
+            target: x86_64-pc-windows-msvc
     steps:
       - uses: actions/checkout@v4
 
@@ -68,8 +105,12 @@ jobs:
           targets: ${{ matrix.target }}
           components: ${{ matrix.job == 'lint' && 'clippy' || '' }}
 
-      - name: Install MinGW (Windows)
-        if: runner.os == 'Windows'
+      - name: Setup MSVC developer environment (Windows MSVC)
+        if: runner.os == 'Windows' && endsWith(matrix.target, '-msvc')
+        uses: ilammy/msvc-dev-cmd@v1
+
+      - name: Install MinGW (Windows GNU)
+        if: runner.os == 'Windows' && endsWith(matrix.target, '-gnu')
         run: |
           choco install mingw --version=12.2.0 -y
           Import-Module "$env:ChocolateyInstall\helpers\chocolateyProfile.psm1"
@@ -102,6 +143,8 @@ jobs:
             target: aarch64-apple-darwin
           - os: windows-latest
             target: x86_64-pc-windows-gnu
+          - os: windows-latest
+            target: x86_64-pc-windows-msvc
     steps:
       - uses: actions/checkout@v4
 
@@ -110,8 +153,12 @@ jobs:
         with:
           targets: ${{ matrix.target }}
 
-      - name: Install MinGW (Windows)
-        if: runner.os == 'Windows'
+      - name: Setup MSVC developer environment (Windows MSVC)
+        if: runner.os == 'Windows' && endsWith(matrix.target, '-msvc')
+        uses: ilammy/msvc-dev-cmd@v1
+
+      - name: Install MinGW (Windows GNU)
+        if: runner.os == 'Windows' && endsWith(matrix.target, '-gnu')
         run: |
           choco install mingw --version=12.2.0 -y
           Import-Module "$env:ChocolateyInstall\helpers\chocolateyProfile.psm1"
@@ -139,6 +186,8 @@ jobs:
             target: aarch64-apple-darwin
           - os: windows-latest
             target: x86_64-pc-windows-gnu
+          - os: windows-latest
+            target: x86_64-pc-windows-msvc
     steps:
       - uses: actions/checkout@v4
 
@@ -147,8 +196,12 @@ jobs:
         with:
           targets: ${{ matrix.target }}
 
-      - name: Install MinGW (Windows)
-        if: runner.os == 'Windows'
+      - name: Setup MSVC developer environment (Windows MSVC)
+        if: runner.os == 'Windows' && endsWith(matrix.target, '-msvc')
+        uses: ilammy/msvc-dev-cmd@v1
+
+      - name: Install MinGW (Windows GNU)
+        if: runner.os == 'Windows' && endsWith(matrix.target, '-gnu')
         run: |
           choco install mingw --version=12.2.0 -y
           Import-Module "$env:ChocolateyInstall\helpers\chocolateyProfile.psm1"

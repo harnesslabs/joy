@@ -12,6 +12,7 @@ use thiserror::Error;
 
 use crate::global_cache::BuildCacheLayout;
 use crate::ninja::BuildProfile;
+use crate::toolchain::CompilerKind;
 
 /// Inputs for building a recipe-backed dependency into an ABI cache directory.
 #[derive(Debug, Clone)]
@@ -19,6 +20,8 @@ pub struct CmakeBuildRequest {
   pub source_dir: PathBuf,
   pub build_layout: BuildCacheLayout,
   pub profile: BuildProfile,
+  pub compiler_kind: CompilerKind,
+  pub compiler_path: PathBuf,
   pub configure_args: Vec<String>,
   pub build_targets: Vec<String>,
   pub header_roots: Vec<String>,
@@ -143,10 +146,21 @@ fn run_cmake_configure(request: &CmakeBuildRequest) -> Result<(), CmakeError> {
       }
     ),
   ];
+  args.extend(cmake_compiler_args(request));
   args.extend(request.configure_args.iter().cloned());
   // TODO(phase7): Consider normalizing duplicate/conflicting configure args before invocation so
   // recipe defaults and user overrides can compose predictably.
   run_cmake(&args, "configuring CMake project")
+}
+
+fn cmake_compiler_args(request: &CmakeBuildRequest) -> Vec<String> {
+  let compiler = request.compiler_path.display().to_string();
+  let mut args = vec![format!("-DCMAKE_CXX_COMPILER={compiler}")];
+  if request.compiler_kind == CompilerKind::Msvc {
+    // `cl.exe` is the driver for both C and C++ in a VS developer environment.
+    args.push(format!("-DCMAKE_C_COMPILER={compiler}"));
+  }
+  args
 }
 
 fn run_cmake_build(request: &CmakeBuildRequest) -> Result<(), CmakeError> {
@@ -494,12 +508,14 @@ pub enum CmakeError {
 #[cfg(test)]
 mod tests {
   use std::fs;
+  use std::path::PathBuf;
 
   use tempfile::TempDir;
 
   use super::{CmakeBuildRequest, build_into_cache, classify_artifact_path};
   use crate::global_cache::GlobalCache;
   use crate::ninja::BuildProfile;
+  use crate::toolchain::CompilerKind;
 
   #[test]
   fn classifies_common_library_and_binary_artifacts() {
@@ -548,6 +564,8 @@ target_include_directories(demo PUBLIC ${CMAKE_CURRENT_SOURCE_DIR}/include)
       source_dir: source_dir.clone(),
       build_layout: layout.clone(),
       profile: BuildProfile::Debug,
+      compiler_kind: CompilerKind::Clang,
+      compiler_path: std::path::PathBuf::from("clang++"),
       configure_args: Vec::new(),
       build_targets: vec!["demo".into()],
       header_roots: vec!["include".into()],
@@ -565,5 +583,26 @@ target_include_directories(demo PUBLIC ${CMAKE_CURRENT_SOURCE_DIR}/include)
 
     let second = build_into_cache(&request).expect("second build");
     assert!(second.cache_hit);
+  }
+
+  #[test]
+  fn cmake_configure_args_pin_msvc_c_and_cxx_compilers() {
+    let temp = TempDir::new().expect("tempdir");
+    let cache = GlobalCache::from_joy_home(temp.path().join(".joy"));
+    let layout = cache.ensure_compiled_build_layout("cmake-msvc-args").expect("build layout");
+    let request = CmakeBuildRequest {
+      source_dir: temp.path().join("src"),
+      build_layout: layout,
+      profile: BuildProfile::Debug,
+      compiler_kind: CompilerKind::Msvc,
+      compiler_path: PathBuf::from(r"C:\VS\VC\Tools\MSVC\bin\Hostx64\x64\cl.exe"),
+      configure_args: Vec::new(),
+      build_targets: Vec::new(),
+      header_roots: Vec::new(),
+    };
+
+    let args = super::cmake_compiler_args(&request);
+    assert!(args.iter().any(|arg| arg.starts_with("-DCMAKE_CXX_COMPILER=")));
+    assert!(args.iter().any(|arg| arg.starts_with("-DCMAKE_C_COMPILER=")));
   }
 }

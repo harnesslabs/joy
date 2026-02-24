@@ -1,4 +1,4 @@
-use serde_json::json;
+use serde::Serialize;
 use std::env;
 use std::fs;
 use std::path::Path;
@@ -6,6 +6,14 @@ use std::path::Path;
 use crate::cli::NewArgs;
 use crate::commands::{CommandOutput, dir_is_empty, scaffold_files};
 use crate::error::JoyError;
+
+#[derive(Debug, Serialize)]
+struct NewResponse {
+  project_name: String,
+  project_root: String,
+  created_paths: Vec<String>,
+  overwritten_paths: Vec<String>,
+}
 
 pub fn handle(args: NewArgs) -> Result<CommandOutput, JoyError> {
   let cwd = env::current_dir().map_err(|err| {
@@ -43,16 +51,16 @@ pub fn handle(args: NewArgs) -> Result<CommandOutput, JoyError> {
   let overwritten_paths: Vec<String> =
     summary.overwritten.iter().map(|path| path.display().to_string()).collect();
 
-  Ok(CommandOutput::new(
+  CommandOutput::from_data(
     "new",
     format!("Created joy project `{}` at {}", project_name, summary.root.display()),
-    json!({
-      "project_name": project_name,
-      "project_root": summary.root.display().to_string(),
-      "created_paths": created_paths,
-      "overwritten_paths": overwritten_paths
-    }),
-  ))
+    &NewResponse {
+      project_name,
+      project_root: summary.root.display().to_string(),
+      created_paths,
+      overwritten_paths,
+    },
+  )
 }
 
 fn project_name_from_root(root: &Path) -> String {

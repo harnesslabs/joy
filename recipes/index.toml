@@ -11,3 +11,27 @@ slug = "fmt"
 [[packages]]
 id = "madler/zlib"
 slug = "zlib"
+
+[[packages]]
+id = "cliutils/CLI11"
+slug = "cli11"
+
+[[packages]]
+id = "Neargye/magic_enum"
+slug = "magic_enum"
+
+[[packages]]
+id = "skypjack/entt"
+slug = "entt"
+
+[[packages]]
+id = "jarro2783/cxxopts"
+slug = "cxxopts"
+
+[[packages]]
+id = "TartanLlama/expected"
+slug = "tl_expected"
+
+[[packages]]
+id = "gabime/spdlog"
+slug = "spdlog"

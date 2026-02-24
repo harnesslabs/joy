@@ -1,0 +1,7 @@
+id = "skypjack/entt"
+slug = "entt"
+source = "github"
+kind = "header_only"
+
+[headers]
+include_roots = ["src"]

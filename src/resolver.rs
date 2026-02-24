@@ -7,6 +7,7 @@
 
 use std::collections::{BTreeMap, VecDeque};
 
+use petgraph::Direction;
 use petgraph::algo::toposort;
 use petgraph::graph::{DiGraph, NodeIndex};
 use thiserror::Error;
@@ -62,6 +63,23 @@ impl ResolvedGraph {
   /// Convenience helper returning the topological order as package IDs.
   pub fn build_order_ids(&self) -> Result<Vec<String>, ResolverError> {
     Ok(self.build_order()?.into_iter().map(|pkg| pkg.id.to_string()).collect())
+  }
+
+  /// Return the canonical IDs of the direct dependencies of the given package.
+  ///
+  /// The resolver stores edges in dependency -> dependent direction, so dependencies are incoming
+  /// neighbors of the requested package node.
+  pub fn dependency_ids(&self, id: &str) -> Option<Vec<String>> {
+    let idx = *self.by_id.get(id)?;
+    let mut deps = self
+      .graph
+      .neighbors_directed(idx, Direction::Incoming)
+      .filter_map(|dep_idx| self.graph.node_weight(dep_idx))
+      .map(|pkg| pkg.id.to_string())
+      .collect::<Vec<_>>();
+    deps.sort();
+    deps.dedup();
+    Some(deps)
   }
 }
 
@@ -409,6 +427,8 @@ packages = [{ id = "cycle/a", rev = "HEAD" }]
         version: "0.1.0".into(),
         cpp_standard: "c++20".into(),
         entry: "src/main.cpp".into(),
+        extra_sources: Vec::new(),
+        include_dirs: Vec::new(),
       },
       dependencies,
     }

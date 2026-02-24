@@ -40,3 +40,36 @@ fn json_mode_returns_json_for_subcommand_argument_parse_errors() {
   assert_eq!(payload["command"], "cli");
   assert_eq!(payload["error"]["code"], "cli_parse_error");
 }
+
+#[test]
+fn recipe_check_json_validates_bundled_recipes() {
+  let mut cmd = cargo_bin_cmd!("joy");
+  let assert = cmd.args(["--json", "recipe-check"]).assert().success();
+  let payload = json_stdout(&assert.get_output().stdout);
+
+  assert_eq!(payload["ok"], true);
+  assert_eq!(payload["command"], "recipe-check");
+  assert!(payload["data"]["recipe_count"].as_u64().is_some_and(|n| n >= 3));
+  assert!(
+    payload["data"]["packages"]
+      .as_array()
+      .expect("packages array")
+      .iter()
+      .any(|v| v.as_str() == Some("nlohmann/json"))
+  );
+}
+
+#[test]
+fn doctor_json_reports_environment_checks() {
+  let mut cmd = cargo_bin_cmd!("joy");
+  let assert = cmd.args(["--json", "doctor"]).assert().success();
+  let payload = json_stdout(&assert.get_output().stdout);
+
+  assert_eq!(payload["ok"], true);
+  assert_eq!(payload["command"], "doctor");
+  assert!(payload["data"]["env"]["path_present"].is_boolean());
+  assert!(payload["data"]["tools"]["git"]["ok"].is_boolean());
+  assert!(payload["data"]["cache"]["ok"].is_boolean());
+  assert!(payload["data"]["recipes"]["ok"].is_boolean());
+  assert!(payload["data"]["toolchain"]["ok"].is_boolean());
+}
