@@ -82,6 +82,77 @@ fn setup_local_github_remote(package: &str) -> Option<(TempDir, PathBuf, String)
   Some((remote_base, bare_repo, commit))
 }
 
+fn setup_local_github_remote_fmt_fixture() -> Option<(TempDir, PathBuf, String)> {
+  if !git_is_available() {
+    eprintln!("skipping test: git is not available");
+    return None;
+  }
+
+  let remote_base = TempDir::new().expect("remote base");
+  let work = TempDir::new().expect("work repo");
+  let bare_repo = remote_base.path().join("fmtlib").join("fmt.git");
+  fs::create_dir_all(bare_repo.parent().expect("bare parent")).expect("create bare parent");
+
+  run_git(Some(work.path()), ["init"]).expect("git init");
+  run_git(Some(work.path()), ["config", "user.email", "joy-tests@example.com"])
+    .expect("git config email");
+  run_git(Some(work.path()), ["config", "user.name", "Joy Tests"]).expect("git config name");
+
+  fs::create_dir_all(work.path().join("include").join("fmt")).expect("header dir");
+  fs::write(
+    work.path().join("include").join("fmt").join("core.h"),
+    r#"#pragma once
+const char* joy_fmt_message();
+"#,
+  )
+  .expect("write header");
+  fs::write(
+    work.path().join("fmt.cpp"),
+    r#"const char* joy_fmt_message() { return "hello-from-fmt-fixture"; }
+"#,
+  )
+  .expect("write source");
+  fs::write(
+    work.path().join("CMakeLists.txt"),
+    r#"cmake_minimum_required(VERSION 3.16)
+project(fmt LANGUAGES CXX)
+add_library(fmt STATIC fmt.cpp)
+target_include_directories(fmt PUBLIC ${CMAKE_CURRENT_SOURCE_DIR}/include)
+"#,
+  )
+  .expect("write cmakelists");
+
+  run_git(Some(work.path()), ["add", "."]).expect("git add");
+  run_git(Some(work.path()), ["commit", "-m", "fixture"]).expect("git commit");
+  let commit = run_git_capture(Some(work.path()), ["rev-parse", "HEAD"]).expect("rev-parse");
+  let commit = commit.trim().to_string();
+
+  run_git_owned(
+    None,
+    vec!["init".into(), "--bare".into(), bare_repo.to_string_lossy().into_owned()],
+  )
+  .expect("git init --bare");
+  run_git_owned(
+    Some(work.path()),
+    vec!["remote".into(), "add".into(), "origin".into(), bare_repo.to_string_lossy().into_owned()],
+  )
+  .expect("git remote add");
+  run_git(Some(work.path()), ["push", "origin", "HEAD:refs/heads/main"]).expect("git push");
+  run_git_owned(
+    None,
+    vec![
+      "--git-dir".into(),
+      bare_repo.to_string_lossy().into_owned(),
+      "symbolic-ref".into(),
+      "HEAD".into(),
+      "refs/heads/main".into(),
+    ],
+  )
+  .expect("set bare HEAD");
+
+  Some((remote_base, bare_repo, commit))
+}
+
 fn run_git<const N: usize>(cwd: Option<&Path>, args: [&str; N]) -> std::io::Result<()> {
   let mut cmd = ProcessCommand::new("git");
   if let Some(dir) = cwd {
@@ -298,4 +369,79 @@ fn build_tools_available_for_test() -> bool {
       || which("g++").is_ok()
       || which("clang++.exe").is_ok()
       || which("g++.exe").is_ok())
+}
+
+fn compiled_build_tools_available_for_test() -> bool {
+  build_tools_available_for_test() && which("cmake").is_ok()
+}
+
+#[test]
+fn build_and_run_with_local_compiled_recipe_dependency() {
+  if !compiled_build_tools_available_for_test() {
+    eprintln!("skipping test: compiler/ninja/cmake not available");
+    return;
+  }
+
+  let temp = TempDir::new().expect("tempdir");
+  init_project(&temp);
+  let Some((remote_base, _bare_repo, _commit)) = setup_local_github_remote_fmt_fixture() else {
+    return;
+  };
+  let joy_home = temp.path().join("joy-home");
+
+  let mut add = cargo_bin_cmd!("joy");
+  add
+    .current_dir(temp.path())
+    .env("JOY_GITHUB_BASE", remote_base.path())
+    .env("JOY_HOME", &joy_home)
+    .args(["--json", "add", "fmtlib/fmt"])
+    .assert()
+    .success();
+
+  fs::write(
+    temp.path().join("src/main.cpp"),
+    r#"#include <fmt/core.h>
+#include <iostream>
+
+int main() {
+  std::cout << joy_fmt_message() << std::endl;
+  return 0;
+}
+"#,
+  )
+  .expect("write main.cpp");
+
+  let mut build = cargo_bin_cmd!("joy");
+  let build_assert = build
+    .current_dir(temp.path())
+    .env("JOY_GITHUB_BASE", remote_base.path())
+    .env("JOY_HOME", &joy_home)
+    .args(["--json", "build"])
+    .assert()
+    .success();
+  let build_payload = json_stdout(&build_assert.get_output().stdout);
+  assert_eq!(build_payload["ok"], true);
+  assert!(
+    build_payload["data"]["link_libs"]
+      .as_array()
+      .expect("link_libs")
+      .iter()
+      .any(|v| v.as_str() == Some("fmt"))
+  );
+  assert!(
+    temp.path().join(".joy").join("lib").read_dir().expect("lib dir").next().is_some(),
+    "expected staged compiled library artifacts in .joy/lib"
+  );
+
+  let mut run = cargo_bin_cmd!("joy");
+  let run_assert = run
+    .current_dir(temp.path())
+    .env("JOY_GITHUB_BASE", remote_base.path())
+    .env("JOY_HOME", &joy_home)
+    .args(["--json", "run"])
+    .assert()
+    .success();
+  let run_payload = json_stdout(&run_assert.get_output().stdout);
+  assert_eq!(run_payload["ok"], true);
+  assert_eq!(run_payload["data"]["stdout"], "hello-from-fmt-fixture\n");
 }

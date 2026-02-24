@@ -9,7 +9,8 @@ use crate::commands::CommandOutput;
 use crate::error::JoyError;
 use crate::manifest::Manifest;
 use crate::ninja::{BuildProfile, NinjaBuildSpec};
-use crate::{ninja, project_env, toolchain};
+use crate::recipes::{Linkage as RecipeLinkage, RecipeStore};
+use crate::{abi, cmake, fetch, global_cache, linking, ninja, project_env, resolver, toolchain};
 
 #[derive(Debug, Clone)]
 pub(crate) struct BuildExecution {
@@ -19,11 +20,14 @@ pub(crate) struct BuildExecution {
   pub binary_path: PathBuf,
   pub source_file: PathBuf,
   pub include_dirs: Vec<PathBuf>,
+  pub link_dirs: Vec<PathBuf>,
+  pub link_libs: Vec<String>,
   pub toolchain: toolchain::Toolchain,
   pub profile: BuildProfile,
   pub ninja_status: i32,
   pub ninja_stdout: String,
   pub ninja_stderr: String,
+  pub compiled_dependencies_built: Vec<String>,
 }
 
 pub fn handle(args: BuildArgs) -> Result<CommandOutput, JoyError> {
@@ -45,6 +49,9 @@ pub fn handle(args: BuildArgs) -> Result<CommandOutput, JoyError> {
       "source_file": execution.source_file.display().to_string(),
       "profile": match execution.profile { BuildProfile::Debug => "debug", BuildProfile::Release => "release" },
       "include_dirs": execution.include_dirs.iter().map(|p| p.display().to_string()).collect::<Vec<_>>(),
+      "link_dirs": execution.link_dirs.iter().map(|p| p.display().to_string()).collect::<Vec<_>>(),
+      "link_libs": execution.link_libs,
+      "compiled_dependencies_built": execution.compiled_dependencies_built,
       "toolchain": {
         "compiler_kind": execution.toolchain.compiler.kind.as_str(),
         "compiler_version": execution.toolchain.compiler.version,
@@ -98,6 +105,12 @@ pub(crate) fn build_project(release: bool) -> Result<BuildExecution, JoyError> {
   let include_dirs = collect_include_dirs(&env_layout.include_dir).map_err(|err| {
     JoyError::io("build", "reading include directories", &env_layout.include_dir, &err)
   })?;
+  let native_link = prepare_compiled_dependencies(
+    &manifest,
+    &env_layout.lib_dir,
+    &toolchain,
+    BuildProfile::from_release_flag(release),
+  )?;
 
   let spec = NinjaBuildSpec {
     compiler_executable: toolchain.compiler.executable_name.clone(),
@@ -106,8 +119,12 @@ pub(crate) fn build_project(release: bool) -> Result<BuildExecution, JoyError> {
     object_file: relative_or_absolute(&project_root, &object_file),
     binary_file: relative_or_absolute(&project_root, &binary_path),
     include_dirs: include_dirs.iter().map(|dir| relative_or_absolute(&project_root, dir)).collect(),
-    link_dirs: Vec::new(),
-    link_libs: Vec::new(),
+    link_dirs: native_link
+      .link_dirs
+      .iter()
+      .map(|dir| relative_or_absolute(&project_root, dir))
+      .collect(),
+    link_libs: native_link.link_libs.clone(),
     profile: BuildProfile::from_release_flag(release),
   };
   ninja::write_build_ninja(&build_file, &spec)
@@ -144,12 +161,155 @@ pub(crate) fn build_project(release: bool) -> Result<BuildExecution, JoyError> {
     binary_path,
     source_file,
     include_dirs,
+    link_dirs: native_link.link_dirs,
+    link_libs: native_link.link_libs,
     toolchain,
     profile: BuildProfile::from_release_flag(release),
     ninja_status: output.status.code().unwrap_or_default(),
     ninja_stdout,
     ninja_stderr,
+    compiled_dependencies_built: native_link.built_packages,
   })
+}
+
+#[derive(Debug, Clone, Default)]
+struct NativeLinkInputs {
+  link_dirs: Vec<PathBuf>,
+  link_libs: Vec<String>,
+  built_packages: Vec<String>,
+}
+
+fn prepare_compiled_dependencies(
+  manifest: &Manifest,
+  project_lib_dir: &Path,
+  toolchain: &toolchain::Toolchain,
+  profile: BuildProfile,
+) -> Result<NativeLinkInputs, JoyError> {
+  if manifest.dependencies.is_empty() {
+    return Ok(NativeLinkInputs::default());
+  }
+
+  let recipes = RecipeStore::load_default()
+    .map_err(|err| JoyError::new("build", "recipe_load_failed", err.to_string(), 1))?;
+  let resolved = resolver::resolve_manifest(manifest, &recipes)
+    .map_err(|err| JoyError::new("build", "dependency_resolve_failed", err.to_string(), 1))?;
+  let order = resolved
+    .build_order()
+    .map_err(|err| JoyError::new("build", "dependency_graph_invalid", err.to_string(), 1))?;
+
+  let cache = global_cache::GlobalCache::resolve()
+    .map_err(|err| JoyError::new("build", "cache_setup_failed", err.to_string(), 1))?;
+  cache
+    .ensure_layout()
+    .map_err(|err| JoyError::new("build", "cache_setup_failed", err.to_string(), 1))?;
+
+  let mut link_dirs = Vec::<PathBuf>::new();
+  let mut link_libs = Vec::<String>::new();
+  let mut built_packages = Vec::<String>::new();
+
+  for pkg in order {
+    if pkg.header_only {
+      continue;
+    }
+
+    let Some(recipe) = recipes.get(&pkg.id) else {
+      return Err(JoyError::new(
+        "build",
+        "missing_recipe",
+        format!("compiled dependency `{}` requires a curated recipe", pkg.id),
+        1,
+      ));
+    };
+    let Some(cmake_recipe) = recipe.cmake.as_ref() else {
+      return Err(JoyError::new(
+        "build",
+        "missing_cmake_metadata",
+        format!("recipe `{}` is missing `[cmake]` metadata", recipe.id),
+        1,
+      ));
+    };
+    let Some(link_recipe) = recipe.link.as_ref() else {
+      return Err(JoyError::new(
+        "build",
+        "missing_link_metadata",
+        format!("recipe `{}` is missing `[link]` metadata", recipe.id),
+        1,
+      ));
+    };
+    if link_recipe.libs.is_empty() {
+      continue;
+    }
+
+    let fetched = fetch::fetch_github(&pkg.id, &pkg.requested_rev)
+      .map_err(|err| JoyError::new("build", "fetch_failed", err.to_string(), 1))?;
+
+    let recipe_file = recipes.root_dir().join("packages").join(format!("{}.toml", recipe.slug));
+    let recipe_contents = fs::read_to_string(&recipe_file)
+      .map_err(|err| JoyError::io("build", "reading recipe file", &recipe_file, &err))?;
+    let abi_hash = abi::compute_abi_hash(&abi::AbiHashInput {
+      package_id: pkg.id.to_string(),
+      resolved_commit: pkg.resolved_commit.clone(),
+      recipe_content_hash: abi::hash_recipe_contents(&recipe_contents),
+      compiler_kind: toolchain.compiler.kind.as_str().to_string(),
+      compiler_version: toolchain.compiler.version.clone(),
+      target_triple: target_triple_guess(),
+      host_os: std::env::consts::OS.to_string(),
+      host_arch: std::env::consts::ARCH.to_string(),
+      profile: match profile {
+        BuildProfile::Debug => abi::AbiBuildProfile::Debug,
+        BuildProfile::Release => abi::AbiBuildProfile::Release,
+      },
+      cpp_standard: manifest.project.cpp_standard.clone(),
+      linkage: match link_recipe.preferred_linkage.unwrap_or(RecipeLinkage::Static) {
+        RecipeLinkage::Static => abi::AbiLinkage::Static,
+        RecipeLinkage::Shared => abi::AbiLinkage::Shared,
+      },
+      cxxflags: Vec::new(),
+      ldflags: Vec::new(),
+      recipe_configure_args: cmake_recipe.configure_args.clone(),
+      env: Default::default(),
+    });
+
+    let layout = cache
+      .ensure_compiled_build_layout(&abi_hash)
+      .map_err(|err| JoyError::new("build", "cache_setup_failed", err.to_string(), 1))?;
+    let source_dir = if let Some(fetch) = recipe.fetch.as_ref() {
+      if fetch.subdir.trim().is_empty() {
+        fetched.source_dir.clone()
+      } else {
+        fetched.source_dir.join(&fetch.subdir)
+      }
+    } else {
+      fetched.source_dir.clone()
+    };
+
+    let cmake_result = cmake::build_into_cache(&cmake::CmakeBuildRequest {
+      source_dir,
+      build_layout: layout.clone(),
+      profile,
+      configure_args: cmake_recipe.configure_args.clone(),
+      build_targets: cmake_recipe.build_targets.clone(),
+      header_roots: recipe.include_roots().to_vec(),
+    })
+    .map_err(|err| JoyError::new("build", "cmake_build_failed", err.to_string(), 1))?;
+    let lib_install =
+      linking::install_compiled_libraries(project_lib_dir, &layout.lib_dir, &link_recipe.libs)
+        .map_err(|err| JoyError::new("build", "library_install_failed", err.to_string(), 1))?;
+
+    if !cmake_result.cache_hit {
+      built_packages.push(pkg.id.to_string());
+    }
+    if !link_dirs.iter().any(|p| p == &lib_install.project_lib_dir) {
+      link_dirs.push(lib_install.project_lib_dir.clone());
+    }
+    for lib in lib_install.link_libs {
+      if !link_libs.contains(&lib) {
+        link_libs.push(lib);
+      }
+    }
+  }
+
+  Ok(NativeLinkInputs { link_dirs, link_libs, built_packages })
 }
 
 fn collect_include_dirs(project_include_dir: &Path) -> std::io::Result<Vec<PathBuf>> {
@@ -176,6 +336,19 @@ fn relative_or_absolute(root: &Path, path: &Path) -> PathBuf {
 
 fn binary_name(project_name: &str) -> String {
   if cfg!(windows) { format!("{project_name}.exe") } else { project_name.to_string() }
+}
+
+fn target_triple_guess() -> String {
+  std::env::var("TARGET").unwrap_or_else(|_| {
+    let env_suffix = if cfg!(windows) {
+      "windows-gnu"
+    } else if cfg!(target_os = "macos") {
+      "apple-darwin"
+    } else {
+      "unknown-linux-gnu"
+    };
+    format!("{}-{env_suffix}", std::env::consts::ARCH)
+  })
 }
 
 fn map_toolchain_error(err: toolchain::ToolchainError) -> JoyError {
