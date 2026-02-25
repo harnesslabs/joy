@@ -1,6 +1,6 @@
 ---
 date: 2026-02-25
-commit: pending
+commit: 8524cae
 tags:
   - phase38
   - phase76
@@ -103,4 +103,3 @@ If registry v2 fallback/verification proves too strict for early adopters:
 1. Keep v2 parsing and summary storage enabled.
 2. Temporarily disable digest mismatch enforcement in resolver (warning only) while preserving summary fallback.
 3. Continue recording lockfile provenance (`metadata_source`, `package_manifest_digest`) so stricter verification can be re-enabled later without data-model churn.
-
