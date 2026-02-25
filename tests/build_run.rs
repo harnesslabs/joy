@@ -12,6 +12,11 @@ fn init_project(temp: &TempDir) {
   cmd.current_dir(temp.path()).arg("init").assert().success();
 }
 
+fn init_project_at(path: &std::path::Path) {
+  let mut cmd = cargo_bin_cmd!("joy");
+  cmd.current_dir(path).arg("init").assert().success();
+}
+
 fn build_tools_available() -> bool {
   (has_on_path("ninja") || has_on_path("ninja-build"))
     && (has_on_path("clang++")
@@ -43,12 +48,99 @@ fn build_json_compiles_template_project_when_tooling_is_available() {
   assert_eq!(payload["command"], "build");
   assert!(payload["data"]["toolchain"]["compiler_kind"].is_string());
   assert!(payload["data"]["toolchain"]["ninja_path"].is_string());
+  let stderr = String::from_utf8_lossy(&assert.get_output().stderr);
+  assert!(!stderr.contains("==>"), "json mode should not emit human progress prefixes");
 
   assert!(temp.path().join(".joy/build/build.ninja").is_file());
   let project_name = temp.path().file_name().and_then(|name| name.to_str()).expect("temp name");
   let binary_name =
     if cfg!(windows) { format!("{project_name}.exe") } else { project_name.to_string() };
   assert!(temp.path().join(".joy/bin").join(binary_name).is_file());
+}
+
+#[test]
+fn build_human_mode_emits_progress_prefixes_when_tooling_is_available() {
+  if !build_tools_available() {
+    eprintln!("skipping build human progress E2E: ninja and/or compiler unavailable");
+    return;
+  }
+
+  let temp = TempDir::new().expect("tempdir");
+  init_project(&temp);
+
+  let mut cmd = cargo_bin_cmd!("joy");
+  let assert = cmd.current_dir(temp.path()).arg("build").assert().success();
+  let stderr = String::from_utf8_lossy(&assert.get_output().stderr);
+  assert!(stderr.contains("==> Starting build"));
+  assert!(stderr.contains("-> Generating build graph"));
+  assert!(stderr.contains("-> Compiling and linking"));
+}
+
+#[test]
+fn workspace_root_build_and_run_named_target_when_tooling_is_available() {
+  if !build_tools_available() {
+    eprintln!("skipping workspace target E2E: ninja and/or compiler unavailable");
+    return;
+  }
+
+  let temp = TempDir::new().expect("tempdir");
+  let member = temp.path().join("apps").join("app");
+  std::fs::create_dir_all(&member).expect("member dir");
+  init_project_at(&member);
+
+  std::fs::write(
+    temp.path().join("joy.toml"),
+    r#"[workspace]
+members = ["apps/app"]
+"#,
+  )
+  .expect("write workspace manifest");
+
+  let member_manifest = member.join("joy.toml");
+  let mut manifest = std::fs::read_to_string(&member_manifest).expect("read member manifest");
+  manifest.push_str(
+    r#"
+[[project.targets]]
+name = "tool"
+entry = "src/tool.cpp"
+"#,
+  );
+  std::fs::write(&member_manifest, manifest).expect("write member manifest");
+  std::fs::write(
+    member.join("src").join("tool.cpp"),
+    "#include <iostream>\nint main() { std::cout << \"tool-target\" << std::endl; return 0; }\n",
+  )
+  .expect("write tool target");
+
+  let mut build = cargo_bin_cmd!("joy");
+  let build_assert = build
+    .current_dir(temp.path())
+    .args(["--json", "-p", "apps/app", "build", "--target", "tool"])
+    .assert()
+    .success();
+  let build_payload = json_stdout(&build_assert.get_output().stdout);
+  assert_eq!(build_payload["command"], "build");
+  assert_eq!(build_payload["data"]["target"], "tool");
+  assert_eq!(build_payload["data"]["target_default"], false);
+  assert_eq!(build_payload["data"]["workspace_member"], "apps/app");
+  assert!(
+    member.join(".joy").join("bin").join(if cfg!(windows) { "tool.exe" } else { "tool" }).is_file()
+  );
+
+  let mut run = cargo_bin_cmd!("joy");
+  let run_assert = run
+    .current_dir(temp.path())
+    .args(["--json", "-p", "apps/app", "run", "--target", "tool"])
+    .assert()
+    .success();
+  let run_payload = json_stdout(&run_assert.get_output().stdout);
+  assert_eq!(run_payload["command"], "run");
+  assert_eq!(run_payload["data"]["target"], "tool");
+  assert_eq!(run_payload["data"]["workspace_member"], "apps/app");
+  assert_eq!(
+    run_payload["data"]["stdout"].as_str().expect("stdout").replace("\r\n", "\n"),
+    "tool-target\n"
+  );
 }
 
 #[test]

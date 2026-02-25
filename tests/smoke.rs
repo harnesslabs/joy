@@ -16,7 +16,21 @@ fn help_smoke_test() {
     .stdout(predicate::str::contains("Native C++ package and build manager"))
     .stdout(predicate::str::contains("new"))
     .stdout(predicate::str::contains("--json"))
-    .stdout(predicate::str::contains("--machine"));
+    .stdout(predicate::str::contains("--machine"))
+    .stdout(predicate::str::contains("Examples:"))
+    .stdout(predicate::str::contains("joy sync"));
+}
+
+#[test]
+fn build_help_includes_examples() {
+  let mut cmd = cargo_bin_cmd!("joy");
+  cmd
+    .args(["build", "--help"])
+    .assert()
+    .success()
+    .stdout(predicate::str::contains("Examples:"))
+    .stdout(predicate::str::contains("joy build --locked"))
+    .stdout(predicate::str::contains("joy --offline build"));
 }
 
 #[test]
@@ -72,4 +86,24 @@ fn doctor_json_reports_environment_checks() {
   assert!(payload["data"]["cache"]["ok"].is_boolean());
   assert!(payload["data"]["recipes"]["ok"].is_boolean());
   assert!(payload["data"]["toolchain"]["ok"].is_boolean());
+}
+
+#[test]
+fn doctor_human_output_is_sectioned() {
+  let mut cmd = cargo_bin_cmd!("joy");
+  let assert = cmd.arg("doctor").assert().success();
+  let stdout = String::from_utf8_lossy(&assert.get_output().stdout);
+  assert!(stdout.contains("Doctor "));
+  assert!(stdout.contains("Summary"));
+  assert!(stdout.contains("Tools"));
+  assert!(stdout.contains("- git:"));
+}
+
+#[test]
+fn recipe_check_human_output_is_structured() {
+  let mut cmd = cargo_bin_cmd!("joy");
+  let assert = cmd.arg("recipe-check").assert().success();
+  let stdout = String::from_utf8_lossy(&assert.get_output().stdout);
+  assert!(stdout.contains("Recipe metadata validation passed"));
+  assert!(stdout.contains("- bundled recipes:"));
 }

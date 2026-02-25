@@ -4,12 +4,14 @@ use std::process::Command;
 use crate::cli::{RunArgs, RuntimeFlags};
 use crate::commands::CommandOutput;
 use crate::error::JoyError;
+use crate::output::HumanMessageBuilder;
 
 use super::build;
 
 pub fn handle(args: RunArgs, runtime: RuntimeFlags) -> Result<CommandOutput, JoyError> {
   let execution = build::build_project(build::BuildOptions {
     release: args.release,
+    target: args.target.clone(),
     locked: args.locked || runtime.frozen,
     update_lock: args.update_lock,
     offline: runtime.offline,
@@ -52,7 +54,12 @@ pub fn handle(args: RunArgs, runtime: RuntimeFlags) -> Result<CommandOutput, Joy
     human.push_str(stderr_text.trim_end_matches('\n'));
     human.push('\n');
   }
-  human.push_str(&format!("Ran `{}` (exit {})", execution.binary_path.display(), exit_code));
+  human.push_str(
+    &HumanMessageBuilder::new("Program finished")
+      .kv("binary", execution.binary_path.display().to_string())
+      .kv("exit code", exit_code.to_string())
+      .build(),
+  );
 
   Ok(CommandOutput::new(
     "run",
@@ -68,6 +75,8 @@ pub fn handle(args: RunArgs, runtime: RuntimeFlags) -> Result<CommandOutput, Joy
         "ninja_path": execution.toolchain.ninja.path.display().to_string(),
       },
       "profile": match execution.profile { crate::ninja::BuildProfile::Debug => "debug", crate::ninja::BuildProfile::Release => "release" },
+      "target": execution.target_name,
+      "target_default": execution.target_default,
       "args": args.args,
       "exit_code": exit_code,
       "stdout": stdout_text,

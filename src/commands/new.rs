@@ -6,6 +6,7 @@ use std::path::Path;
 use crate::cli::NewArgs;
 use crate::commands::{CommandOutput, dir_is_empty, scaffold_files};
 use crate::error::JoyError;
+use crate::output::HumanMessageBuilder;
 
 #[derive(Debug, Serialize)]
 struct NewResponse {
@@ -53,7 +54,11 @@ pub fn handle(args: NewArgs) -> Result<CommandOutput, JoyError> {
 
   CommandOutput::from_data(
     "new",
-    format!("Created joy project `{}` at {}", project_name, summary.root.display()),
+    HumanMessageBuilder::new(format!("Created joy project `{project_name}`"))
+      .kv("root", summary.root.display().to_string())
+      .kv("created paths", created_paths.len().to_string())
+      .kv("overwritten paths", overwritten_paths.len().to_string())
+      .build(),
     &NewResponse {
       project_name,
       project_root: summary.root.display().to_string(),

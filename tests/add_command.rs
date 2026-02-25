@@ -38,6 +38,11 @@ fn init_project(temp: &TempDir) {
   cmd.current_dir(temp.path()).arg("init").assert().success();
 }
 
+fn init_project_at(path: &Path) {
+  let mut cmd = cargo_bin_cmd!("joy");
+  cmd.current_dir(path).arg("init").assert().success();
+}
+
 fn append_manifest_dependency(temp: &TempDir, package: &str, rev: &str) {
   let manifest_path = temp.path().join("joy.toml");
   let mut manifest = fs::read_to_string(&manifest_path).expect("read joy.toml");
@@ -308,6 +313,91 @@ fn run_git_capture<const N: usize>(cwd: Option<&Path>, args: [&str; N]) -> std::
       String::from_utf8_lossy(&output.stderr)
     )))
   }
+}
+
+fn create_bare_tag(bare_repo: &Path, tag: &str, target: &str) {
+  run_git_owned(
+    None,
+    vec![
+      "--git-dir".into(),
+      bare_repo.to_string_lossy().into_owned(),
+      "tag".into(),
+      tag.into(),
+      target.into(),
+    ],
+  )
+  .expect("create bare tag");
+}
+
+fn render_registry_index(package: &str, versions: &[(&str, &str)]) -> String {
+  let mut out = String::from("version = 1\n\n");
+  out.push_str("[[packages]]\n");
+  out.push_str(&format!("id = \"{package}\"\n\n"));
+  for (version, rev) in versions {
+    out.push_str("[[packages.versions]]\n");
+    out.push_str(&format!("version = \"{version}\"\n"));
+    out.push_str("source = \"github\"\n");
+    out.push_str(&format!("package = \"{package}\"\n"));
+    out.push_str(&format!("rev = \"{rev}\"\n\n"));
+  }
+  out
+}
+
+fn setup_local_registry_index(
+  package: &str,
+  versions: &[(&str, &str)],
+) -> Option<(TempDir, TempDir, PathBuf)> {
+  if !git_is_available() {
+    eprintln!("skipping test: git is not available");
+    return None;
+  }
+
+  let remote_base = TempDir::new().expect("registry remote base");
+  let work = TempDir::new().expect("registry work repo");
+  let bare_repo = remote_base.path().join("default.git");
+
+  run_git(Some(work.path()), ["init"]).expect("git init registry");
+  run_git(Some(work.path()), ["config", "user.email", "joy-tests@example.com"])
+    .expect("git config email");
+  run_git(Some(work.path()), ["config", "user.name", "Joy Tests"]).expect("git config name");
+  fs::write(work.path().join("index.toml"), render_registry_index(package, versions))
+    .expect("write registry index");
+  run_git(Some(work.path()), ["add", "index.toml"]).expect("git add index");
+  run_git(Some(work.path()), ["commit", "-m", "registry index"]).expect("git commit index");
+
+  run_git_owned(
+    None,
+    vec!["init".into(), "--bare".into(), bare_repo.to_string_lossy().into_owned()],
+  )
+  .expect("git init --bare registry");
+  run_git_owned(
+    Some(work.path()),
+    vec!["remote".into(), "add".into(), "origin".into(), bare_repo.to_string_lossy().into_owned()],
+  )
+  .expect("git remote add registry");
+  run_git(Some(work.path()), ["push", "origin", "HEAD:refs/heads/main"])
+    .expect("git push registry");
+  run_git_owned(
+    None,
+    vec![
+      "--git-dir".into(),
+      bare_repo.to_string_lossy().into_owned(),
+      "symbolic-ref".into(),
+      "HEAD".into(),
+      "refs/heads/main".into(),
+    ],
+  )
+  .expect("set registry bare HEAD");
+
+  Some((remote_base, work, bare_repo))
+}
+
+fn update_local_registry_index(work: &Path, package: &str, versions: &[(&str, &str)]) {
+  fs::write(work.join("index.toml"), render_registry_index(package, versions))
+    .expect("write index");
+  run_git(Some(work), ["add", "index.toml"]).expect("git add updated index");
+  run_git(Some(work), ["commit", "-m", "update registry index"]).expect("git commit updated index");
+  run_git(Some(work), ["push", "origin", "HEAD:refs/heads/main"]).expect("git push updated index");
 }
 
 #[test]
@@ -1220,6 +1310,334 @@ fn update_changes_manifest_rev_and_warns_stale_lockfile() {
 }
 
 #[test]
+fn add_supports_semver_version_and_records_selected_version_metadata() {
+  let temp = TempDir::new().expect("tempdir");
+  init_project(&temp);
+  let Some((remote_base, bare_repo, commit1, commit2)) =
+    setup_local_github_remote_two_commits("nlohmann/json")
+  else {
+    return;
+  };
+  create_bare_tag(&bare_repo, "v1.0.0", &commit1);
+  create_bare_tag(&bare_repo, "v1.2.0", &commit2);
+  let joy_home = temp.path().join("joy-home");
+
+  let mut cmd = cargo_bin_cmd!("joy");
+  let assert = cmd
+    .current_dir(temp.path())
+    .env("JOY_GITHUB_BASE", remote_base.path())
+    .env("JOY_HOME", &joy_home)
+    .args(["--json", "add", "nlohmann/json", "--version", "^1"])
+    .assert()
+    .success();
+  let payload = json_stdout(&assert.get_output().stdout);
+  assert_eq!(payload["command"], "add");
+  assert_eq!(payload["data"]["package"], "nlohmann/json");
+  assert_eq!(payload["data"]["requested_requirement"], "^1");
+  assert_eq!(payload["data"]["resolved_version"], "1.2.0");
+  assert_eq!(payload["data"]["rev"], "v1.2.0");
+  assert_eq!(payload["data"]["resolved_commit"], commit2);
+
+  let manifest = fs::read_to_string(temp.path().join("joy.toml")).expect("manifest");
+  assert!(manifest.contains("version = \"^1\""));
+  assert!(!manifest.contains("rev = "));
+}
+
+#[test]
+fn update_refreshes_semver_dependency_to_newer_matching_tag_without_manifest_change() {
+  let temp = TempDir::new().expect("tempdir");
+  init_project(&temp);
+  let Some((remote_base, bare_repo, commit1, commit2)) =
+    setup_local_github_remote_two_commits("nlohmann/json")
+  else {
+    return;
+  };
+  create_bare_tag(&bare_repo, "v1.0.0", &commit1);
+  let joy_home = temp.path().join("joy-home");
+
+  let mut add = cargo_bin_cmd!("joy");
+  add
+    .current_dir(temp.path())
+    .env("JOY_GITHUB_BASE", remote_base.path())
+    .env("JOY_HOME", &joy_home)
+    .args(["--json", "add", "nlohmann/json", "--version", "^1"])
+    .assert()
+    .success();
+
+  create_bare_tag(&bare_repo, "v1.2.0", &commit2);
+
+  let mut update = cargo_bin_cmd!("joy");
+  let assert = update
+    .current_dir(temp.path())
+    .env("JOY_GITHUB_BASE", remote_base.path())
+    .env("JOY_HOME", &joy_home)
+    .args(["--json", "update", "nlohmann/json"])
+    .assert()
+    .success();
+  let payload = json_stdout(&assert.get_output().stdout);
+  assert_eq!(payload["command"], "update");
+  assert_eq!(payload["data"]["manifest_changed"], false);
+  assert_eq!(payload["data"]["updated_count"], 1);
+  let item = &payload["data"]["updated"][0];
+  assert_eq!(item["package"], "nlohmann/json");
+  assert_eq!(item["requested_requirement"], "^1");
+  assert_eq!(item["resolved_version"], "1.2.0");
+  assert_eq!(item["rev"], "v1.2.0");
+  assert_eq!(item["resolved_commit"], commit2);
+
+  let manifest = fs::read_to_string(temp.path().join("joy.toml")).expect("manifest");
+  assert!(manifest.contains("version = \"^1\""));
+  assert!(!manifest.contains("rev = "));
+}
+
+#[test]
+fn tree_and_lockfile_include_semver_metadata_for_direct_dependency() {
+  let temp = TempDir::new().expect("tempdir");
+  init_project(&temp);
+  let Some((remote_base, bare_repo, _commit1, commit2)) =
+    setup_local_github_remote_two_commits("nlohmann/json")
+  else {
+    return;
+  };
+  create_bare_tag(&bare_repo, "v1.2.0", &commit2);
+  let joy_home = temp.path().join("joy-home");
+
+  let mut add = cargo_bin_cmd!("joy");
+  add
+    .current_dir(temp.path())
+    .env("JOY_GITHUB_BASE", remote_base.path())
+    .env("JOY_HOME", &joy_home)
+    .args(["--json", "add", "nlohmann/json", "--version", "^1"])
+    .assert()
+    .success();
+
+  let mut tree = cargo_bin_cmd!("joy");
+  let tree_assert = tree
+    .current_dir(temp.path())
+    .env("JOY_GITHUB_BASE", remote_base.path())
+    .env("JOY_HOME", &joy_home)
+    .args(["--json", "tree"])
+    .assert()
+    .success();
+  let tree_payload = json_stdout(&tree_assert.get_output().stdout);
+  let packages = tree_payload["data"]["packages"].as_array().expect("packages");
+  let pkg = packages
+    .iter()
+    .find(|pkg| pkg.get("id").and_then(|v| v.as_str()) == Some("nlohmann/json"))
+    .expect("json package");
+  assert_eq!(pkg["requested_requirement"], "^1");
+  assert_eq!(pkg["resolved_version"], "1.2.0");
+  assert_eq!(pkg["requested_rev"], "v1.2.0");
+  assert_eq!(pkg["resolved_commit"], commit2);
+
+  let mut sync = cargo_bin_cmd!("joy");
+  sync
+    .current_dir(temp.path())
+    .env("JOY_GITHUB_BASE", remote_base.path())
+    .env("JOY_HOME", &joy_home)
+    .args(["sync", "--update-lock"])
+    .assert()
+    .success();
+
+  let lock = read_lockfile_toml(&temp);
+  let packages = lock["packages"].as_array().expect("packages array");
+  let locked = packages
+    .iter()
+    .find(|pkg| pkg.get("id").and_then(|v| v.as_str()) == Some("nlohmann/json"))
+    .expect("locked json package");
+  assert_eq!(locked["requested_requirement"].as_str(), Some("^1"));
+  assert_eq!(locked["resolved_version"].as_str(), Some("1.2.0"));
+  assert_eq!(locked["requested_rev"].as_str(), Some("v1.2.0"));
+  assert_eq!(locked["resolved_commit"].as_str(), Some(commit2.as_str()));
+}
+
+#[test]
+fn registry_add_tree_sync_and_offline_tree_include_registry_metadata() {
+  let temp = TempDir::new().expect("tempdir");
+  init_project(&temp);
+  let Some((pkg_remote_base, pkg_bare_repo, commit1, commit2)) =
+    setup_local_github_remote_two_commits("nlohmann/json")
+  else {
+    return;
+  };
+  create_bare_tag(&pkg_bare_repo, "v1.0.0", &commit1);
+  create_bare_tag(&pkg_bare_repo, "v1.2.0", &commit2);
+
+  let Some((registry_remote_base, _registry_work, registry_bare_repo)) =
+    setup_local_registry_index("nlohmann/json", &[("1.0.0", "v1.0.0"), ("1.2.0", "v1.2.0")])
+  else {
+    return;
+  };
+
+  let _keep_registry_remote_base = registry_remote_base;
+  let joy_home = temp.path().join("joy-home");
+
+  let mut add = cargo_bin_cmd!("joy");
+  let add_assert = add
+    .current_dir(temp.path())
+    .env("JOY_GITHUB_BASE", pkg_remote_base.path())
+    .env("JOY_REGISTRY_DEFAULT", &registry_bare_repo)
+    .env("JOY_HOME", &joy_home)
+    .args(["--json", "add", "registry:nlohmann/json", "--version", "^1"])
+    .assert()
+    .success();
+  let add_payload = json_stdout(&add_assert.get_output().stdout);
+  assert_eq!(add_payload["data"]["source"], "registry");
+  assert_eq!(add_payload["data"]["registry"], "default");
+  assert_eq!(add_payload["data"]["source_package"], "nlohmann/json");
+  assert_eq!(add_payload["data"]["requested_requirement"], "^1");
+  assert_eq!(add_payload["data"]["resolved_version"], "1.2.0");
+  assert_eq!(add_payload["data"]["resolved_commit"], commit2);
+
+  let manifest = fs::read_to_string(temp.path().join("joy.toml")).expect("manifest");
+  assert!(manifest.contains("source = \"registry\""));
+  assert!(manifest.contains("version = \"^1\""));
+
+  let mut tree = cargo_bin_cmd!("joy");
+  let tree_assert = tree
+    .current_dir(temp.path())
+    .env("JOY_GITHUB_BASE", pkg_remote_base.path())
+    .env("JOY_REGISTRY_DEFAULT", &registry_bare_repo)
+    .env("JOY_HOME", &joy_home)
+    .args(["--json", "tree"])
+    .assert()
+    .success();
+  let tree_payload = json_stdout(&tree_assert.get_output().stdout);
+  let pkg = tree_payload["data"]["packages"]
+    .as_array()
+    .expect("packages")
+    .iter()
+    .find(|pkg| pkg.get("id").and_then(|v| v.as_str()) == Some("nlohmann/json"))
+    .expect("package");
+  assert_eq!(pkg["source"], "registry");
+  assert_eq!(pkg["registry"], "default");
+  assert_eq!(pkg["source_package"], "nlohmann/json");
+  assert_eq!(pkg["requested_requirement"], "^1");
+  assert_eq!(pkg["resolved_version"], "1.2.0");
+
+  let mut sync = cargo_bin_cmd!("joy");
+  sync
+    .current_dir(temp.path())
+    .env("JOY_GITHUB_BASE", pkg_remote_base.path())
+    .env("JOY_REGISTRY_DEFAULT", &registry_bare_repo)
+    .env("JOY_HOME", &joy_home)
+    .args(["sync", "--update-lock"])
+    .assert()
+    .success();
+  let lock = read_lockfile_toml(&temp);
+  let locked = lock["packages"]
+    .as_array()
+    .expect("packages")
+    .iter()
+    .find(|pkg| pkg.get("id").and_then(|v| v.as_str()) == Some("nlohmann/json"))
+    .expect("locked package");
+  assert_eq!(locked["source"].as_str(), Some("registry"));
+  assert_eq!(locked["registry"].as_str(), Some("default"));
+  assert_eq!(locked["source_package"].as_str(), Some("nlohmann/json"));
+  assert_eq!(locked["requested_requirement"].as_str(), Some("^1"));
+  assert_eq!(locked["resolved_version"].as_str(), Some("1.2.0"));
+
+  let mut offline_tree = cargo_bin_cmd!("joy");
+  offline_tree
+    .current_dir(temp.path())
+    .env("JOY_GITHUB_BASE", pkg_remote_base.path())
+    .env("JOY_REGISTRY_DEFAULT", &registry_bare_repo)
+    .env("JOY_HOME", &joy_home)
+    .args(["--json", "--offline", "tree"])
+    .assert()
+    .success();
+}
+
+#[test]
+fn registry_update_refreshes_after_registry_index_changes() {
+  let temp = TempDir::new().expect("tempdir");
+  init_project(&temp);
+  let Some((pkg_remote_base, pkg_bare_repo, commit1, commit2)) =
+    setup_local_github_remote_two_commits("nlohmann/json")
+  else {
+    return;
+  };
+  create_bare_tag(&pkg_bare_repo, "v1.0.0", &commit1);
+  create_bare_tag(&pkg_bare_repo, "v1.2.0", &commit2);
+  let Some((_registry_remote_base, registry_work, registry_bare_repo)) =
+    setup_local_registry_index("nlohmann/json", &[("1.0.0", "v1.0.0")])
+  else {
+    return;
+  };
+
+  let joy_home = temp.path().join("joy-home");
+
+  let mut add = cargo_bin_cmd!("joy");
+  add
+    .current_dir(temp.path())
+    .env("JOY_GITHUB_BASE", pkg_remote_base.path())
+    .env("JOY_REGISTRY_DEFAULT", &registry_bare_repo)
+    .env("JOY_HOME", &joy_home)
+    .args(["add", "registry:nlohmann/json", "--version", "^1"])
+    .assert()
+    .success();
+
+  update_local_registry_index(
+    registry_work.path(),
+    "nlohmann/json",
+    &[("1.0.0", "v1.0.0"), ("1.2.0", "v1.2.0")],
+  );
+
+  let mut update = cargo_bin_cmd!("joy");
+  let update_assert = update
+    .current_dir(temp.path())
+    .env("JOY_GITHUB_BASE", pkg_remote_base.path())
+    .env("JOY_REGISTRY_DEFAULT", &registry_bare_repo)
+    .env("JOY_HOME", &joy_home)
+    .args(["--json", "update", "nlohmann/json"])
+    .assert()
+    .success();
+  let payload = json_stdout(&update_assert.get_output().stdout);
+  let item = &payload["data"]["updated"][0];
+  assert_eq!(item["source"], "registry");
+  assert_eq!(item["registry"], "default");
+  assert_eq!(item["requested_requirement"], "^1");
+  assert_eq!(item["resolved_version"], "1.2.0");
+  assert_eq!(item["resolved_commit"], commit2);
+  assert_eq!(payload["data"]["manifest_changed"], false);
+}
+
+#[test]
+fn registry_tree_offline_reports_stable_error_when_registry_cache_is_cold() {
+  let temp = TempDir::new().expect("tempdir");
+  init_project(&temp);
+  let Some((pkg_remote_base, pkg_bare_repo, commit1, _commit2)) =
+    setup_local_github_remote_two_commits("nlohmann/json")
+  else {
+    return;
+  };
+  create_bare_tag(&pkg_bare_repo, "v1.0.0", &commit1);
+  let Some((_registry_remote_base, _registry_work, registry_bare_repo)) =
+    setup_local_registry_index("nlohmann/json", &[("1.0.0", "v1.0.0")])
+  else {
+    return;
+  };
+  let joy_home = temp.path().join("joy-home");
+
+  let manifest_path = temp.path().join("joy.toml");
+  let mut manifest = fs::read_to_string(&manifest_path).expect("manifest");
+  manifest.push_str("[dependencies.\"nlohmann/json\"]\nsource = \"registry\"\nversion = \"^1\"\n");
+  fs::write(&manifest_path, manifest).expect("write manifest");
+
+  let mut tree = cargo_bin_cmd!("joy");
+  let assert = tree
+    .current_dir(temp.path())
+    .env("JOY_GITHUB_BASE", pkg_remote_base.path())
+    .env("JOY_REGISTRY_DEFAULT", &registry_bare_repo)
+    .env("JOY_HOME", &joy_home)
+    .args(["--json", "--offline", "tree"])
+    .assert()
+    .failure();
+  let payload = json_stdout(&assert.get_output().stdout);
+  assert_eq!(payload["error"]["code"], "offline_cache_miss");
+}
+
+#[test]
 fn tree_outputs_deterministic_json_and_human_for_direct_dependency() {
   let temp = TempDir::new().expect("tempdir");
   init_project(&temp);
@@ -1302,11 +1720,18 @@ fn dependency_command_json_payload_shapes_are_stable() {
       "manifest_path",
       "package",
       "project_root",
+      "registry",
       "remote_url",
+      "requested_requirement",
       "resolved_commit",
+      "resolved_version",
       "rev",
+      "source",
+      "source_package",
       "state_index_path",
-      "warnings"
+      "warnings",
+      "workspace_member",
+      "workspace_root"
     ]
   );
 
@@ -1321,7 +1746,14 @@ fn dependency_command_json_payload_shapes_are_stable() {
   let tree_payload = json_stdout(&tree_assert.get_output().stdout);
   assert_eq!(
     json_object_keys(&tree_payload["data"]),
-    vec!["manifest_path", "packages", "project_root", "roots"]
+    vec![
+      "manifest_path",
+      "packages",
+      "project_root",
+      "roots",
+      "workspace_member",
+      "workspace_root"
+    ]
   );
 
   let mut update = cargo_bin_cmd!("joy");
@@ -1342,7 +1774,9 @@ fn dependency_command_json_payload_shapes_are_stable() {
       "state_index_path",
       "updated",
       "updated_count",
-      "warnings"
+      "warnings",
+      "workspace_member",
+      "workspace_root"
     ]
   );
 
@@ -1362,9 +1796,94 @@ fn dependency_command_json_payload_shapes_are_stable() {
       "manifest_path",
       "package",
       "project_root",
+      "registry",
       "removed",
+      "source",
+      "source_package",
       "state_index_path",
-      "warnings"
+      "warnings",
+      "workspace_member",
+      "workspace_root"
     ]
   );
+}
+
+#[test]
+fn workspace_root_requires_member_when_no_default_member_is_set() {
+  let temp = TempDir::new().expect("tempdir");
+  let member = temp.path().join("apps").join("app");
+  fs::create_dir_all(&member).expect("member dir");
+  init_project_at(&member);
+  fs::write(
+    temp.path().join("joy.toml"),
+    r#"[workspace]
+members = ["apps/app"]
+"#,
+  )
+  .expect("write workspace manifest");
+
+  let mut cmd = cargo_bin_cmd!("joy");
+  let assert = cmd.current_dir(temp.path()).args(["--json", "tree"]).assert().failure();
+  let payload = json_stdout(&assert.get_output().stdout);
+  assert_eq!(payload["error"]["code"], "workspace_member_required");
+}
+
+#[test]
+fn workspace_root_routes_tree_to_default_member_and_emits_workspace_metadata() {
+  let temp = TempDir::new().expect("tempdir");
+  let member = temp.path().join("apps").join("app");
+  fs::create_dir_all(&member).expect("member dir");
+  init_project_at(&member);
+  fs::write(
+    temp.path().join("joy.toml"),
+    r#"[workspace]
+members = ["apps/app"]
+default_member = "apps/app"
+"#,
+  )
+  .expect("write workspace manifest");
+
+  let mut cmd = cargo_bin_cmd!("joy");
+  let assert = cmd.current_dir(temp.path()).args(["--json", "tree"]).assert().success();
+  let payload = json_stdout(&assert.get_output().stdout);
+  assert_eq!(payload["command"], "tree");
+  assert_eq!(payload["data"]["workspace_member"], "apps/app");
+  let ws_root = payload["data"]["workspace_root"].as_str().expect("workspace_root");
+  let ws_root = fs::canonicalize(ws_root).expect("canonicalize workspace_root");
+  assert_eq!(ws_root, fs::canonicalize(temp.path()).expect("canonical temp"));
+}
+
+#[test]
+fn workspace_root_add_routes_to_selected_member() {
+  let temp = TempDir::new().expect("tempdir");
+  let member = temp.path().join("apps").join("app");
+  fs::create_dir_all(&member).expect("member dir");
+  init_project_at(&member);
+  fs::write(
+    temp.path().join("joy.toml"),
+    r#"[workspace]
+members = ["apps/app"]
+"#,
+  )
+  .expect("write workspace manifest");
+
+  let Some((remote_base, _bare_repo, _commit)) = setup_local_github_remote("nlohmann/json") else {
+    return;
+  };
+  let joy_home = temp.path().join("joy-home");
+
+  let mut add = cargo_bin_cmd!("joy");
+  let assert = add
+    .current_dir(temp.path())
+    .env("JOY_GITHUB_BASE", remote_base.path())
+    .env("JOY_HOME", &joy_home)
+    .args(["--json", "-p", "apps/app", "add", "nlohmann/json"])
+    .assert()
+    .success();
+  let payload = json_stdout(&assert.get_output().stdout);
+  assert_eq!(payload["command"], "add");
+  assert_eq!(payload["data"]["workspace_member"], "apps/app");
+  assert!(member.join("joy.toml").is_file());
+  let member_manifest = fs::read_to_string(member.join("joy.toml")).expect("read member manifest");
+  assert!(member_manifest.contains("\"nlohmann/json\""));
 }

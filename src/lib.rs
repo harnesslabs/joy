@@ -23,6 +23,7 @@ pub mod output;
 pub mod package_id;
 pub mod project_env;
 pub mod recipes;
+pub mod registry;
 pub mod resolver;
 pub mod templates;
 pub mod toolchain;

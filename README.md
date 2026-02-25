@@ -14,14 +14,16 @@ Native C++ package and build manager with a `cargo`-like CLI and a local project
 
 ## Status / Caveats
 
-`joy` is a functional pre-1.0 implementation that has completed Phases 7-14 of the current roadmap wave.
+`joy` is a functional pre-1.0 implementation that has completed Phases 7-18 of the current roadmap wave.
 
 Current constraints:
 
-- dependency versions are exact refs (`HEAD`, tag, branch, or commit SHA); there is no semver solver yet
+- direct dependencies support exact refs (`rev`) or semver ranges (`version`) resolved from Git tags
+- transitive recipe dependencies remain exact-rev metadata in the current phase
 - Windows local builds are supported via both MinGW GNU and MSVC (`cl.exe` + Ninja)
 - GitHub release artifacts currently publish the Windows GNU target (`x86_64-pc-windows-gnu`)
-- no workspace/multi-target project model yet (single binary target per manifest)
+- registry/index support is available in a git-backed default-registry mode (configured via `JOY_REGISTRY_DEFAULT`)
+- registry package aliases (registry name != canonical source package ID) are intentionally deferred; the initial registry cut keeps canonical `owner/repo` IDs
 - package-manager channels (Homebrew tap / Scoop bucket) are template-driven and release-managed
 
 ## Install
@@ -114,12 +116,36 @@ Notes:
 
 ```bash
 joy add fmtlib/fmt --rev 11.0.2
+joy add fmtlib/fmt --version ^11
+joy add registry:fmtlib/fmt --version ^11
 joy update fmtlib/fmt --rev 11.1.0
+joy update fmtlib/fmt --version ^11
+joy update fmtlib/fmt          # refreshes stored semver range (github or registry source)
 joy remove fmtlib/fmt
 joy tree --json
 ```
 
 `joy tree` reports the resolved dependency graph (human or JSON mode) using deterministic ordering.
+
+For semver-managed direct dependencies, `joy` stores the requested range in `joy.toml` and records the selected tag/version/commit in `joy.lock`.
+
+## Registry Index (Phase 18)
+
+`joy` can resolve direct dependencies from a git-backed registry index while still fetching package sources from GitHub.
+
+- Use `registry:<owner/repo>` to add a dependency through the default registry.
+- Configure the default registry remote with `JOY_REGISTRY_DEFAULT` (git URL or local git repo path).
+- Registry dependencies currently require `--version <range>` and are stored as:
+  - `source = "registry"`
+  - `version = "..."` in `joy.toml`
+
+Example:
+
+```bash
+export JOY_REGISTRY_DEFAULT=/path/to/joy-registry.git
+joy add registry:nlohmann/json --version ^3
+joy tree --json
+```
 
 ## Multi-File Project Builds
 
@@ -137,6 +163,47 @@ include_dirs = ["include"]
 [dependencies]
 "nlohmann/json" = { source = "github", rev = "HEAD" }
 "fmtlib/fmt" = { source = "github", rev = "11.0.2" }
+```
+
+## Multiple Targets (Phase 16)
+
+Projects can define additional named binary targets using `[[project.targets]]` and select them with `joy build --target <name>` / `joy run --target <name>`.
+
+```toml
+[project]
+name = "demo"
+version = "0.1.0"
+cpp_standard = "c++20"
+entry = "src/main.cpp"
+
+[[project.targets]]
+name = "tool"
+entry = "src/tool.cpp"
+```
+
+```bash
+joy build --target tool
+joy run --target tool
+```
+
+## Workspaces (Phase 16)
+
+`joy` supports a workspace root manifest with member projects. Run project-scoped commands from the workspace root using `-p/--package <member>`.
+
+Workspace root `joy.toml`:
+
+```toml
+[workspace]
+members = ["apps/app", "tools/tooling"]
+default_member = "apps/app" # optional
+```
+
+Examples:
+
+```bash
+joy -p apps/app tree
+joy -p apps/app build
+joy -p apps/app run --target tool
 ```
 
 ## Compiled Dependency Recipes
@@ -242,7 +309,7 @@ Release and distribution process docs:
 
 - No semver range solving (exact refs only)
 - Windows release artifacts are GNU-only for now (MSVC build/test support exists)
-- No workspace support / multiple binary targets
+- Registry/index support beyond GitHub shorthand is not implemented yet
 - Package-manager channels are template-driven until dedicated tap/bucket repos are maintained
 
 ## Roadmap Milestones and Notes

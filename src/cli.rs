@@ -2,12 +2,35 @@ use clap::{Args, Parser, Subcommand};
 
 use crate::output::OutputMode;
 
+const CLI_AFTER_HELP: &str = "\
+Examples:
+  joy new hello_cpp
+  joy add nlohmann/json
+  joy sync
+  joy --frozen build
+  joy --json doctor
+
+Common workflow:
+  1. `joy add <package>` to declare dependencies
+  2. `joy sync` to materialize dependency + lockfile state
+  3. `joy build` or `joy run` to compile and execute
+";
+
 #[derive(Debug, Parser)]
-#[command(name = "joy", version, about = "Native C++ package and build manager")]
+#[command(
+  name = "joy",
+  version,
+  about = "Native C++ package and build manager",
+  after_help = CLI_AFTER_HELP
+)]
 pub struct Cli {
   /// Emit machine-readable JSON output.
   #[arg(long, visible_alias = "machine", global = true)]
   pub json: bool,
+
+  /// Workspace member package to operate on when running from a workspace root.
+  #[arg(long, short = 'p', global = true)]
+  pub workspace_package: Option<String>,
 
   /// Resolve and build using only locally cached dependency data.
   #[arg(long, global = true)]
@@ -27,15 +50,21 @@ impl Cli {
   }
 
   pub fn runtime_flags(&self) -> RuntimeFlags {
-    RuntimeFlags { offline: self.offline || self.frozen, frozen: self.frozen, progress: !self.json }
+    RuntimeFlags {
+      offline: self.offline || self.frozen,
+      frozen: self.frozen,
+      progress: !self.json,
+      workspace_package: self.workspace_package.clone(),
+    }
   }
 }
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq, Eq)]
 pub struct RuntimeFlags {
   pub offline: bool,
   pub frozen: bool,
   pub progress: bool,
+  pub workspace_package: Option<String>,
 }
 
 #[derive(Debug, Subcommand)]
@@ -45,22 +74,29 @@ pub enum Commands {
   /// Initialize a joy project in the current directory.
   Init(InitArgs),
   /// Add a package dependency to the current project.
+  #[command(after_help = "Example:\n  joy add nlohmann/json\n  joy add fmtlib/fmt --rev 11.0.2")]
   Add(AddArgs),
   /// Remove a package dependency from the current project.
   Remove(RemoveArgs),
   /// Refresh dependency sources and optionally update exact refs.
+  #[command(after_help = "Examples:\n  joy update\n  joy update fmtlib/fmt --rev 11.1.0")]
   Update(UpdateArgs),
   /// Show the resolved dependency graph.
+  #[command(after_help = "Examples:\n  joy tree\n  joy --json tree")]
   Tree(TreeArgs),
   /// Validate bundled recipe metadata (for local checks and CI).
   RecipeCheck(RecipeCheckArgs),
   /// Diagnose local toolchain, cache, and recipe environment health.
+  #[command(after_help = "Examples:\n  joy doctor\n  joy --json doctor")]
   Doctor(DoctorArgs),
   /// Build the current project.
+  #[command(after_help = "Examples:\n  joy build\n  joy build --locked\n  joy --offline build")]
   Build(BuildArgs),
   /// Materialize dependencies and lockfile state without compiling the final binary.
+  #[command(after_help = "Examples:\n  joy sync\n  joy sync --update-lock\n  joy --frozen sync")]
   Sync(SyncArgs),
   /// Build and run the current project.
+  #[command(after_help = "Examples:\n  joy run\n  joy run -- --app-arg")]
   Run(RunArgs),
 }
 
@@ -82,6 +118,8 @@ pub struct AddArgs {
   pub package: String,
   #[arg(long)]
   pub rev: Option<String>,
+  #[arg(long)]
+  pub version: Option<String>,
 }
 
 #[derive(Debug, Args)]
@@ -94,6 +132,8 @@ pub struct UpdateArgs {
   pub package: Option<String>,
   #[arg(long)]
   pub rev: Option<String>,
+  #[arg(long)]
+  pub version: Option<String>,
 }
 
 #[derive(Debug, Args)]
@@ -109,6 +149,8 @@ pub struct DoctorArgs {}
 pub struct BuildArgs {
   #[arg(long)]
   pub release: bool,
+  #[arg(long)]
+  pub target: Option<String>,
   #[arg(long)]
   pub locked: bool,
   #[arg(long = "update-lock")]
@@ -129,6 +171,8 @@ pub struct SyncArgs {
 pub struct RunArgs {
   #[arg(long)]
   pub release: bool,
+  #[arg(long)]
+  pub target: Option<String>,
   #[arg(long)]
   pub locked: bool,
   #[arg(long = "update-lock")]
@@ -174,11 +218,13 @@ mod tests {
 
   #[test]
   fn parses_global_offline_and_frozen_flags() {
-    let cli = Cli::parse_from(["joy", "--offline", "--frozen", "sync"]);
+    let cli = Cli::parse_from(["joy", "-p", "app", "--offline", "--frozen", "sync"]);
+    assert_eq!(cli.workspace_package.as_deref(), Some("app"));
     assert!(cli.offline);
     assert!(cli.frozen);
     assert!(cli.runtime_flags().offline);
     assert!(cli.runtime_flags().frozen);
+    assert_eq!(cli.runtime_flags().workspace_package.as_deref(), Some("app"));
     match cli.command {
       Commands::Sync(_) => {},
       other => panic!("expected sync, got {other:?}"),
@@ -192,6 +238,7 @@ mod tests {
       Commands::Add(args) => {
         assert_eq!(args.package, "nlohmann/json");
         assert_eq!(args.rev.as_deref(), Some("v3.11.3"));
+        assert_eq!(args.version, None);
       },
       other => panic!("expected add, got {other:?}"),
     }
@@ -213,8 +260,22 @@ mod tests {
       Commands::Update(args) => {
         assert_eq!(args.package.as_deref(), Some("nlohmann/json"));
         assert_eq!(args.rev.as_deref(), Some("v1.2.3"));
+        assert_eq!(args.version, None);
       },
       other => panic!("expected update, got {other:?}"),
+    }
+  }
+
+  #[test]
+  fn parses_add_with_semver_version() {
+    let cli = Cli::parse_from(["joy", "add", "fmtlib/fmt", "--version", "^11"]);
+    match cli.command {
+      Commands::Add(args) => {
+        assert_eq!(args.package, "fmtlib/fmt");
+        assert_eq!(args.version.as_deref(), Some("^11"));
+        assert_eq!(args.rev, None);
+      },
+      other => panic!("expected add, got {other:?}"),
     }
   }
 
@@ -247,10 +308,19 @@ mod tests {
 
   #[test]
   fn parses_build_flags() {
-    let cli = Cli::parse_from(["joy", "build", "--release", "--locked", "--update-lock"]);
+    let cli = Cli::parse_from([
+      "joy",
+      "build",
+      "--release",
+      "--target",
+      "tool",
+      "--locked",
+      "--update-lock",
+    ]);
     match cli.command {
       Commands::Build(args) => {
         assert!(args.release);
+        assert_eq!(args.target.as_deref(), Some("tool"));
         assert!(args.locked);
         assert!(args.update_lock);
       },
@@ -260,10 +330,21 @@ mod tests {
 
   #[test]
   fn parses_run_with_passthrough_args() {
-    let cli = Cli::parse_from(["joy", "run", "--release", "--", "one", "two", "--flag"]);
+    let cli = Cli::parse_from([
+      "joy",
+      "run",
+      "--release",
+      "--target",
+      "tool",
+      "--",
+      "one",
+      "two",
+      "--flag",
+    ]);
     match cli.command {
       Commands::Run(args) => {
         assert!(args.release);
+        assert_eq!(args.target.as_deref(), Some("tool"));
         assert_eq!(args.args, vec!["one", "two", "--flag"]);
       },
       other => panic!("expected run, got {other:?}"),

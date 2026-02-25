@@ -40,6 +40,9 @@ The machine contract is defined by `/Users/autoparallel/Code/joy/src/error.rs` (
 - `path_exists`
 - `invalid_package_id`
 - `dependency_not_found`
+- `workspace_member_invalid`
+- `workspace_member_required`
+- `workspace_member_not_found`
 
 ## Lockfile / Reproducibility
 
@@ -57,6 +60,12 @@ The machine contract is defined by `/Users/autoparallel/Code/joy/src/error.rs` (
 - `fetch_failed`
 - `offline_cache_miss`
 - `offline_network_disabled`
+- `invalid_version_requirement`
+- `version_not_found`
+- `registry_not_configured`
+- `registry_load_failed`
+- `registry_package_not_found`
+- `registry_alias_unsupported`
 
 ## Toolchain / Build Execution
 
@@ -88,6 +97,7 @@ The machine contract is defined by `/Users/autoparallel/Code/joy/src/error.rs` (
 ### `add`
 
 - `frozen_disallows_add`
+- `invalid_add_args`
 
 ### `remove`
 

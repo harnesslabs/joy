@@ -63,6 +63,7 @@ Development history and milestone notes live in `/Users/autoparallel/Code/joy/no
 - run `just recipe-check` when touching recipe metadata or recipe loading/validation logic
 - document non-obvious design choices in notes for future contributors
 - call out platform caveats explicitly (for example GNU vs MSVC on Windows)
+- when changing human-mode CLI output, add/update selective human-output tests (section/key-phrase assertions) and keep `--json` machine output compatibility intact
 
 ## Release Process
 

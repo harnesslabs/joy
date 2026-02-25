@@ -8,6 +8,7 @@ use crate::commands::CommandOutput;
 use crate::error::JoyError;
 use crate::install_index::InstallIndex;
 use crate::manifest::Manifest;
+use crate::output::HumanMessageBuilder;
 use crate::package_id::PackageId;
 use crate::project_env;
 
@@ -21,7 +22,8 @@ pub fn handle(args: RemoveArgs, runtime: RuntimeFlags) -> Result<CommandOutput, 
     ));
   }
 
-  let package = PackageId::parse(&args.package)
+  let package_arg = normalize_dependency_arg(&args.package);
+  let package = PackageId::parse(&package_arg)
     .map_err(|err| JoyError::new("remove", "invalid_package_id", err.to_string(), 1))?;
   let cwd = env::current_dir().map_err(|err| {
     JoyError::new("remove", "cwd_unavailable", format!("failed to get cwd: {err}"), 1)
@@ -39,14 +41,14 @@ pub fn handle(args: RemoveArgs, runtime: RuntimeFlags) -> Result<CommandOutput, 
   let mut manifest = Manifest::load(&manifest_path)
     .map_err(|err| JoyError::new("remove", "manifest_parse_error", err.to_string(), 1))?;
   let removed = manifest.remove_dependency(package.as_str());
-  if removed.is_none() {
+  let Some(removed_spec) = removed else {
     return Err(JoyError::new(
       "remove",
       "dependency_not_found",
       format!("dependency `{}` is not present in `joy.toml`", package),
       1,
     ));
-  }
+  };
 
   manifest
     .save(&manifest_path)
@@ -70,22 +72,29 @@ pub fn handle(args: RemoveArgs, runtime: RuntimeFlags) -> Result<CommandOutput, 
     "joy.lock exists and may be stale after dependency removal; rerun `joy sync --update-lock` or `joy build --update-lock`".to_string(),
   );
 
-  let mut human = format!("Removed dependency `{}`", package);
-  if header_link_removed {
-    human.push('\n');
-    human.push_str(&format!("Removed installed headers at {}", header_link_path.display()));
-  }
+  let mut human_builder = HumanMessageBuilder::new(format!("Removed dependency `{}`", package))
+    .kv("manifest", manifest_path.display().to_string())
+    .kv("header link", header_link_path.display().to_string())
+    .kv("header link removed", header_link_removed.to_string());
   if let Some(warning) = &lockfile_warning {
-    human.push('\n');
-    human.push_str("warning: ");
-    human.push_str(warning);
+    human_builder = human_builder.warning(warning.clone());
   }
+  let human = human_builder.build();
 
   Ok(CommandOutput::new(
     "remove",
     human,
     json!({
       "package": package.as_str(),
+      "source": match removed_spec.source {
+        crate::manifest::DependencySource::Github => "github",
+        crate::manifest::DependencySource::Registry => "registry",
+      },
+      "registry": match removed_spec.source {
+        crate::manifest::DependencySource::Registry => serde_json::Value::String("default".into()),
+        crate::manifest::DependencySource::Github => serde_json::Value::Null,
+      },
+      "source_package": package.as_str(),
       "removed": true,
       "manifest_path": manifest_path.display().to_string(),
       "project_root": cwd.display().to_string(),
@@ -95,6 +104,10 @@ pub fn handle(args: RemoveArgs, runtime: RuntimeFlags) -> Result<CommandOutput, 
       "warnings": lockfile_warning.map(|w| vec![w]).unwrap_or_default(),
     }),
   ))
+}
+
+fn normalize_dependency_arg(raw: &str) -> String {
+  raw.strip_prefix("registry:").or_else(|| raw.strip_prefix("github:")).unwrap_or(raw).to_string()
 }
 
 fn remove_installed_path_if_exists(path: &Path) -> std::io::Result<bool> {

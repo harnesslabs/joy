@@ -13,8 +13,9 @@ use crate::commands::CommandOutput;
 use crate::error::JoyError;
 use crate::install_index::InstallIndex;
 use crate::lockfile;
-use crate::manifest::Manifest;
+use crate::manifest::{Manifest, SelectedTarget};
 use crate::ninja::{BuildProfile, NinjaBuildSpec};
+use crate::output::{HumanMessageBuilder, progress_detail, progress_stage};
 use crate::recipes::{Linkage as RecipeLinkage, RecipeStore};
 use crate::{abi, cmake, fetch, global_cache, linking, ninja, project_env, resolver, toolchain};
 
@@ -26,6 +27,8 @@ pub(crate) struct BuildExecution {
   pub binary_path: PathBuf,
   pub source_file: PathBuf,
   pub compiled_sources: Vec<PathBuf>,
+  pub target_name: String,
+  pub target_default: bool,
   pub include_dirs: Vec<PathBuf>,
   pub link_dirs: Vec<PathBuf>,
   pub link_libs: Vec<String>,
@@ -55,6 +58,8 @@ impl BuildExecution {
       "binary_path": self.binary_path.display().to_string(),
       "source_file": self.source_file.display().to_string(),
       "compiled_sources": self.compiled_sources.iter().map(|p| p.display().to_string()).collect::<Vec<_>>(),
+      "target": self.target_name,
+      "target_default": self.target_default,
       "profile": self.profile_name(),
       "include_dirs": self.include_dirs.iter().map(|p| p.display().to_string()).collect::<Vec<_>>(),
       "link_dirs": self.link_dirs.iter().map(|p| p.display().to_string()).collect::<Vec<_>>(),
@@ -121,9 +126,10 @@ impl SyncExecution {
   }
 }
 
-#[derive(Debug, Clone, Copy)]
+#[derive(Debug, Clone)]
 pub(crate) struct BuildOptions {
   pub release: bool,
+  pub target: Option<String>,
   pub locked: bool,
   pub update_lock: bool,
   pub offline: bool,
@@ -133,10 +139,11 @@ pub(crate) struct BuildOptions {
 /// Handle `joy build` by executing the local build pipeline and returning a CLI output payload.
 pub fn handle(args: BuildArgs, runtime: RuntimeFlags) -> Result<CommandOutput, JoyError> {
   if runtime.progress {
-    eprintln!("Starting build...");
+    progress_stage("Starting build");
   }
   let execution = build_project(BuildOptions {
     release: args.release,
+    target: args.target,
     locked: args.locked || runtime.frozen,
     update_lock: args.update_lock,
     offline: runtime.offline,
@@ -145,12 +152,21 @@ pub fn handle(args: BuildArgs, runtime: RuntimeFlags) -> Result<CommandOutput, J
 
   Ok(CommandOutput::new(
     "build",
-    format!(
-      "Built `{}` using {} {}",
-      execution.binary_path.display(),
-      execution.toolchain.compiler.kind.as_str(),
-      execution.toolchain.compiler.version
-    ),
+    HumanMessageBuilder::new("Build finished")
+      .kv("binary", execution.binary_path.display().to_string())
+      .kv("target", execution.target_name.clone())
+      .kv(
+        "toolchain",
+        format!(
+          "{} {}",
+          execution.toolchain.compiler.kind.as_str(),
+          execution.toolchain.compiler.version
+        ),
+      )
+      .kv("profile", execution.profile_name())
+      .kv("compiled dependencies built", execution.compiled_dependencies_built.len().to_string())
+      .kv("lockfile updated", execution.lockfile_updated.to_string())
+      .build(),
     execution.json_data(),
   ))
 }
@@ -176,17 +192,20 @@ pub(crate) fn build_project(options: BuildOptions) -> Result<BuildExecution, Joy
 
   let manifest = Manifest::load(&manifest_path)
     .map_err(|err| JoyError::new("build", "manifest_parse_error", err.to_string(), 1))?;
+  let selected_target = manifest
+    .select_target(options.target.as_deref())
+    .map_err(|err| JoyError::new("build", "invalid_target", err.to_string(), 1))?;
   let manifest_hash = lockfile::compute_manifest_hash(&manifest_path)
     .map_err(|err| JoyError::new("build", "lockfile_hash_failed", err.to_string(), 1))?;
   let lockfile_path = project_root.join("joy.lock");
   let env_layout = project_env::ensure_layout(&project_root)
     .map_err(|err| JoyError::new("build", "env_setup_failed", err.to_string(), 1))?;
-  let lock_plan = evaluate_lockfile_plan("build", &lockfile_path, &manifest_hash, options)?;
+  let lock_plan = evaluate_lockfile_plan("build", &lockfile_path, &manifest_hash, &options)?;
 
   let toolchain = toolchain::discover().map_err(|err| map_toolchain_error("build", err))?;
   let profile = BuildProfile::from_release_flag(options.release);
-  let source_file = project_root.join(&manifest.project.entry);
-  let source_files = collect_project_source_files(&project_root, &manifest)?;
+  let source_file = project_root.join(&selected_target.entry);
+  let source_files = collect_project_source_files(&project_root, &selected_target)?;
 
   let obj_dir = env_layout.build_dir.join("obj");
   fs::create_dir_all(&obj_dir)
@@ -197,17 +216,25 @@ pub(crate) fn build_project(options: BuildOptions) -> Result<BuildExecution, Joy
       source_file: relative_or_absolute(&project_root, src),
       object_file: relative_or_absolute(
         &project_root,
-        &obj_dir.join(object_file_name_for_source(&project_root, src)),
+        &obj_dir.join(object_file_name_for_source(&project_root, &selected_target.name, src)),
       ),
     })
     .collect::<Vec<_>>();
-  let binary_path = env_layout.bin_dir.join(binary_name(&manifest.project.name));
-  let build_file = env_layout.build_dir.join("build.ninja");
+  let binary_path = env_layout.bin_dir.join(binary_name(&selected_target.name));
+  let build_file = if selected_target.is_default {
+    env_layout.build_dir.join("build.ninja")
+  } else {
+    env_layout
+      .build_dir
+      .join(format!("build-{}.ninja", sanitize_target_name(&selected_target.name)))
+  };
   let mut include_dirs = collect_include_dirs(&env_layout.include_dir).map_err(|err| {
     JoyError::io("build", "reading include directories", &env_layout.include_dir, &err)
   })?;
   let user_include_dirs = collect_user_include_dirs(&project_root, &manifest)?;
+  let target_include_dirs = collect_target_include_dirs(&project_root, &selected_target)?;
   include_dirs.extend(user_include_dirs);
+  include_dirs.extend(target_include_dirs);
   include_dirs.sort();
   include_dirs.dedup();
   let native_link =
@@ -216,7 +243,7 @@ pub(crate) fn build_project(options: BuildOptions) -> Result<BuildExecution, Joy
   refresh_install_index(&env_layout, &manifest, &native_link)?;
 
   if options.progress {
-    eprintln!("Generating build graph...");
+    progress_detail("Generating build graph");
   }
 
   let spec = NinjaBuildSpec {
@@ -238,7 +265,7 @@ pub(crate) fn build_project(options: BuildOptions) -> Result<BuildExecution, Joy
     .map_err(|err| JoyError::new("build", "ninja_file_write_failed", err.to_string(), 1))?;
 
   if options.progress {
-    eprintln!("Compiling and linking...");
+    progress_detail("Compiling and linking");
   }
   let ninja_output = run_ninja_build(&toolchain, &project_root, &build_file)?;
 
@@ -257,6 +284,8 @@ pub(crate) fn build_project(options: BuildOptions) -> Result<BuildExecution, Joy
     binary_path,
     source_file,
     compiled_sources: source_files,
+    target_name: selected_target.name,
+    target_default: selected_target.is_default,
     include_dirs,
     link_dirs: native_link.link_dirs,
     link_libs: native_link.link_libs,
@@ -297,7 +326,7 @@ pub(crate) fn sync_project(options: BuildOptions) -> Result<SyncExecution, JoyEr
   let lockfile_path = project_root.join("joy.lock");
   let env_layout = project_env::ensure_layout(&project_root)
     .map_err(|err| JoyError::new("sync", "env_setup_failed", err.to_string(), 1))?;
-  let lock_plan = evaluate_lockfile_plan("sync", &lockfile_path, &manifest_hash, options)
+  let lock_plan = evaluate_lockfile_plan("sync", &lockfile_path, &manifest_hash, &options)
     .map_err(|err| JoyError::new("sync", err.code, err.message, err.exit_code))?;
   let profile = BuildProfile::from_release_flag(options.release);
 
@@ -685,11 +714,31 @@ fn collect_user_include_dirs(
   Ok(dirs)
 }
 
+fn collect_target_include_dirs(
+  project_root: &Path,
+  target: &SelectedTarget,
+) -> Result<Vec<PathBuf>, JoyError> {
+  let mut dirs = Vec::new();
+  for raw in &target.include_dirs {
+    let path = project_root.join(raw);
+    if !path.is_dir() {
+      return Err(JoyError::new(
+        "build",
+        "include_dir_not_found",
+        format!("target include dir `{}` does not exist", path.display()),
+        1,
+      ));
+    }
+    dirs.push(path);
+  }
+  Ok(dirs)
+}
+
 fn collect_project_source_files(
   project_root: &Path,
-  manifest: &Manifest,
+  target: &SelectedTarget,
 ) -> Result<Vec<PathBuf>, JoyError> {
-  let entry = project_root.join(&manifest.project.entry);
+  let entry = project_root.join(&target.entry);
   if !entry.is_file() {
     return Err(JoyError::new(
       "build",
@@ -702,8 +751,8 @@ fn collect_project_source_files(
   let mut seen = BTreeSet::new();
   let mut files = Vec::new();
 
-  for path in std::iter::once(entry)
-    .chain(manifest.project.extra_sources.iter().map(|p| project_root.join(p)))
+  for path in
+    std::iter::once(entry).chain(target.extra_sources.iter().map(|p| project_root.join(p)))
   {
     if !path.is_file() {
       return Err(JoyError::new(
@@ -722,8 +771,12 @@ fn collect_project_source_files(
   Ok(files)
 }
 
-fn object_file_name_for_source(project_root: &Path, source_file: &Path) -> String {
-  let normalized = normalize_path_for_hash(project_root, source_file);
+fn object_file_name_for_source(
+  project_root: &Path,
+  target_name: &str,
+  source_file: &Path,
+) -> String {
+  let normalized = format!("{target_name}::{}", normalize_path_for_hash(project_root, source_file));
   let stem = source_file.file_stem().and_then(|s| s.to_str()).unwrap_or("obj");
   let sanitized_stem =
     stem.chars().map(|ch| if ch.is_ascii_alphanumeric() { ch } else { '_' }).collect::<String>();
@@ -732,6 +785,10 @@ fn object_file_name_for_source(project_root: &Path, source_file: &Path) -> Strin
   let hash = format!("{:x}", hasher.finalize());
   let short_hash = &hash[..12];
   format!("{sanitized_stem}-{short_hash}.o")
+}
+
+fn sanitize_target_name(name: &str) -> String {
+  name.chars().map(|ch| if ch.is_ascii_alphanumeric() { ch } else { '_' }).collect()
 }
 
 fn normalize_path_for_hash(project_root: &Path, path: &Path) -> String {
@@ -825,7 +882,11 @@ fn assemble_lockfile_packages(
     packages.push(lockfile::LockedPackage {
       id: pkg.id.to_string(),
       source: dependency_source_name(&pkg.source).to_string(),
+      registry: pkg.registry.clone(),
+      source_package: pkg.source_package.clone(),
       requested_rev: pkg.requested_rev.clone(),
+      requested_requirement: pkg.requested_requirement.clone(),
+      resolved_version: pkg.resolved_version.clone(),
       resolved_commit: pkg.resolved_commit.clone(),
       resolved_ref: None,
       recipe: pkg.recipe_slug.clone(),
@@ -864,6 +925,7 @@ fn infer_header_roots_from_source_dir(source_dir: &Path) -> Vec<String> {
 fn dependency_source_name(source: &crate::manifest::DependencySource) -> &'static str {
   match source {
     crate::manifest::DependencySource::Github => "github",
+    crate::manifest::DependencySource::Registry => "registry",
   }
 }
 
@@ -1008,7 +1070,7 @@ fn evaluate_lockfile_plan(
   command: &'static str,
   lockfile_path: &Path,
   manifest_hash: &str,
-  options: BuildOptions,
+  options: &BuildOptions,
 ) -> Result<LockfilePlan, JoyError> {
   if options.locked && options.update_lock {
     return Err(JoyError::new(
@@ -1096,6 +1158,10 @@ fn map_fetch_error(command: &'static str, err: fetch::FetchError) -> JoyError {
     "offline_cache_miss"
   } else if err.is_offline_network_disabled() {
     "offline_network_disabled"
+  } else if err.is_invalid_version_requirement() {
+    "invalid_version_requirement"
+  } else if err.is_version_not_found() {
+    "version_not_found"
   } else {
     "fetch_failed"
   };
@@ -1110,6 +1176,30 @@ fn map_dependency_resolve_error(err: resolver::ResolverError) -> JoyError {
     resolver::ResolverError::Fetch { source, .. } if source.is_offline_network_disabled() => {
       "offline_network_disabled"
     },
+    resolver::ResolverError::Fetch { source, .. } if source.is_invalid_version_requirement() => {
+      "invalid_version_requirement"
+    },
+    resolver::ResolverError::Fetch { source, .. } if source.is_version_not_found() => {
+      "version_not_found"
+    },
+    resolver::ResolverError::RegistryLoad { source }
+      if source.is_offline_cache_miss() || source.is_not_configured() =>
+    {
+      if source.is_offline_cache_miss() { "offline_cache_miss" } else { "registry_not_configured" }
+    },
+    resolver::ResolverError::RegistryResolve { source, .. }
+      if source.is_package_not_found() || source.is_version_not_found() =>
+    {
+      if source.is_package_not_found() { "registry_package_not_found" } else { "version_not_found" }
+    },
+    resolver::ResolverError::RegistryResolve { source, .. }
+      if source.is_invalid_version_requirement() =>
+    {
+      "invalid_version_requirement"
+    },
+    resolver::ResolverError::RegistryLoad { .. }
+    | resolver::ResolverError::RegistryResolve { .. } => "registry_load_failed",
+    resolver::ResolverError::RegistryAliasUnsupported { .. } => "registry_alias_unsupported",
     _ => "dependency_resolve_failed",
   };
   JoyError::new("build", code, err.to_string(), 1)

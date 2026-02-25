@@ -4,9 +4,9 @@
 //! shorthand dependencies so refs can be resolved locally and subsequent fetches can reuse the
 //! mirror. A `.tar.gz` archive path is also available for tests and future fallback behavior.
 
+use semver::{Version, VersionReq};
 use std::ffi::OsString;
 use std::fs;
-use std::io::IsTerminal;
 use std::io::Read;
 use std::path::{Path, PathBuf};
 use std::process::Command;
@@ -17,6 +17,7 @@ use std::time::{SystemTime, UNIX_EPOCH};
 use thiserror::Error;
 
 use crate::global_cache::{GlobalCache, GlobalCacheError};
+use crate::output::progress_detail_tty;
 use crate::package_id::PackageId;
 
 const FETCH_FLAG_OFFLINE: u8 = 1 << 0;
@@ -66,11 +67,18 @@ fn runtime_progress_enabled() -> bool {
   FETCH_RUNTIME_FLAGS.load(Ordering::SeqCst) & FETCH_FLAG_PROGRESS != 0
 }
 
+/// Read the current process-wide fetch runtime toggles (used by other transport/cache modules).
+pub(crate) fn runtime_options() -> RuntimeOptions {
+  RuntimeOptions { offline: runtime_offline_enabled(), progress: runtime_progress_enabled() }
+}
+
 /// Result of fetching a package source tree (or reusing an existing cached checkout).
 #[derive(Debug, Clone)]
 pub struct FetchResult {
   pub package: PackageId,
   pub requested_rev: String,
+  pub requested_requirement: Option<String>,
+  pub resolved_version: Option<String>,
   pub resolved_commit: String,
   pub source_dir: PathBuf,
   pub remote_url: String,
@@ -81,6 +89,15 @@ pub struct FetchResult {
 pub fn fetch_github(package: &PackageId, requested_rev: &str) -> Result<FetchResult, FetchError> {
   let cache = GlobalCache::resolve()?;
   fetch_github_with_cache(package, requested_rev, &cache)
+}
+
+/// Resolve a semver requirement using git tags, then materialize the selected checkout.
+pub fn fetch_github_semver(
+  package: &PackageId,
+  version_req: &str,
+) -> Result<FetchResult, FetchError> {
+  let cache = GlobalCache::resolve()?;
+  fetch_github_semver_with_cache(package, version_req, &cache)
 }
 
 /// Fetch a GitHub shorthand package using an explicit cache layout.
@@ -117,7 +134,47 @@ pub fn fetch_github_with_cache(
   Ok(FetchResult {
     package: package.clone(),
     requested_rev: requested.to_string(),
+    requested_requirement: None,
+    resolved_version: None,
     resolved_commit,
+    source_dir,
+    remote_url,
+    cache_hit,
+  })
+}
+
+/// Resolve a semver requirement from cached/remote git tags and materialize the selected checkout.
+pub fn fetch_github_semver_with_cache(
+  package: &PackageId,
+  version_req: &str,
+  cache: &GlobalCache,
+) -> Result<FetchResult, FetchError> {
+  cache.ensure_layout()?;
+
+  let remote_url = github_remote_url(package);
+  let mirror_dir = cache.git_mirror_dir(package);
+  if runtime_offline_enabled() && !mirror_dir.exists() {
+    return Err(FetchError::OfflineCacheMiss {
+      package: package.to_string(),
+      requested_rev: format!("version:{version_req}"),
+      mirror_dir,
+    });
+  }
+  ensure_mirror(&remote_url, &mirror_dir)?;
+
+  let selected = resolve_semver_tag(&mirror_dir, package, version_req)?;
+  let source_dir = cache.source_checkout_dir(package, &selected.resolved_commit);
+  let cache_hit = source_dir.exists();
+  if !cache_hit {
+    materialize_checkout(&mirror_dir, &source_dir, &selected.resolved_commit, cache.tmp_dir())?;
+  }
+
+  Ok(FetchResult {
+    package: package.clone(),
+    requested_rev: selected.resolved_tag,
+    requested_requirement: Some(version_req.to_string()),
+    resolved_version: Some(selected.resolved_version),
+    resolved_commit: selected.resolved_commit,
     source_dir,
     remote_url,
     cache_hit,
@@ -301,6 +358,62 @@ fn resolve_commit(mirror_dir: &Path, requested_rev: &str) -> Result<String, Fetc
   Ok(output.trim().to_string())
 }
 
+#[derive(Debug, Clone)]
+struct SemverTagSelection {
+  resolved_tag: String,
+  resolved_version: String,
+  resolved_commit: String,
+}
+
+fn resolve_semver_tag(
+  mirror_dir: &Path,
+  package: &PackageId,
+  version_req: &str,
+) -> Result<SemverTagSelection, FetchError> {
+  let requirement = VersionReq::parse(version_req).map_err(|source| {
+    FetchError::InvalidVersionReq { requirement: version_req.to_string(), source }
+  })?;
+  let tags = list_tags(mirror_dir)?;
+
+  let mut best: Option<(Version, String)> = None;
+  for tag in tags {
+    let Some(version) = parse_tag_semver(&tag) else {
+      continue;
+    };
+    if !requirement.matches(&version) {
+      continue;
+    }
+    match &best {
+      Some((best_version, best_tag)) if (&version, &tag) <= (best_version, best_tag) => {},
+      _ => best = Some((version, tag)),
+    }
+  }
+
+  let Some((resolved_version, resolved_tag)) = best else {
+    return Err(FetchError::VersionNotFound {
+      package: package.to_string(),
+      requested_requirement: version_req.to_string(),
+      mirror_dir: mirror_dir.to_path_buf(),
+    });
+  };
+  let resolved_commit = resolve_commit(mirror_dir, &resolved_tag)?;
+  Ok(SemverTagSelection {
+    resolved_tag,
+    resolved_version: resolved_version.to_string(),
+    resolved_commit,
+  })
+}
+
+fn list_tags(mirror_dir: &Path) -> Result<Vec<String>, FetchError> {
+  let raw = run_git_capture(Some(mirror_dir), ["tag", "--list"], "listing tags")?;
+  Ok(raw.lines().map(str::trim).filter(|line| !line.is_empty()).map(ToOwned::to_owned).collect())
+}
+
+fn parse_tag_semver(tag: &str) -> Option<Version> {
+  let normalized = tag.strip_prefix('v').unwrap_or(tag);
+  Version::parse(normalized).ok()
+}
+
 fn materialize_checkout(
   mirror_dir: &Path,
   dest_dir: &Path,
@@ -375,8 +488,8 @@ fn materialize_checkout(
 }
 
 fn emit_progress(message: &str) {
-  if runtime_progress_enabled() && std::io::stderr().is_terminal() {
-    eprintln!("{message}...");
+  if runtime_progress_enabled() {
+    progress_detail_tty(message);
   }
 }
 
@@ -522,6 +635,17 @@ pub enum FetchError {
   Runtime(std::io::Error),
   #[error("{0}")]
   TaskJoin(String),
+  #[error("invalid semver requirement `{requirement}`: {source}")]
+  InvalidVersionReq {
+    requirement: String,
+    #[source]
+    source: semver::Error,
+  },
+  #[error(
+    "no git tag matching `{requested_requirement}` found for `{package}` in cached mirror `{}`",
+    .mirror_dir.display()
+  )]
+  VersionNotFound { package: String, requested_requirement: String, mirror_dir: PathBuf },
   #[error(
     "offline mode requires a cached source mirror for `{package}` at rev `{requested_rev}` (missing `{}`)",
     .mirror_dir.display()
@@ -555,6 +679,14 @@ impl FetchError {
 
   pub fn is_offline_network_disabled(&self) -> bool {
     matches!(self, Self::OfflineNetworkDisabled { .. })
+  }
+
+  pub fn is_invalid_version_requirement(&self) -> bool {
+    matches!(self, Self::InvalidVersionReq { .. })
+  }
+
+  pub fn is_version_not_found(&self) -> bool {
+    matches!(self, Self::VersionNotFound { .. })
   }
 
   pub fn is_transient_network(&self) -> bool {
@@ -592,6 +724,8 @@ impl FetchError {
       Self::OfflineCacheMiss { .. }
       | Self::OfflineRevisionUnavailable { .. }
       | Self::OfflineNetworkDisabled { .. }
+      | Self::InvalidVersionReq { .. }
+      | Self::VersionNotFound { .. }
       | Self::GlobalCache(_)
       | Self::Io { .. }
       | Self::Runtime(_)
@@ -608,7 +742,9 @@ mod tests {
   use flate2::write::GzEncoder;
   use tempfile::TempDir;
 
-  use super::{FetchError, download_and_extract_tar_gz, retry_transient_network_with_sleep};
+  use super::{
+    FetchError, download_and_extract_tar_gz, parse_tag_semver, retry_transient_network_with_sleep,
+  };
 
   #[test]
   fn downloads_and_extracts_tar_gz_from_mock_http_server() {
@@ -700,6 +836,13 @@ mod tests {
     }
     assert_eq!(attempts, 3);
     assert!(err.to_string().contains("after 3 attempts"));
+  }
+
+  #[test]
+  fn parses_semver_from_plain_and_v_prefixed_tags() {
+    assert_eq!(parse_tag_semver("v1.2.3").map(|v| v.to_string()).as_deref(), Some("1.2.3"));
+    assert_eq!(parse_tag_semver("2.0.0").map(|v| v.to_string()).as_deref(), Some("2.0.0"));
+    assert!(parse_tag_semver("release-1.2.3").is_none());
   }
 
   fn build_fixture_tar_gz() -> Vec<u8> {

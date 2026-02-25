@@ -22,7 +22,15 @@ pub struct Lockfile {
 pub struct LockedPackage {
   pub id: String,
   pub source: String,
+  #[serde(default)]
+  pub registry: Option<String>,
+  #[serde(default)]
+  pub source_package: Option<String>,
   pub requested_rev: String,
+  #[serde(default)]
+  pub requested_requirement: Option<String>,
+  #[serde(default)]
+  pub resolved_version: Option<String>,
   pub resolved_commit: String,
   #[serde(default)]
   pub resolved_ref: Option<String>,
@@ -131,7 +139,11 @@ mod tests {
       packages: vec![LockedPackage {
         id: "nlohmann/json".into(),
         source: "github".into(),
+        registry: None,
+        source_package: None,
         requested_rev: "HEAD".into(),
+        requested_requirement: None,
+        resolved_version: None,
         resolved_commit: "deadbeef".into(),
         resolved_ref: Some("refs/heads/main".into()),
         recipe: Some("nlohmann_json".into()),
