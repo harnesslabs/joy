@@ -173,6 +173,15 @@ fn human_error_hint(command: &str, err: &JoyError) -> Option<String> {
     "version_not_found" => Some(
       "Check available tags for the dependency (or relax the version range) and rerun online to refresh the mirror.".into(),
     ),
+    "registry_not_configured" => {
+      Some("Set `JOY_REGISTRY_DEFAULT` to the registry index git URL/path and rerun.".into())
+    },
+    "registry_package_not_found" => {
+      Some("Verify the package exists in the configured registry index and retry.".into())
+    },
+    "registry_alias_unsupported" => Some(
+      "This registry entry maps to a different source package ID; alias package support is deferred in the current phase cut.".into(),
+    ),
     "recipe_load_failed" => {
       Some("Run `joy doctor` to validate the bundled recipe store and local environment.".into())
     },

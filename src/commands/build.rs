@@ -882,6 +882,8 @@ fn assemble_lockfile_packages(
     packages.push(lockfile::LockedPackage {
       id: pkg.id.to_string(),
       source: dependency_source_name(&pkg.source).to_string(),
+      registry: pkg.registry.clone(),
+      source_package: pkg.source_package.clone(),
       requested_rev: pkg.requested_rev.clone(),
       requested_requirement: pkg.requested_requirement.clone(),
       resolved_version: pkg.resolved_version.clone(),
@@ -923,6 +925,7 @@ fn infer_header_roots_from_source_dir(source_dir: &Path) -> Vec<String> {
 fn dependency_source_name(source: &crate::manifest::DependencySource) -> &'static str {
   match source {
     crate::manifest::DependencySource::Github => "github",
+    crate::manifest::DependencySource::Registry => "registry",
   }
 }
 
@@ -1179,6 +1182,24 @@ fn map_dependency_resolve_error(err: resolver::ResolverError) -> JoyError {
     resolver::ResolverError::Fetch { source, .. } if source.is_version_not_found() => {
       "version_not_found"
     },
+    resolver::ResolverError::RegistryLoad { source }
+      if source.is_offline_cache_miss() || source.is_not_configured() =>
+    {
+      if source.is_offline_cache_miss() { "offline_cache_miss" } else { "registry_not_configured" }
+    },
+    resolver::ResolverError::RegistryResolve { source, .. }
+      if source.is_package_not_found() || source.is_version_not_found() =>
+    {
+      if source.is_package_not_found() { "registry_package_not_found" } else { "version_not_found" }
+    },
+    resolver::ResolverError::RegistryResolve { source, .. }
+      if source.is_invalid_version_requirement() =>
+    {
+      "invalid_version_requirement"
+    },
+    resolver::ResolverError::RegistryLoad { .. }
+    | resolver::ResolverError::RegistryResolve { .. } => "registry_load_failed",
+    resolver::ResolverError::RegistryAliasUnsupported { .. } => "registry_alias_unsupported",
     _ => "dependency_resolve_failed",
   };
   JoyError::new("build", code, err.to_string(), 1)

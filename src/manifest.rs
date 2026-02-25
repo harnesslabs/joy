@@ -79,6 +79,7 @@ pub struct DependencySpec {
 #[serde(rename_all = "lowercase")]
 pub enum DependencySource {
   Github,
+  Registry,
 }
 
 impl Manifest {
@@ -155,6 +156,11 @@ impl Manifest {
       if !has_rev && !has_version {
         return Err(ManifestError::Validation(format!(
           "dependency `{id}` must set either `rev` or `version`"
+        )));
+      }
+      if matches!(spec.source, DependencySource::Registry) && has_rev {
+        return Err(ManifestError::Validation(format!(
+          "dependency `{id}` uses source `registry` and must set `version` instead of `rev`"
         )));
       }
     }

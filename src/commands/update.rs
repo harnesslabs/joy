@@ -12,10 +12,14 @@ use crate::manifest::{DependencySource, DependencySpec, Manifest};
 use crate::output::{HumanMessageBuilder, progress_detail};
 use crate::package_id::PackageId;
 use crate::project_env;
+use crate::registry::{RegistryError, RegistryRequirement, RegistryStore};
 
 #[derive(Debug)]
 struct UpdatedDependency {
   package: String,
+  source: String,
+  registry: Option<String>,
+  source_package: Option<String>,
   requested_rev: String,
   requested_requirement: Option<String>,
   resolved_version: Option<String>,
@@ -54,6 +58,17 @@ pub fn handle(args: UpdateArgs, runtime: RuntimeFlags) -> Result<CommandOutput, 
       "update",
       "invalid_update_args",
       "`--rev` and `--version` are mutually exclusive; choose one dependency requirement style",
+      1,
+    ));
+  }
+  if args.rev.is_some()
+    && let Some(raw) = args.package.as_deref()
+    && raw.starts_with("registry:")
+  {
+    return Err(JoyError::new(
+      "update",
+      "invalid_update_args",
+      "registry dependencies currently require `--version <range>`; `--rev` is only supported for github dependencies",
       1,
     ));
   }
@@ -98,22 +113,29 @@ pub fn handle(args: UpdateArgs, runtime: RuntimeFlags) -> Result<CommandOutput, 
     ));
   }
 
-  let targets = if let Some(package) = args.package.as_ref() {
-    if !manifest.dependencies.contains_key(package) {
+  let explicit_target = if let Some(package) = args.package.as_ref() {
+    Some(parse_dependency_input("update", package)?)
+  } else {
+    None
+  };
+
+  let targets = if let Some(input) = explicit_target.as_ref() {
+    if !manifest.dependencies.contains_key(&input.package_id) {
       return Err(JoyError::new(
         "update",
         "dependency_not_found",
-        format!("dependency `{package}` is not present in `joy.toml`"),
+        format!("dependency `{}` is not present in `joy.toml`", input.package_id),
         1,
       ));
     }
-    vec![package.clone()]
+    vec![input.package_id.clone()]
   } else {
     manifest.dependencies.keys().cloned().collect::<Vec<_>>()
   };
 
   let mut manifest_changed = false;
   let mut updated = Vec::new();
+  let mut registry_store = None::<RegistryStore>;
 
   for package_raw in targets {
     if runtime.progress {
@@ -129,43 +151,96 @@ pub fn handle(args: UpdateArgs, runtime: RuntimeFlags) -> Result<CommandOutput, 
         1,
       )
     })?;
-    if !matches!(spec.source, DependencySource::Github) {
-      return Err(JoyError::new(
-        "update",
-        "unsupported_dependency_source",
-        format!("unsupported dependency source for `{}`", package),
-        1,
-      ));
-    }
-
-    let (desired_spec, fetched) = if let Some(version_req) = args.version.as_ref() {
-      let fetched = fetch::fetch_github_semver_with_cache(&package, version_req, &cache)
-        .map_err(|err| map_fetch_error("update", err))?;
-      (
-        DependencySpec {
-          source: DependencySource::Github,
-          rev: String::new(),
-          version: Some(version_req.clone()),
-        },
-        fetched,
-      )
-    } else if let Some(rev) = args.rev.as_ref() {
-      let fetched = fetch::fetch_github_with_cache(&package, rev, &cache)
-        .map_err(|err| map_fetch_error("update", err))?;
-      (
-        DependencySpec { source: DependencySource::Github, rev: rev.clone(), version: None },
-        fetched,
-      )
-    } else if let Some(version_req) = spec.version.as_deref().filter(|v| !v.trim().is_empty()) {
-      let fetched = fetch::fetch_github_semver_with_cache(&package, version_req, &cache)
-        .map_err(|err| map_fetch_error("update", err))?;
-      (spec.clone(), fetched)
-    } else {
-      let requested_rev =
-        if spec.rev.trim().is_empty() { "HEAD".to_string() } else { spec.rev.clone() };
-      let fetched = fetch::fetch_github_with_cache(&package, &requested_rev, &cache)
-        .map_err(|err| map_fetch_error("update", err))?;
-      (spec.clone(), fetched)
+    let (desired_spec, fetched, source_name, registry_name, source_package) = match spec.source {
+      DependencySource::Github => {
+        if let Some(version_req) = args.version.as_ref() {
+          let fetched = fetch::fetch_github_semver_with_cache(&package, version_req, &cache)
+            .map_err(|err| map_fetch_error("update", err))?;
+          (
+            DependencySpec {
+              source: DependencySource::Github,
+              rev: String::new(),
+              version: Some(version_req.clone()),
+            },
+            fetched,
+            "github".to_string(),
+            None,
+            None,
+          )
+        } else if let Some(rev) = args.rev.as_ref() {
+          let fetched = fetch::fetch_github_with_cache(&package, rev, &cache)
+            .map_err(|err| map_fetch_error("update", err))?;
+          (
+            DependencySpec { source: DependencySource::Github, rev: rev.clone(), version: None },
+            fetched,
+            "github".to_string(),
+            None,
+            None,
+          )
+        } else if let Some(version_req) = spec.version.as_deref().filter(|v| !v.trim().is_empty()) {
+          let fetched = fetch::fetch_github_semver_with_cache(&package, version_req, &cache)
+            .map_err(|err| map_fetch_error("update", err))?;
+          (spec.clone(), fetched, "github".to_string(), None, None)
+        } else {
+          let requested_rev =
+            if spec.rev.trim().is_empty() { "HEAD".to_string() } else { spec.rev.clone() };
+          let fetched = fetch::fetch_github_with_cache(&package, &requested_rev, &cache)
+            .map_err(|err| map_fetch_error("update", err))?;
+          (spec.clone(), fetched, "github".to_string(), None, None)
+        }
+      },
+      DependencySource::Registry => {
+        if args.rev.is_some() {
+          return Err(JoyError::new(
+            "update",
+            "invalid_update_args",
+            "registry dependencies currently require `--version <range>`; `--rev` is only supported for github dependencies",
+            1,
+          ));
+        }
+        let version_req = args
+          .version
+          .as_ref()
+          .cloned()
+          .or_else(|| spec.version.clone())
+          .ok_or_else(|| {
+            JoyError::new(
+              "update",
+              "invalid_update_args",
+              format!(
+                "registry dependency `{}` is missing a version range; set one with `joy update {} --version <range>`",
+                package_raw, package_raw
+              ),
+              1,
+            )
+          })?;
+        let store = if let Some(store) = registry_store.as_ref() {
+          store.clone()
+        } else {
+          let loaded =
+            RegistryStore::load_default().map_err(|err| map_registry_error("update", err))?;
+          registry_store = Some(loaded.clone());
+          loaded
+        };
+        let release = store
+          .resolve(package.as_str(), RegistryRequirement::Semver(&version_req))
+          .map_err(|err| map_registry_error("update", err))?;
+        let mut fetched = fetch::fetch_github_with_cache(&package, &release.source_rev, &cache)
+          .map_err(|err| map_fetch_error("update", err))?;
+        fetched.requested_requirement = release.requested_requirement.clone();
+        fetched.resolved_version = Some(release.resolved_version.clone());
+        (
+          DependencySpec {
+            source: DependencySource::Registry,
+            rev: String::new(),
+            version: Some(version_req),
+          },
+          fetched,
+          "registry".to_string(),
+          Some(release.registry),
+          Some(release.source_package),
+        )
+      },
     };
     let installed =
       linking::install_headers(&env_layout.include_dir, &package, &fetched.source_dir)
@@ -177,6 +252,9 @@ pub fn handle(args: UpdateArgs, runtime: RuntimeFlags) -> Result<CommandOutput, 
 
     updated.push(UpdatedDependency {
       package: package.as_str().to_string(),
+      source: source_name,
+      registry: registry_name,
+      source_package,
       requested_rev: fetched.requested_rev,
       requested_requirement: fetched.requested_requirement,
       resolved_version: fetched.resolved_version,
@@ -233,6 +311,9 @@ pub fn handle(args: UpdateArgs, runtime: RuntimeFlags) -> Result<CommandOutput, 
       "updated_count": updated.len(),
       "updated": updated.iter().map(|item| json!({
         "package": item.package,
+        "source": item.source,
+        "registry": item.registry,
+        "source_package": item.source_package,
         "rev": item.requested_rev,
         "requested_requirement": item.requested_requirement,
         "resolved_version": item.resolved_version,
@@ -258,4 +339,63 @@ fn map_fetch_error(command: &'static str, err: fetch::FetchError) -> JoyError {
     "fetch_failed"
   };
   JoyError::new(command, code, err.to_string(), 1)
+}
+
+fn map_registry_error(command: &'static str, err: RegistryError) -> JoyError {
+  let code = if err.is_offline_cache_miss() {
+    "offline_cache_miss"
+  } else if err.is_not_configured() {
+    "registry_not_configured"
+  } else if err.is_package_not_found() {
+    "registry_package_not_found"
+  } else if err.is_invalid_version_requirement() {
+    "invalid_version_requirement"
+  } else if err.is_version_not_found() {
+    "version_not_found"
+  } else {
+    "registry_load_failed"
+  };
+  JoyError::new(command, code, err.to_string(), 1)
+}
+
+#[derive(Debug, Clone)]
+struct ParsedDependencyInput {
+  package_id: String,
+  #[allow(dead_code)]
+  source: DependencySource,
+}
+
+fn parse_dependency_input(
+  command: &'static str,
+  raw: &str,
+) -> Result<ParsedDependencyInput, JoyError> {
+  if let Some(id) = raw.strip_prefix("registry:") {
+    if id.trim().is_empty() {
+      return Err(JoyError::new(
+        command,
+        "invalid_package_id",
+        "invalid package `registry:`; expected `registry:owner/repo`",
+        1,
+      ));
+    }
+    return Ok(ParsedDependencyInput {
+      package_id: id.to_string(),
+      source: DependencySource::Registry,
+    });
+  }
+  if let Some(id) = raw.strip_prefix("github:") {
+    if id.trim().is_empty() {
+      return Err(JoyError::new(
+        command,
+        "invalid_package_id",
+        "invalid package `github:`; expected `github:owner/repo`",
+        1,
+      ));
+    }
+    return Ok(ParsedDependencyInput {
+      package_id: id.to_string(),
+      source: DependencySource::Github,
+    });
+  }
+  Ok(ParsedDependencyInput { package_id: raw.to_string(), source: DependencySource::Github })
 }

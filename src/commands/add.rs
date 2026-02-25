@@ -14,6 +14,7 @@ use crate::manifest::{DependencySource, DependencySpec, Manifest};
 use crate::output::{HumanMessageBuilder, progress_detail, progress_stage};
 use crate::package_id::PackageId;
 use crate::project_env;
+use crate::registry::{RegistryError, RegistryRequirement, RegistryStore};
 
 pub fn handle(args: AddArgs, runtime: RuntimeFlags) -> Result<CommandOutput, JoyError> {
   if runtime.frozen {
@@ -42,7 +43,16 @@ pub fn handle(args: AddArgs, runtime: RuntimeFlags) -> Result<CommandOutput, Joy
     progress_stage(&format!("Resolving and fetching `{}`", args.package));
   }
 
-  let package = PackageId::parse(&args.package)
+  let parsed_input = parse_dependency_input("add", &args.package)?;
+  if matches!(parsed_input.source, DependencySource::Registry) && args.version.is_none() {
+    return Err(JoyError::new(
+      "add",
+      "invalid_add_args",
+      "registry dependencies currently require `--version <range>` (for example `joy add registry:owner/repo --version ^1`)",
+      1,
+    ));
+  }
+  let package = PackageId::parse(&parsed_input.package_id)
     .map_err(|err| JoyError::new("add", "invalid_package_id", err.to_string(), 1))?;
 
   let cwd = env::current_dir().map_err(|err| {
@@ -66,22 +76,54 @@ pub fn handle(args: AddArgs, runtime: RuntimeFlags) -> Result<CommandOutput, Joy
 
   let cache = GlobalCache::resolve()
     .map_err(|err| JoyError::new("add", "cache_setup_failed", err.to_string(), 1))?;
-  let (manifest_spec, fetched) = if let Some(version_req) = args.version.as_ref() {
-    let fetched = fetch::fetch_github_semver_with_cache(&package, version_req, &cache)
-      .map_err(|err| map_fetch_error("add", err))?;
-    (
-      DependencySpec {
-        source: DependencySource::Github,
-        rev: String::new(),
-        version: Some(version_req.clone()),
-      },
-      fetched,
-    )
-  } else {
-    let rev = args.rev.clone().unwrap_or_else(|| "HEAD".to_string());
-    let fetched = fetch::fetch_github_with_cache(&package, &rev, &cache)
-      .map_err(|err| map_fetch_error("add", err))?;
-    (DependencySpec { source: DependencySource::Github, rev, version: None }, fetched)
+  let (manifest_spec, fetched, registry_name, source_package) = match parsed_input.source {
+    DependencySource::Github => {
+      if let Some(version_req) = args.version.as_ref() {
+        let fetched = fetch::fetch_github_semver_with_cache(&package, version_req, &cache)
+          .map_err(|err| map_fetch_error("add", err))?;
+        (
+          DependencySpec {
+            source: DependencySource::Github,
+            rev: String::new(),
+            version: Some(version_req.clone()),
+          },
+          fetched,
+          None,
+          None,
+        )
+      } else {
+        let rev = args.rev.clone().unwrap_or_else(|| "HEAD".to_string());
+        let fetched = fetch::fetch_github_with_cache(&package, &rev, &cache)
+          .map_err(|err| map_fetch_error("add", err))?;
+        (
+          DependencySpec { source: DependencySource::Github, rev, version: None },
+          fetched,
+          None,
+          None,
+        )
+      }
+    },
+    DependencySource::Registry => {
+      let version_req = args.version.as_ref().expect("validated registry version");
+      let registry = RegistryStore::load_default().map_err(|err| map_registry_error("add", err))?;
+      let release = registry
+        .resolve(package.as_str(), RegistryRequirement::Semver(version_req))
+        .map_err(|err| map_registry_error("add", err))?;
+      let mut fetched = fetch::fetch_github_with_cache(&package, &release.source_rev, &cache)
+        .map_err(|err| map_fetch_error("add", err))?;
+      fetched.requested_requirement = release.requested_requirement.clone();
+      fetched.resolved_version = Some(release.resolved_version.clone());
+      (
+        DependencySpec {
+          source: DependencySource::Registry,
+          rev: String::new(),
+          version: Some(version_req.clone()),
+        },
+        fetched,
+        Some(release.registry),
+        Some(release.source_package),
+      )
+    },
   };
   if runtime.progress {
     progress_detail(&format!("Installing headers for `{package}`"));
@@ -89,7 +131,7 @@ pub fn handle(args: AddArgs, runtime: RuntimeFlags) -> Result<CommandOutput, Joy
   let installed = linking::install_headers(&env_layout.include_dir, &package, &fetched.source_dir)
     .map_err(|err| JoyError::new("add", "header_install_failed", err.to_string(), 1))?;
 
-  let changed = manifest.add_dependency(package.as_str().to_string(), manifest_spec.clone());
+  let changed = manifest.add_dependency(parsed_input.package_id.clone(), manifest_spec.clone());
   if changed && let Err(err) = manifest.save(&manifest_path) {
     let rollback_err = remove_installed_header_path(&installed.link_path);
     let mut message = err.to_string();
@@ -143,7 +185,13 @@ pub fn handle(args: AddArgs, runtime: RuntimeFlags) -> Result<CommandOutput, Joy
     "add",
     human_message,
     json!({
-      "package": args.package,
+      "package": parsed_input.package_id,
+      "source": match manifest_spec.source {
+        DependencySource::Github => "github",
+        DependencySource::Registry => "registry",
+      },
+      "registry": registry_name,
+      "source_package": source_package,
       "rev": fetched.requested_rev,
       "requested_requirement": fetched.requested_requirement,
       "resolved_version": fetched.resolved_version,
@@ -177,6 +225,64 @@ fn map_fetch_error(command: &'static str, err: fetch::FetchError) -> JoyError {
     "fetch_failed"
   };
   JoyError::new(command, code, err.to_string(), 1)
+}
+
+fn map_registry_error(command: &'static str, err: RegistryError) -> JoyError {
+  let code = if err.is_offline_cache_miss() {
+    "offline_cache_miss"
+  } else if err.is_not_configured() {
+    "registry_not_configured"
+  } else if err.is_package_not_found() {
+    "registry_package_not_found"
+  } else if err.is_invalid_version_requirement() {
+    "invalid_version_requirement"
+  } else if err.is_version_not_found() {
+    "version_not_found"
+  } else {
+    "registry_load_failed"
+  };
+  JoyError::new(command, code, err.to_string(), 1)
+}
+
+#[derive(Debug, Clone)]
+struct ParsedDependencyInput {
+  package_id: String,
+  source: DependencySource,
+}
+
+fn parse_dependency_input(
+  command: &'static str,
+  raw: &str,
+) -> Result<ParsedDependencyInput, JoyError> {
+  if let Some(id) = raw.strip_prefix("registry:") {
+    if id.trim().is_empty() {
+      return Err(JoyError::new(
+        command,
+        "invalid_package_id",
+        "invalid package `registry:`; expected `registry:owner/repo`",
+        1,
+      ));
+    }
+    return Ok(ParsedDependencyInput {
+      package_id: id.to_string(),
+      source: DependencySource::Registry,
+    });
+  }
+  if let Some(id) = raw.strip_prefix("github:") {
+    if id.trim().is_empty() {
+      return Err(JoyError::new(
+        command,
+        "invalid_package_id",
+        "invalid package `github:`; expected `github:owner/repo`",
+        1,
+      ));
+    }
+    return Ok(ParsedDependencyInput {
+      package_id: id.to_string(),
+      source: DependencySource::Github,
+    });
+  }
+  Ok(ParsedDependencyInput { package_id: raw.to_string(), source: DependencySource::Github })
 }
 
 fn remove_installed_header_path(path: &Path) -> std::io::Result<()> {

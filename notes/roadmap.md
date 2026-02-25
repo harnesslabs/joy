@@ -9,10 +9,10 @@ Archived milestone (Phase 1–6):
 ## Current Status
 
 - Roadmap umbrella tracker: [#60](https://github.com/harnesslabs/joy/issues/60)
-- Umbrella tracker status: open (Phase 15–18 roadmap wave)
-- Current phase: Phase 18 (Registry/Index Strategy Beyond GitHub Shorthand)
-- Current phase tracker: [#64](https://github.com/harnesslabs/joy/issues/64)
-- Completed phases in this wave: 15, 16, 17
+- Umbrella tracker status: open (Phase 15–18 roadmap wave; implementation complete, final PR pending)
+- Current phase: Wave closeout (final PR + tracker close)
+- Current phase tracker: umbrella [#60](https://github.com/harnesslabs/joy/issues/60)
+- Completed phases in this wave: 15, 16, 17, 18
 - Previously completed wave: Phase 7–14 (tracker [#13](https://github.com/harnesslabs/joy/issues/13), closed)
 - Latest completed milestone notes:
   - `/Users/autoparallel/Code/joy/notes/active/2026-02-24_windows-msvc-parity-phase10.md`
@@ -21,6 +21,7 @@ Archived milestone (Phase 1–6):
   - `/Users/autoparallel/Code/joy/notes/active/2026-02-24_phase15-cli-human-ux-and-helpfulness.md`
   - `/Users/autoparallel/Code/joy/notes/active/2026-02-24_phase16-workspace-support-and-multiple-targets.md`
   - `/Users/autoparallel/Code/joy/notes/active/2026-02-24_phase17-semver-ranges-and-solver-integration.md`
+  - `/Users/autoparallel/Code/joy/notes/active/2026-02-25_phase18-registry-index-strategy.md`
 - Roadmap bootstrap note: `/Users/autoparallel/Code/joy/notes/active/2026-02-24_phase7-14-roadmap-bootstrap-and-github-seeding.md`
 
 ## Phase 15–18 Milestones
@@ -43,13 +44,12 @@ Archived milestone (Phase 1–6):
 
 ## Immediate Execution Queue
 
-Continue the Phase 15–18 wave with Phase 18 (registry/index) issue-by-issue on the single wave branch:
+Wave implementation is complete. Remaining execution items are closeout-only on the single wave branch:
 
-1. [#80](https://github.com/harnesslabs/joy/issues/80) `[core]` generalize package coordinate/source model
-2. [#81](https://github.com/harnesslabs/joy/issues/81) `[registry]` define registry index format and local cache layout
-3. [#82](https://github.com/harnesslabs/joy/issues/82) `[resolver][solver]` integrate registry metadata as candidate provider
-4. [#83](https://github.com/harnesslabs/joy/issues/83) registry command UX, JSON fields, and lockfile compatibility
-5. [#84](https://github.com/harnesslabs/joy/issues/84) registry docs, fixture coverage, and migration guidance
+1. Close Phase 18 implementation issues [#80](https://github.com/harnesslabs/joy/issues/80)–[#84](https://github.com/harnesslabs/joy/issues/84) and tracker [#64](https://github.com/harnesslabs/joy/issues/64)
+2. Commit Phase 18 implementation + docs + notes
+3. Open single final PR `feat: deliver Phase 15-18 roadmap wave`
+4. Close umbrella tracker [#60](https://github.com/harnesslabs/joy/issues/60) after PR is opened with validation evidence linked
 
 ## Phase Issue Inventory (Seeded)
 

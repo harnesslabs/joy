@@ -16,12 +16,15 @@ use crate::fetch;
 use crate::manifest::{DependencyRequirementRef, DependencySource, Manifest};
 use crate::package_id::{PackageId, PackageIdError};
 use crate::recipes::RecipeStore;
+use crate::registry::{self, RegistryRequirement};
 
 /// A resolved package node in the dependency graph.
 #[derive(Debug, Clone)]
 pub struct ResolvedPackage {
   pub id: PackageId,
   pub source: DependencySource,
+  pub registry: Option<String>,
+  pub source_package: Option<String>,
   pub requested_rev: String,
   pub requested_requirement: Option<String>,
   pub resolved_version: Option<String>,
@@ -90,6 +93,16 @@ pub fn resolve_manifest(
   manifest: &Manifest,
   recipes: &RecipeStore,
 ) -> Result<ResolvedGraph, ResolverError> {
+  let registry_store =
+    if manifest.dependencies.values().any(|spec| matches!(spec.source, DependencySource::Registry))
+    {
+      Some(
+        registry::RegistryStore::load_default()
+          .map_err(|source| ResolverError::RegistryLoad { source })?,
+      )
+    } else {
+      None
+    };
   resolve_manifest_with_selector(manifest, recipes, |package, request| {
     match manifest
       .dependencies
@@ -102,6 +115,8 @@ pub fn resolve_manifest(
           let fetched = fetch::fetch_github(package, requested_rev)
             .map_err(|source| ResolverError::Fetch { package: package.to_string(), source })?;
           Ok(ResolvedSelection {
+            registry: None,
+            source_package: None,
             requested_rev: fetched.requested_rev,
             requested_requirement: None,
             resolved_version: None,
@@ -112,12 +127,43 @@ pub fn resolve_manifest(
           let fetched = fetch::fetch_github_semver(package, version_req)
             .map_err(|source| ResolverError::Fetch { package: package.to_string(), source })?;
           Ok(ResolvedSelection {
+            registry: None,
+            source_package: None,
             requested_rev: fetched.requested_rev,
             requested_requirement: fetched.requested_requirement,
             resolved_version: fetched.resolved_version,
             resolved_commit: fetched.resolved_commit,
           })
         },
+      },
+      DependencySource::Registry => {
+        let store = registry_store.as_ref().expect("registry store must be loaded");
+        let registry_requirement = match request {
+          ResolveRequest::Version(req) => RegistryRequirement::Semver(req.as_str()),
+          ResolveRequest::Rev(rev) => RegistryRequirement::ExactVersion(rev.as_str()),
+        };
+        let release = store.resolve(package.as_str(), registry_requirement).map_err(|source| {
+          ResolverError::RegistryResolve { package: package.to_string(), source }
+        })?;
+        let source_package = PackageId::parse(&release.source_package).map_err(|source| {
+          ResolverError::InvalidPackageId { package: release.source_package.clone(), source }
+        })?;
+        if source_package != *package {
+          return Err(ResolverError::RegistryAliasUnsupported {
+            package: package.to_string(),
+            source_package: release.source_package,
+          });
+        }
+        let fetched = fetch::fetch_github(package, &release.source_rev)
+          .map_err(|source| ResolverError::Fetch { package: package.to_string(), source })?;
+        Ok(ResolvedSelection {
+          registry: Some(release.registry),
+          source_package: Some(release.source_package),
+          requested_rev: fetched.requested_rev,
+          requested_requirement: release.requested_requirement,
+          resolved_version: Some(release.resolved_version),
+          resolved_commit: fetched.resolved_commit,
+        })
       },
     }
   })
@@ -141,6 +187,8 @@ where
     };
     let resolved_commit = resolve_commit(package, requested)?;
     Ok(ResolvedSelection {
+      registry: None,
+      source_package: None,
       requested_rev: requested.to_string(),
       requested_requirement: None,
       resolved_version: None,
@@ -208,12 +256,20 @@ where
       if existing.resolved_version.is_none() && selection.resolved_version.is_some() {
         existing.resolved_version = selection.resolved_version.clone();
       }
+      if existing.registry.is_none() && selection.registry.is_some() {
+        existing.registry = selection.registry.clone();
+      }
+      if existing.source_package.is_none() && selection.source_package.is_some() {
+        existing.source_package = selection.source_package.clone();
+      }
       existing_idx
     } else {
       let recipe = recipes.get(&pending.package);
       let node = ResolvedPackage {
         id: pending.package.clone(),
         source: pending.source.clone(),
+        registry: selection.registry.clone(),
+        source_package: selection.source_package.clone(),
         requested_rev,
         requested_requirement: selection.requested_requirement.clone(),
         resolved_version: selection.resolved_version.clone(),
@@ -281,6 +337,8 @@ enum ResolveRequest {
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 struct ResolvedSelection {
+  registry: Option<String>,
+  source_package: Option<String>,
   requested_rev: String,
   requested_requirement: Option<String>,
   resolved_version: Option<String>,
@@ -301,6 +359,21 @@ pub enum ResolverError {
     #[source]
     source: fetch::FetchError,
   },
+  #[error("failed to load registry index: {source}")]
+  RegistryLoad {
+    #[source]
+    source: registry::RegistryError,
+  },
+  #[error("failed to resolve registry package `{package}`: {source}")]
+  RegistryResolve {
+    package: String,
+    #[source]
+    source: registry::RegistryError,
+  },
+  #[error(
+    "registry package `{package}` currently maps to `{source_package}`, but alias package coordinates are not supported yet"
+  )]
+  RegistryAliasUnsupported { package: String, source_package: String },
   #[error("recipe for `{package}` depends on `{dependency}` without an explicit rev")]
   MissingTransitiveRev { package: String, dependency: String },
   #[error(
@@ -437,6 +510,8 @@ include_roots = ["include"]
     let resolved =
       resolve_manifest_with_selector(&manifest, &recipes, |pkg, request| match request {
         ResolveRequest::Version(req) if pkg.as_str() == "fmtlib/fmt" => Ok(ResolvedSelection {
+          registry: None,
+          source_package: None,
           requested_rev: "v11.1.2".into(),
           requested_requirement: Some(req.clone()),
           resolved_version: Some("11.1.2".into()),

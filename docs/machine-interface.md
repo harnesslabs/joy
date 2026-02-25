@@ -42,6 +42,9 @@ The following payload keys are covered by integration shape assertions in `/User
 `data` keys:
 
 - `package`
+- `source` (`"github"` or `"registry"`)
+- `registry` (string or `null`; current default registry name when `source = "registry"`)
+- `source_package` (string or `null`; upstream source package coordinate)
 - `rev`
 - `requested_requirement` (string or `null`; semver range for direct semver dependencies)
 - `resolved_version` (string or `null`; concrete semver selected from tags)
@@ -64,6 +67,9 @@ The following payload keys are covered by integration shape assertions in `/User
 `data` keys:
 
 - `package`
+- `source`
+- `registry` (string or `null`)
+- `source_package` (string or `null`)
 - `removed`
 - `manifest_path`
 - `project_root`
@@ -87,6 +93,9 @@ The following payload keys are covered by integration shape assertions in `/User
 Each `updated[]` item contains:
 
 - `package`
+- `source` (`"github"` or `"registry"`)
+- `registry` (string or `null`)
+- `source_package` (string or `null`)
 - `rev`
 - `requested_requirement` (string or `null`)
 - `resolved_version` (string or `null`)
@@ -106,6 +115,9 @@ Each `updated[]` item contains:
 Each `packages[]` item contains:
 
 - `id`
+- `source` (`"github"` or `"registry"`)
+- `registry` (string or `null`)
+- `source_package` (string or `null`)
 - `direct`
 - `header_only`
 - `requested_rev`

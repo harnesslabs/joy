@@ -44,6 +44,12 @@ pub fn handle(_args: TreeArgs, runtime: RuntimeFlags) -> Result<CommandOutput, J
       let deps = resolved.dependency_ids(pkg.id.as_str()).unwrap_or_default();
       json!({
         "id": pkg.id.to_string(),
+        "source": match pkg.source {
+          crate::manifest::DependencySource::Github => "github",
+          crate::manifest::DependencySource::Registry => "registry",
+        },
+        "registry": pkg.registry,
+        "source_package": pkg.source_package,
         "direct": pkg.direct,
         "header_only": pkg.header_only,
         "requested_rev": pkg.requested_rev,
@@ -100,21 +106,28 @@ fn render_tree_node(
   };
   let indent = "  ".repeat(depth);
   let kind = if pkg.header_only { "header-only" } else { "compiled" };
+  let source_suffix = match (&pkg.source, pkg.registry.as_deref()) {
+    (crate::manifest::DependencySource::Registry, Some(registry)) => {
+      format!(", registry {registry}")
+    },
+    (crate::manifest::DependencySource::Registry, None) => ", registry".to_string(),
+    _ => String::new(),
+  };
   if let Some(req) = pkg.requested_requirement.as_deref() {
     if let Some(version) = pkg.resolved_version.as_deref() {
       lines.push(format!(
-        "{indent}- {} ({kind}, req {req}, version {version}, tag {}, commit {})",
+        "{indent}- {} ({kind}{source_suffix}, req {req}, version {version}, tag {}, commit {})",
         pkg.id, pkg.requested_rev, pkg.resolved_commit
       ));
     } else {
       lines.push(format!(
-        "{indent}- {} ({kind}, req {req}, tag {}, commit {})",
+        "{indent}- {} ({kind}{source_suffix}, req {req}, tag {}, commit {})",
         pkg.id, pkg.requested_rev, pkg.resolved_commit
       ));
     }
   } else {
     lines.push(format!(
-      "{indent}- {} ({kind}, rev {}, commit {})",
+      "{indent}- {} ({kind}{source_suffix}, rev {}, commit {})",
       pkg.id, pkg.requested_rev, pkg.resolved_commit
     ));
   }
@@ -146,6 +159,24 @@ fn map_resolver_error(err: resolver::ResolverError) -> JoyError {
     resolver::ResolverError::Fetch { source, .. } if source.is_version_not_found() => {
       "version_not_found"
     },
+    resolver::ResolverError::RegistryLoad { source }
+      if source.is_offline_cache_miss() || source.is_not_configured() =>
+    {
+      if source.is_offline_cache_miss() { "offline_cache_miss" } else { "registry_not_configured" }
+    },
+    resolver::ResolverError::RegistryResolve { source, .. }
+      if source.is_package_not_found() || source.is_version_not_found() =>
+    {
+      if source.is_package_not_found() { "registry_package_not_found" } else { "version_not_found" }
+    },
+    resolver::ResolverError::RegistryResolve { source, .. }
+      if source.is_invalid_version_requirement() =>
+    {
+      "invalid_version_requirement"
+    },
+    resolver::ResolverError::RegistryLoad { .. }
+    | resolver::ResolverError::RegistryResolve { .. } => "registry_load_failed",
+    resolver::ResolverError::RegistryAliasUnsupported { .. } => "registry_alias_unsupported",
     _ => "dependency_resolve_failed",
   };
   JoyError::new("tree", code, err.to_string(), 1)

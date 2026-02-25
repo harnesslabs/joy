@@ -14,7 +14,7 @@ Native C++ package and build manager with a `cargo`-like CLI and a local project
 
 ## Status / Caveats
 
-`joy` is a functional pre-1.0 implementation that has completed Phases 7-17 of the current roadmap wave.
+`joy` is a functional pre-1.0 implementation that has completed Phases 7-18 of the current roadmap wave.
 
 Current constraints:
 
@@ -22,7 +22,8 @@ Current constraints:
 - transitive recipe dependencies remain exact-rev metadata in the current phase
 - Windows local builds are supported via both MinGW GNU and MSVC (`cl.exe` + Ninja)
 - GitHub release artifacts currently publish the Windows GNU target (`x86_64-pc-windows-gnu`)
-- registry/index-backed package sources are not implemented yet (GitHub shorthand remains the source path)
+- registry/index support is available in a git-backed default-registry mode (configured via `JOY_REGISTRY_DEFAULT`)
+- registry package aliases (registry name != canonical source package ID) are intentionally deferred; the initial registry cut keeps canonical `owner/repo` IDs
 - package-manager channels (Homebrew tap / Scoop bucket) are template-driven and release-managed
 
 ## Install
@@ -116,8 +117,10 @@ Notes:
 ```bash
 joy add fmtlib/fmt --rev 11.0.2
 joy add fmtlib/fmt --version ^11
+joy add registry:fmtlib/fmt --version ^11
 joy update fmtlib/fmt --rev 11.1.0
 joy update fmtlib/fmt --version ^11
+joy update fmtlib/fmt          # refreshes stored semver range (github or registry source)
 joy remove fmtlib/fmt
 joy tree --json
 ```
@@ -125,6 +128,24 @@ joy tree --json
 `joy tree` reports the resolved dependency graph (human or JSON mode) using deterministic ordering.
 
 For semver-managed direct dependencies, `joy` stores the requested range in `joy.toml` and records the selected tag/version/commit in `joy.lock`.
+
+## Registry Index (Phase 18)
+
+`joy` can resolve direct dependencies from a git-backed registry index while still fetching package sources from GitHub.
+
+- Use `registry:<owner/repo>` to add a dependency through the default registry.
+- Configure the default registry remote with `JOY_REGISTRY_DEFAULT` (git URL or local git repo path).
+- Registry dependencies currently require `--version <range>` and are stored as:
+  - `source = "registry"`
+  - `version = "..."` in `joy.toml`
+
+Example:
+
+```bash
+export JOY_REGISTRY_DEFAULT=/path/to/joy-registry.git
+joy add registry:nlohmann/json --version ^3
+joy tree --json
+```
 
 ## Multi-File Project Builds
 

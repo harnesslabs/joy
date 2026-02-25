@@ -67,6 +67,11 @@ fn runtime_progress_enabled() -> bool {
   FETCH_RUNTIME_FLAGS.load(Ordering::SeqCst) & FETCH_FLAG_PROGRESS != 0
 }
 
+/// Read the current process-wide fetch runtime toggles (used by other transport/cache modules).
+pub(crate) fn runtime_options() -> RuntimeOptions {
+  RuntimeOptions { offline: runtime_offline_enabled(), progress: runtime_progress_enabled() }
+}
+
 /// Result of fetching a package source tree (or reusing an existing cached checkout).
 #[derive(Debug, Clone)]
 pub struct FetchResult {

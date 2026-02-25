@@ -62,6 +62,10 @@ The machine contract is defined by `/Users/autoparallel/Code/joy/src/error.rs` (
 - `offline_network_disabled`
 - `invalid_version_requirement`
 - `version_not_found`
+- `registry_not_configured`
+- `registry_load_failed`
+- `registry_package_not_found`
+- `registry_alias_unsupported`
 
 ## Toolchain / Build Execution
 
