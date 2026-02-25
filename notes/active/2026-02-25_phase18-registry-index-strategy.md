@@ -1,6 +1,6 @@
 ---
 date: 2026-02-25
-commit: pending
+commit: b75825e
 tags:
   - phase18
   - registry

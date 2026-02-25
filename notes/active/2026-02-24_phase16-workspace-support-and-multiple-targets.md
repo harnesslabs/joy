@@ -1,6 +1,6 @@
 ---
 date: 2026-02-24
-commit: pending
+commit: f04d327
 tags:
   - phase16
   - workspace
@@ -92,4 +92,3 @@ Phase 14 left two major usability/scale gaps in `joy`: no workspace root model a
 ## Fallback Plan
 
 If workspace routing proves too intrusive, keep the manifest/target schema and named-target build support, but temporarily restrict workspace-root execution to an explicit future command (`joy workspace exec -p ...`) while preserving the per-member `.joy` / `joy.lock` semantics already implemented. The dispatch routing layer in `/Users/autoparallel/Code/joy/src/commands/mod.rs` is the isolated rollback point.
-

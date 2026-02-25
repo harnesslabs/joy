@@ -1,6 +1,6 @@
 ---
 date: 2026-02-24
-commit: pending
+commit: 0ad005a
 tags:
   - phase15
   - ux
@@ -72,4 +72,3 @@ Phase 13 added machine-interface stability and some progress output, but human-m
 ## Fallback Plan
 
 If any human-mode formatting change proves too noisy, keep the centralized helpers but narrow adoption to the most user-visible commands (`doctor`, `build`, `sync`, `add`) and revert specific command message changes. JSON envelope/payload stability remains preserved independently of the human renderer.
-

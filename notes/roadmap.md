@@ -1,4 +1,4 @@
-# Joy Roadmap Tracker (Phase 15–18 In Progress)
+# Joy Roadmap Tracker (Phase 15–18 Delivered)
 
 The original Phase 1–6 roadmap was completed and archived. On February 24, 2026, the next roadmap wave (Phase 7–14) was seeded in GitHub and delivered. A new wave (Phase 15–18) has now been seeded for CLI UX, workspaces/targets, semver solving, and registry/index support.
 
@@ -9,9 +9,9 @@ Archived milestone (Phase 1–6):
 ## Current Status
 
 - Roadmap umbrella tracker: [#60](https://github.com/harnesslabs/joy/issues/60)
-- Umbrella tracker status: open (Phase 15–18 roadmap wave; implementation complete, final PR pending)
-- Current phase: Wave closeout (final PR + tracker close)
-- Current phase tracker: umbrella [#60](https://github.com/harnesslabs/joy/issues/60)
+- Umbrella tracker status: closed (Phase 15–18 roadmap wave delivered; PR [#85](https://github.com/harnesslabs/joy/pull/85) opened)
+- Current phase: Phase 15–18 wave delivered (PR review / CI follow-up)
+- Current phase tracker: PR [#85](https://github.com/harnesslabs/joy/pull/85)
 - Completed phases in this wave: 15, 16, 17, 18
 - Previously completed wave: Phase 7–14 (tracker [#13](https://github.com/harnesslabs/joy/issues/13), closed)
 - Latest completed milestone notes:
@@ -44,12 +44,11 @@ Archived milestone (Phase 1–6):
 
 ## Immediate Execution Queue
 
-Wave implementation is complete. Remaining execution items are closeout-only on the single wave branch:
+Wave implementation and closeout are complete. Remaining work is PR review/merge:
 
-1. Close Phase 18 implementation issues [#80](https://github.com/harnesslabs/joy/issues/80)–[#84](https://github.com/harnesslabs/joy/issues/84) and tracker [#64](https://github.com/harnesslabs/joy/issues/64)
-2. Commit Phase 18 implementation + docs + notes
-3. Open single final PR `feat: deliver Phase 15-18 roadmap wave`
-4. Close umbrella tracker [#60](https://github.com/harnesslabs/joy/issues/60) after PR is opened with validation evidence linked
+1. Monitor PR [#85](https://github.com/harnesslabs/joy/pull/85) CI checks and address failures if any
+2. Review and merge PR [#85](https://github.com/harnesslabs/joy/pull/85)
+3. Archive Phase 15–18 milestone notes after merge (if/when the notes workflow rolls the next wave)
 
 ## Phase Issue Inventory (Seeded)
 
@@ -63,7 +62,7 @@ Wave implementation is complete. Remaining execution items are closeout-only on 
 - Phase 15 tracker [#61](https://github.com/harnesslabs/joy/issues/61) (closed): `#65`, `#66`, `#67`, `#68`, `#69`
 - Phase 16 tracker [#62](https://github.com/harnesslabs/joy/issues/62) (closed): `#70`, `#71`, `#72`, `#73`, `#74`
 - Phase 17 tracker [#63](https://github.com/harnesslabs/joy/issues/63) (closed): `#75`, `#76`, `#77`, `#78`, `#79`
-- Phase 18 tracker [#64](https://github.com/harnesslabs/joy/issues/64) (open): `#80`, `#81`, `#82`, `#83`, `#84`
+- Phase 18 tracker [#64](https://github.com/harnesslabs/joy/issues/64) (closed): `#80`, `#81`, `#82`, `#83`, `#84`
 
 ## Locked Roadmap Priorities
 
