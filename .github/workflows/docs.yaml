@@ -74,8 +74,10 @@ jobs:
         with:
           key: docs/mdbook-tools
 
-      - name: Install mdBook
-        run: cargo install --locked mdbook --version 0.4.43
+      - name: Install mdBook and linkcheck
+        run: |
+          cargo install --locked mdbook --version 0.4.43
+          cargo install --locked mdbook-linkcheck --version 0.7.7
 
       - name: Build docs
         run: mdbook build book
