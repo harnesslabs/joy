@@ -810,13 +810,21 @@ fn run_ninja_build(
     })?;
   let stdout = String::from_utf8_lossy(&output.stdout).to_string();
   let stderr = String::from_utf8_lossy(&output.stderr).to_string();
+  let log_dir = build_file.parent().unwrap_or(project_root);
+  let stdout_log_path = log_dir.join("ninja.last.stdout.log");
+  let stderr_log_path = log_dir.join("ninja.last.stderr.log");
+  let _ = fs::write(&stdout_log_path, &stdout);
+  let _ = fs::write(&stderr_log_path, &stderr);
   if !output.status.success() {
     return Err(JoyError::new(
       "build",
       "build_failed",
       format!(
-        "ninja build failed with status {:?}\nstdout:\n{}\nstderr:\n{}",
+        "ninja build failed with status {:?}\nbuild file: `{}`\nstdout log: `{}`\nstderr log: `{}`\nstdout:\n{}\nstderr:\n{}",
         output.status.code(),
+        build_file.display(),
+        stdout_log_path.display(),
+        stderr_log_path.display(),
         stdout.trim_end(),
         stderr.trim_end()
       ),

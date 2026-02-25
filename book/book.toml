@@ -1,0 +1,29 @@
+[book]
+authors = ["harnesslabs"]
+language = "en"
+multilingual = false
+title = "joy Book"
+description = "User and contributor documentation for joy, a cargo/uv-inspired native C++ package and build manager."
+src = "src"
+
+[build]
+build-dir = "dist"
+create-missing = false
+
+[output.html]
+default-theme = "light"
+preferred-dark-theme = "navy"
+git-repository-url = "https://github.com/harnesslabs/joy"
+edit-url-template = "https://github.com/harnesslabs/joy/edit/main/book/{path}"
+site-url = "/joy/"
+additional-css = ["theme/custom.css"]
+smart-punctuation = true
+
+[output.html.search]
+enable = true
+limit-results = 30
+
+[output.linkcheck]
+follow-web-links = false
+
+[preprocessor]

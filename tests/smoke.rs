@@ -17,6 +17,9 @@ fn help_smoke_test() {
     .stdout(predicate::str::contains("new"))
     .stdout(predicate::str::contains("--json"))
     .stdout(predicate::str::contains("--machine"))
+    .stdout(predicate::str::contains("--color"))
+    .stdout(predicate::str::contains("--progress"))
+    .stdout(predicate::str::contains("--glyphs"))
     .stdout(predicate::str::contains("Examples:"))
     .stdout(predicate::str::contains("joy sync"));
 }

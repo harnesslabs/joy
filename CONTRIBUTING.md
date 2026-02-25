@@ -13,6 +13,7 @@ The project is currently optimized for rapid iteration with strong tests, milest
 - `git`
 - For build/E2E coverage: `ninja`, `cmake`, and a C++ compiler (`clang++` or `g++` / MinGW on Windows)
 - Optional (distribution metadata validation): `ruby`, `jq`
+- Optional (docs validation / local docs server): `mdbook`, `mdbook-linkcheck`
 
 Use `cargo run -- --json doctor` (or installed `joy --json doctor`) to inspect local toolchain/cache/recipe health.
 
@@ -25,6 +26,7 @@ just recipe-check
 just test
 just ci
 just ci-local
+just ci-docs
 ```
 
 Useful targeted commands:
@@ -32,6 +34,8 @@ Useful targeted commands:
 ```bash
 just compiled-e2e
 just dist-metadata-check
+just docs-build
+just docs-lint
 cargo run -- --json doctor
 ```
 
@@ -64,11 +68,16 @@ Development history and milestone notes live in `/Users/autoparallel/Code/joy/no
 - document non-obvious design choices in notes for future contributors
 - call out platform caveats explicitly (for example GNU vs MSVC on Windows)
 - when changing human-mode CLI output, add/update selective human-output tests (section/key-phrase assertions) and keep `--json` machine output compatibility intact
+- treat human and machine interfaces separately:
+  - human mode may improve formatting, colors, glyphs, and progress rendering
+  - `--json` / `--machine` is the stable automation interface
+- update the mdBook (`book/`) first for in-depth usage/reference docs; keep `README.md` as the overview/entrypoint
 
 ## Release Process
 
 Release/versioning policy and the tagged GitHub release workflow are documented in:
 
-- `/Users/autoparallel/Code/joy/docs/releasing.md`
+- `book/src/reference/releasing.md` (canonical)
+- `/Users/autoparallel/Code/joy/docs/releasing.md` (legacy stub / redirect entrypoint)
 - `/Users/autoparallel/Code/joy/.github/workflows/release.yaml`
 - `/Users/autoparallel/Code/joy/packaging/README.md`

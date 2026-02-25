@@ -1,0 +1,42 @@
+:root {
+  --joy-accent: #0f766e;
+  --joy-accent-2: #1d4ed8;
+  --joy-warn: #b45309;
+  --joy-danger: #b91c1c;
+  --joy-code-bg: #f4f8fb;
+}
+
+.content main {
+  max-width: 900px;
+}
+
+h1, h2, h3 {
+  letter-spacing: -0.01em;
+}
+
+h1 {
+  border-bottom: 2px solid rgba(15, 118, 110, 0.25);
+  padding-bottom: 0.35rem;
+}
+
+h2 {
+  border-left: 4px solid rgba(29, 78, 216, 0.35);
+  padding-left: 0.5rem;
+}
+
+pre code {
+  border-radius: 10px;
+}
+
+code {
+  border-radius: 4px;
+  padding: 0.05em 0.25em;
+}
+
+.admonish.tip, blockquote {
+  border-left-color: var(--joy-accent);
+}
+
+.table-wrapper table th {
+  background: rgba(29, 78, 216, 0.08);
+}
