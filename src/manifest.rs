@@ -4,6 +4,8 @@ use std::fs;
 use std::path::{Path, PathBuf};
 use thiserror::Error;
 
+use crate::package_id::PackageId;
+
 /// Parsed `joy.toml` manifest.
 ///
 /// The schema is intentionally small in the current roadmap: a single project section and a map of
@@ -21,6 +23,16 @@ pub struct WorkspaceManifest {
   pub workspace: WorkspaceSection,
 }
 
+/// Parsed reusable package/library `joy.toml` manifest.
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+pub struct PackageManifest {
+  pub package: PackageSection,
+  #[serde(default)]
+  pub headers: PackageHeadersSection,
+  #[serde(default)]
+  pub dependencies: BTreeMap<String, DependencySpec>,
+}
+
 /// Workspace-level configuration for multi-project routing.
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
 pub struct WorkspaceSection {
@@ -30,12 +42,36 @@ pub struct WorkspaceSection {
   pub default_member: Option<String>,
 }
 
+/// Package metadata for reusable libraries.
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+pub struct PackageSection {
+  pub id: String,
+  pub version: String,
+  pub kind: PackageKind,
+}
+
+/// Package kind for reusable package manifests.
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "snake_case")]
+pub enum PackageKind {
+  HeaderOnly,
+  Cmake,
+}
+
+/// Header export metadata for reusable package manifests.
+#[derive(Debug, Clone, Default, Serialize, Deserialize, PartialEq, Eq)]
+pub struct PackageHeadersSection {
+  #[serde(default)]
+  pub include_roots: Vec<String>,
+}
+
 /// Top-level manifest document, either a project manifest or a workspace root manifest.
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
 #[serde(untagged)]
 pub enum ManifestDocument {
   Project(Manifest),
   Workspace(WorkspaceManifest),
+  Package(PackageManifest),
 }
 
 /// Project-level build configuration.
@@ -204,9 +240,9 @@ impl WorkspaceManifest {
     let doc = ManifestDocument::load(path)?;
     match doc {
       ManifestDocument::Workspace(ws) => Ok(ws),
-      ManifestDocument::Project(_) => Err(ManifestError::Validation(
-        "expected a workspace root manifest with `[workspace]`".into(),
-      )),
+      ManifestDocument::Project(_) | ManifestDocument::Package(_) => Err(
+        ManifestError::Validation("expected a workspace root manifest with `[workspace]`".into()),
+      ),
     }
   }
 
@@ -236,6 +272,70 @@ impl WorkspaceManifest {
   }
 }
 
+impl PackageManifest {
+  /// Load, parse, and validate a reusable package manifest from disk.
+  pub fn load(path: &Path) -> Result<Self, ManifestError> {
+    let doc = ManifestDocument::load(path)?;
+    match doc {
+      ManifestDocument::Package(pkg) => Ok(pkg),
+      ManifestDocument::Project(_) | ManifestDocument::Workspace(_) => {
+        Err(ManifestError::Validation("expected a package manifest with `[package]`".into()))
+      },
+    }
+  }
+
+  fn validate(&self) -> Result<(), ManifestError> {
+    if self.package.id.trim().is_empty() {
+      return Err(ManifestError::Validation("package.id must not be empty".into()));
+    }
+    let _ = PackageId::parse(&self.package.id).map_err(|err| {
+      ManifestError::Validation(format!("invalid package.id `{}`: {err}", self.package.id))
+    })?;
+    if self.package.version.trim().is_empty() {
+      return Err(ManifestError::Validation("package.version must not be empty".into()));
+    }
+    if self.headers.include_roots.iter().any(|path| path.trim().is_empty()) {
+      return Err(ManifestError::Validation(
+        "headers.include_roots entries must not be empty".into(),
+      ));
+    }
+    for (id, spec) in &self.dependencies {
+      let has_rev = !spec.rev.trim().is_empty();
+      let has_version = spec.version.as_deref().is_some_and(|v| !v.trim().is_empty());
+      if has_rev && has_version {
+        return Err(ManifestError::Validation(format!(
+          "dependency `{id}` cannot set both `rev` and `version`"
+        )));
+      }
+      if !has_rev && !has_version {
+        return Err(ManifestError::Validation(format!(
+          "dependency `{id}` must set either `rev` or `version`"
+        )));
+      }
+      if matches!(spec.source, DependencySource::Registry) && has_rev {
+        return Err(ManifestError::Validation(format!(
+          "dependency `{id}` uses source `registry` and must set `version` instead of `rev`"
+        )));
+      }
+    }
+    Ok(())
+  }
+
+  /// Return the dependency request as an exact rev (when present) or semver range.
+  pub fn dependency_requirement<'a>(
+    &'a self,
+    package: &str,
+  ) -> Option<DependencyRequirementRef<'a>> {
+    let spec = self.dependencies.get(package)?;
+    if let Some(version) = spec.version.as_deref()
+      && !version.trim().is_empty()
+    {
+      return Some(DependencyRequirementRef::Version(version));
+    }
+    Some(DependencyRequirementRef::Rev(if spec.rev.trim().is_empty() { "HEAD" } else { &spec.rev }))
+  }
+}
+
 impl ManifestDocument {
   /// Load a manifest document and determine whether it is a project or workspace manifest.
   pub fn load(path: &Path) -> Result<Self, ManifestError> {
@@ -248,6 +348,7 @@ impl ManifestDocument {
     match &doc {
       Self::Project(project) => project.validate()?,
       Self::Workspace(workspace) => workspace.validate()?,
+      Self::Package(package) => package.validate()?,
     }
     Ok(doc)
   }
@@ -351,7 +452,7 @@ mod tests {
 
   use super::{
     DependencyRequirementRef, DependencySource, DependencySpec, Manifest, ManifestDocument,
-    ProjectSection, ProjectTarget, WorkspaceManifest,
+    PackageKind, PackageManifest, ProjectSection, ProjectTarget, WorkspaceManifest,
   };
 
   #[test]
@@ -435,6 +536,74 @@ default_member = "apps/a"
       },
       other => panic!("expected workspace doc, got {other:?}"),
     }
+  }
+
+  #[test]
+  fn parses_package_manifest_document() {
+    let temp = TempDir::new().expect("tempdir");
+    let path = temp.path().join("joy.toml");
+    std::fs::write(
+      &path,
+      r#"
+[package]
+id = "harnesslabs/igneous"
+version = "0.3.0"
+kind = "header_only"
+
+[headers]
+include_roots = ["include"]
+
+[dependencies]
+"xsimd/xsimd" = { source = "github", rev = "HEAD" }
+"#,
+    )
+    .expect("write package manifest");
+
+    let doc = ManifestDocument::load(&path).expect("load doc");
+    match doc {
+      ManifestDocument::Package(pkg) => {
+        assert_eq!(pkg.package.id, "harnesslabs/igneous");
+        assert_eq!(pkg.package.kind, PackageKind::HeaderOnly);
+        assert_eq!(pkg.headers.include_roots, vec!["include"]);
+        assert!(pkg.dependencies.contains_key("xsimd/xsimd"));
+      },
+      other => panic!("expected package doc, got {other:?}"),
+    }
+  }
+
+  #[test]
+  fn package_manifest_dependency_requirement_prefers_semver_when_present() {
+    let pkg = PackageManifest {
+      package: super::PackageSection {
+        id: "harnesslabs/igneous".into(),
+        version: "0.3.0".into(),
+        kind: PackageKind::HeaderOnly,
+      },
+      headers: super::PackageHeadersSection { include_roots: vec!["include".into()] },
+      dependencies: BTreeMap::from([
+        (
+          "xsimd/xsimd".into(),
+          DependencySpec {
+            source: DependencySource::Registry,
+            rev: String::new(),
+            version: Some("^13".into()),
+          },
+        ),
+        (
+          "nlohmann/json".into(),
+          DependencySpec { source: DependencySource::Github, rev: "HEAD".into(), version: None },
+        ),
+      ]),
+    };
+
+    assert_eq!(
+      pkg.dependency_requirement("xsimd/xsimd"),
+      Some(DependencyRequirementRef::Version("^13"))
+    );
+    assert_eq!(
+      pkg.dependency_requirement("nlohmann/json"),
+      Some(DependencyRequirementRef::Rev("HEAD"))
+    );
   }
 
   #[test]

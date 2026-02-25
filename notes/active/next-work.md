@@ -1,8 +1,9 @@
-# Next Work (Post-Phase 19-37 Local Delivery)
+# Next Work (Post Phase 38-76 Delivery)
+
+Phase 38-76 (core dependency graph + nested dependencies + editor integration wave) is complete on this branch.
 
 Immediate follow-up queue:
 
-1. Commit the UX/docs wave and update `commit:` fields in active notes
-2. Update GitHub tracker issues/checklists with the validation snapshot (`just ci-pr`, `just ci-docs`)
-3. Push a branch / open PR and monitor CI checks
-4. After merge, archive the Phase 19-37 active notes and seed the next roadmap wave
+1. Seed the next roadmap wave (Phase 77+) based on post-Phase 38-76 gaps, release hardening, and real-world package adoption feedback
+2. Sync GitHub tracker issues/milestones (`#101`-`#146`) with local completion state when opening the delivery PR
+3. Run a release-focused polish pass (packaging, install docs, platform matrices) before first public release cut

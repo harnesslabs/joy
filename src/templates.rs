@@ -30,6 +30,7 @@ int main() {
 
 pub fn gitignore() -> &'static str {
   r#".joy/
+compile_commands.json
 build/
 *.o
 *.obj
@@ -75,5 +76,6 @@ entry = "src/main.cpp"
   fn gitignore_template_includes_local_joy_dir() {
     let template = gitignore();
     assert!(template.lines().any(|line| line == ".joy/"));
+    assert!(template.lines().any(|line| line == "compile_commands.json"));
   }
 }

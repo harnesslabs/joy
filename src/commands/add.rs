@@ -16,6 +16,8 @@ use crate::package_id::PackageId;
 use crate::project_env;
 use crate::registry::{RegistryError, RegistryRequirement, RegistryStore};
 
+use super::build;
+
 pub fn handle(args: AddArgs, runtime: RuntimeFlags) -> Result<CommandOutput, JoyError> {
   if runtime.frozen {
     return Err(JoyError::new(
@@ -144,9 +146,13 @@ pub fn handle(args: AddArgs, runtime: RuntimeFlags) -> Result<CommandOutput, Joy
     return Err(JoyError::new("add", "manifest_write_error", message, 1));
   }
 
-  let lockfile_warning = cwd.join("joy.lock").is_file().then_some(
-    "joy.lock exists and may be stale; future builds should refresh the lockfile".to_string(),
-  );
+  let lockfile_warning = if args.no_sync {
+    cwd.join("joy.lock").is_file().then_some(
+      "joy.lock exists and may be stale; future builds should refresh the lockfile".to_string(),
+    )
+  } else {
+    None
+  };
 
   let install_index_path = env_layout.state_dir.join("install-index.json");
   let mut install_index = InstallIndex::load_or_default(&install_index_path)
@@ -155,6 +161,30 @@ pub fn handle(args: AddArgs, runtime: RuntimeFlags) -> Result<CommandOutput, Joy
   install_index
     .save(&install_index_path)
     .map_err(|err| JoyError::new("add", "state_index_error", err.to_string(), 1))?;
+
+  if !args.no_sync {
+    let sync_result = build::sync_project(build::BuildOptions {
+      release: false,
+      target: None,
+      locked: false,
+      update_lock: true,
+      offline: runtime.offline,
+      progress: runtime.progress,
+    });
+    if let Err(err) = sync_result {
+      return Err(JoyError::new(
+        "add",
+        "add_sync_failed",
+        format!(
+          "dependency `{}` was added to `joy.toml`, but sync-lite failed: {}\nrerun `joy sync --update-lock`{}",
+          parsed_input.package_id,
+          err.message,
+          if runtime.offline { " (or rerun online to refresh cache state)" } else { "" }
+        ),
+        err.exit_code,
+      ));
+    }
+  }
 
   let mut human_builder = if changed {
     HumanMessageBuilder::new(format!("Added dependency `{}`", args.package))
@@ -173,6 +203,10 @@ pub fn handle(args: AddArgs, runtime: RuntimeFlags) -> Result<CommandOutput, Joy
   human_builder = human_builder
     .kv("resolved commit", fetched.resolved_commit.clone())
     .kv("headers installed", installed.link_path.display().to_string());
+  if !args.no_sync {
+    human_builder =
+      human_builder.line("- sync: refreshed dependency state, lockfile, and editor artifacts");
+  }
   if let Some(warning) = &lockfile_warning {
     human_builder = human_builder.warning(warning.clone());
   }

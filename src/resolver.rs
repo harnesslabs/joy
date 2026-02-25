@@ -6,6 +6,7 @@
 //! different commits within the same graph.
 
 use std::collections::{BTreeMap, VecDeque};
+use std::path::Path;
 
 use petgraph::Direction;
 use petgraph::algo::toposort;
@@ -13,7 +14,8 @@ use petgraph::graph::{DiGraph, NodeIndex};
 use thiserror::Error;
 
 use crate::fetch;
-use crate::manifest::{DependencyRequirementRef, DependencySource, Manifest};
+use crate::lockfile;
+use crate::manifest::{DependencyRequirementRef, DependencySource, Manifest, ManifestDocument};
 use crate::package_id::{PackageId, PackageIdError};
 use crate::recipes::RecipeStore;
 use crate::registry::{self, RegistryRequirement};
@@ -93,7 +95,7 @@ pub fn resolve_manifest(
   manifest: &Manifest,
   recipes: &RecipeStore,
 ) -> Result<ResolvedGraph, ResolverError> {
-  let registry_store =
+  let mut registry_store =
     if manifest.dependencies.values().any(|spec| matches!(spec.source, DependencySource::Registry))
     {
       Some(
@@ -103,69 +105,76 @@ pub fn resolve_manifest(
     } else {
       None
     };
-  resolve_manifest_with_selector(manifest, recipes, |package, request| {
-    match manifest
-      .dependencies
-      .get(package.as_str())
-      .map(|spec| &spec.source)
-      .unwrap_or(&DependencySource::Github)
-    {
-      DependencySource::Github => match request {
-        ResolveRequest::Rev(requested_rev) => {
-          let fetched = fetch::fetch_github(package, requested_rev)
-            .map_err(|source| ResolverError::Fetch { package: package.to_string(), source })?;
-          Ok(ResolvedSelection {
-            registry: None,
-            source_package: None,
-            requested_rev: fetched.requested_rev,
-            requested_requirement: None,
-            resolved_version: None,
-            resolved_commit: fetched.resolved_commit,
-          })
-        },
-        ResolveRequest::Version(version_req) => {
-          let fetched = fetch::fetch_github_semver(package, version_req)
-            .map_err(|source| ResolverError::Fetch { package: package.to_string(), source })?;
-          Ok(ResolvedSelection {
-            registry: None,
-            source_package: None,
-            requested_rev: fetched.requested_rev,
-            requested_requirement: fetched.requested_requirement,
-            resolved_version: fetched.resolved_version,
-            resolved_commit: fetched.resolved_commit,
-          })
-        },
-      },
-      DependencySource::Registry => {
-        let store = registry_store.as_ref().expect("registry store must be loaded");
-        let registry_requirement = match request {
-          ResolveRequest::Version(req) => RegistryRequirement::Semver(req.as_str()),
-          ResolveRequest::Rev(rev) => RegistryRequirement::ExactVersion(rev.as_str()),
-        };
-        let release = store.resolve(package.as_str(), registry_requirement).map_err(|source| {
-          ResolverError::RegistryResolve { package: package.to_string(), source }
-        })?;
-        let source_package = PackageId::parse(&release.source_package).map_err(|source| {
-          ResolverError::InvalidPackageId { package: release.source_package.clone(), source }
-        })?;
-        if source_package != *package {
-          return Err(ResolverError::RegistryAliasUnsupported {
-            package: package.to_string(),
-            source_package: release.source_package,
-          });
-        }
-        let fetched = fetch::fetch_github(package, &release.source_rev)
+  resolve_manifest_with_selector(manifest, recipes, |package, source, request| match source {
+    DependencySource::Github => match request {
+      ResolveRequest::Rev(requested_rev) => {
+        let fetched = fetch::fetch_github(package, requested_rev)
           .map_err(|source| ResolverError::Fetch { package: package.to_string(), source })?;
         Ok(ResolvedSelection {
-          registry: Some(release.registry),
-          source_package: Some(release.source_package),
+          registry: None,
+          source_package: None,
           requested_rev: fetched.requested_rev,
-          requested_requirement: release.requested_requirement,
-          resolved_version: Some(release.resolved_version),
+          requested_requirement: None,
+          resolved_version: None,
           resolved_commit: fetched.resolved_commit,
+          declared_deps: package_manifest_declared_dependencies(package, &fetched.source_dir)?,
         })
       },
-    }
+      ResolveRequest::Version(version_req) => {
+        let fetched = fetch::fetch_github_semver(package, version_req)
+          .map_err(|source| ResolverError::Fetch { package: package.to_string(), source })?;
+        Ok(ResolvedSelection {
+          registry: None,
+          source_package: None,
+          requested_rev: fetched.requested_rev,
+          requested_requirement: fetched.requested_requirement,
+          resolved_version: fetched.resolved_version,
+          resolved_commit: fetched.resolved_commit,
+          declared_deps: package_manifest_declared_dependencies(package, &fetched.source_dir)?,
+        })
+      },
+    },
+    DependencySource::Registry => {
+      if registry_store.is_none() {
+        registry_store = Some(
+          registry::RegistryStore::load_default()
+            .map_err(|source| ResolverError::RegistryLoad { source })?,
+        );
+      }
+      let store = registry_store.as_ref().expect("registry store must be loaded");
+      let registry_requirement = match request {
+        ResolveRequest::Version(req) => RegistryRequirement::Semver(req.as_str()),
+        ResolveRequest::Rev(rev) => RegistryRequirement::ExactVersion(rev.as_str()),
+      };
+      let release = store.resolve(package.as_str(), registry_requirement).map_err(|source| {
+        ResolverError::RegistryResolve { package: package.to_string(), source }
+      })?;
+      let source_package = PackageId::parse(&release.source_package).map_err(|source| {
+        ResolverError::InvalidPackageId { package: release.source_package.clone(), source }
+      })?;
+      if source_package != *package {
+        return Err(ResolverError::RegistryAliasUnsupported {
+          package: package.to_string(),
+          source_package: release.source_package,
+        });
+      }
+      let fetched = fetch::fetch_github(package, &release.source_rev)
+        .map_err(|source| ResolverError::Fetch { package: package.to_string(), source })?;
+      let declared_deps = registry_release_declared_dependencies_with_fallback(
+        package,
+        &fetched.source_dir,
+        release.manifest.as_ref(),
+      )?;
+      Ok(ResolvedSelection {
+        registry: Some(release.registry),
+        source_package: Some(release.source_package),
+        requested_rev: fetched.requested_rev,
+        requested_requirement: release.requested_requirement,
+        resolved_version: Some(release.resolved_version),
+        resolved_commit: fetched.resolved_commit,
+        declared_deps,
+      })
+    },
   })
 }
 
@@ -181,7 +190,7 @@ pub fn resolve_manifest_with<F>(
 where
   F: FnMut(&PackageId, &str) -> Result<String, ResolverError>,
 {
-  resolve_manifest_with_selector(manifest, recipes, |package, request| {
+  resolve_manifest_with_selector(manifest, recipes, |package, _source, request| {
     let requested = match request {
       ResolveRequest::Rev(rev) | ResolveRequest::Version(rev) => rev.as_str(),
     };
@@ -193,6 +202,7 @@ where
       requested_requirement: None,
       resolved_version: None,
       resolved_commit,
+      declared_deps: Vec::new(),
     })
   })
 }
@@ -204,7 +214,11 @@ fn resolve_manifest_with_selector<F>(
   mut resolve_selection: F,
 ) -> Result<ResolvedGraph, ResolverError>
 where
-  F: FnMut(&PackageId, &ResolveRequest) -> Result<ResolvedSelection, ResolverError>,
+  F: FnMut(
+    &PackageId,
+    &DependencySource,
+    &ResolveRequest,
+  ) -> Result<ResolvedSelection, ResolverError>,
 {
   // TODO(phase7): Split graph construction from transitive queue expansion to make semver-range
   // resolution pluggable without rewriting conflict/cycle handling.
@@ -230,7 +244,7 @@ where
   }
 
   while let Some(pending) = queue.pop_front() {
-    let selection = resolve_selection(&pending.package, &pending.request)?;
+    let selection = resolve_selection(&pending.package, &pending.source, &pending.request)?;
     let requested_rev = selection.requested_rev.clone();
     let resolved_commit = selection.resolved_commit.clone();
     let key = pending.package.to_string();
@@ -299,6 +313,17 @@ where
             requested_by: Some(key.clone()),
           });
         }
+      } else {
+        for dep in &selection.declared_deps {
+          queue.push_back(PendingDependency {
+            package: dep.package.clone(),
+            source: dep.source.clone(),
+            request: dep.request.clone(),
+            dependent: Some(idx),
+            direct: false,
+            requested_by: Some(key.clone()),
+          });
+        }
       }
 
       idx
@@ -336,6 +361,13 @@ enum ResolveRequest {
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
+struct DeclaredDependency {
+  package: PackageId,
+  source: DependencySource,
+  request: ResolveRequest,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
 struct ResolvedSelection {
   registry: Option<String>,
   source_package: Option<String>,
@@ -343,6 +375,114 @@ struct ResolvedSelection {
   requested_requirement: Option<String>,
   resolved_version: Option<String>,
   resolved_commit: String,
+  declared_deps: Vec<DeclaredDependency>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+enum PackageManifestMetadata {
+  Missing,
+  NotPackageManifest,
+  Package { digest: Option<String>, declared_deps: Vec<DeclaredDependency> },
+}
+
+fn package_manifest_declared_dependencies(
+  package: &PackageId,
+  source_dir: &Path,
+) -> Result<Vec<DeclaredDependency>, ResolverError> {
+  match inspect_package_manifest_metadata(package, source_dir)? {
+    PackageManifestMetadata::Missing | PackageManifestMetadata::NotPackageManifest => {
+      Ok(Vec::new())
+    },
+    PackageManifestMetadata::Package { declared_deps, .. } => Ok(declared_deps),
+  }
+}
+
+fn inspect_package_manifest_metadata(
+  package: &PackageId,
+  source_dir: &Path,
+) -> Result<PackageManifestMetadata, ResolverError> {
+  let manifest_path = source_dir.join("joy.toml");
+  if !manifest_path.exists() {
+    return Ok(PackageManifestMetadata::Missing);
+  }
+
+  let doc = ManifestDocument::load(&manifest_path).map_err(|source| {
+    ResolverError::PackageManifestLoad {
+      package: package.to_string(),
+      path: manifest_path.clone(),
+      source,
+    }
+  })?;
+  let ManifestDocument::Package(pkg_manifest) = doc else {
+    return Ok(PackageManifestMetadata::NotPackageManifest);
+  };
+
+  let mut declared = Vec::new();
+  for (raw_id, spec) in &pkg_manifest.dependencies {
+    let dep_package = PackageId::parse(raw_id)
+      .map_err(|source| ResolverError::InvalidPackageId { package: raw_id.clone(), source })?;
+    let request = match pkg_manifest.dependency_requirement(raw_id.as_str()) {
+      Some(DependencyRequirementRef::Version(version)) => ResolveRequest::Version(version.into()),
+      Some(DependencyRequirementRef::Rev(rev)) => ResolveRequest::Rev(rev.into()),
+      None => ResolveRequest::Rev("HEAD".into()),
+    };
+    declared.push(DeclaredDependency {
+      package: dep_package,
+      source: spec.source.clone(),
+      request,
+    });
+  }
+
+  let digest =
+    lockfile::compute_manifest_hash(&manifest_path).ok().map(|hash| format!("sha256:{hash}"));
+  Ok(PackageManifestMetadata::Package { digest, declared_deps: declared })
+}
+
+fn registry_release_declared_dependencies_with_fallback(
+  package: &PackageId,
+  source_dir: &Path,
+  registry_manifest: Option<&registry::RegistryManifestSummary>,
+) -> Result<Vec<DeclaredDependency>, ResolverError> {
+  match inspect_package_manifest_metadata(package, source_dir)? {
+    PackageManifestMetadata::Package { digest, declared_deps } => {
+      if let (Some(local_digest), Some(expected_digest)) =
+        (digest.as_deref(), registry_manifest.and_then(|m| m.digest.as_deref()))
+        && local_digest != expected_digest
+      {
+        return Err(ResolverError::PackageMetadataMismatch {
+          package: package.to_string(),
+          expected_digest: expected_digest.to_string(),
+          actual_digest: local_digest.to_string(),
+        });
+      }
+      Ok(declared_deps)
+    },
+    PackageManifestMetadata::Missing | PackageManifestMetadata::NotPackageManifest => {
+      match registry_manifest {
+        Some(summary) => registry_manifest_declared_dependencies(summary),
+        None => Ok(Vec::new()),
+      }
+    },
+  }
+}
+
+fn registry_manifest_declared_dependencies(
+  summary: &registry::RegistryManifestSummary,
+) -> Result<Vec<DeclaredDependency>, ResolverError> {
+  let mut declared = Vec::new();
+  for dep in &summary.dependencies {
+    let package = PackageId::parse(&dep.id)
+      .map_err(|source| ResolverError::InvalidPackageId { package: dep.id.clone(), source })?;
+    let request = if let Some(version) = dep.version.as_deref() {
+      ResolveRequest::Version(version.to_string())
+    } else if let Some(rev) = dep.rev.as_deref() {
+      ResolveRequest::Rev(if rev.trim().is_empty() { "HEAD".into() } else { rev.to_string() })
+    } else {
+      ResolveRequest::Rev("HEAD".into())
+    };
+    declared.push(DeclaredDependency { package, source: dep.source.clone(), request });
+  }
+  Ok(declared)
 }
 
 #[derive(Debug, Error)]
@@ -374,6 +514,17 @@ pub enum ResolverError {
     "registry package `{package}` currently maps to `{source_package}`, but alias package coordinates are not supported yet"
   )]
   RegistryAliasUnsupported { package: String, source_package: String },
+  #[error("failed to load package manifest for `{package}` at `{path}`: {source}")]
+  PackageManifestLoad {
+    package: String,
+    path: std::path::PathBuf,
+    #[source]
+    source: crate::manifest::ManifestError,
+  },
+  #[error(
+    "registry/package metadata mismatch for `{package}`: registry manifest digest `{expected_digest}` != fetched package manifest digest `{actual_digest}`"
+  )]
+  PackageMetadataMismatch { package: String, expected_digest: String, actual_digest: String },
   #[error("recipe for `{package}` depends on `{dependency}` without an explicit rev")]
   MissingTransitiveRev { package: String, dependency: String },
   #[error(
@@ -409,11 +560,14 @@ mod tests {
   use tempfile::TempDir;
 
   use super::{
-    ResolveRequest, ResolvedSelection, ResolverError, resolve_manifest_with,
+    DeclaredDependency, ResolveRequest, ResolvedSelection, ResolverError,
+    registry_release_declared_dependencies_with_fallback, resolve_manifest_with,
     resolve_manifest_with_selector,
   };
   use crate::manifest::{DependencySource, DependencySpec, Manifest, ProjectSection};
+  use crate::package_id::PackageId;
   use crate::recipes::RecipeStore;
+  use crate::registry::{RegistryManifestDependency, RegistryManifestSummary};
 
   #[test]
   fn builds_dag_and_orders_dependencies_before_dependents() {
@@ -508,7 +662,7 @@ include_roots = ["include"]
     );
 
     let resolved =
-      resolve_manifest_with_selector(&manifest, &recipes, |pkg, request| match request {
+      resolve_manifest_with_selector(&manifest, &recipes, |pkg, _source, request| match request {
         ResolveRequest::Version(req) if pkg.as_str() == "fmtlib/fmt" => Ok(ResolvedSelection {
           registry: None,
           source_package: None,
@@ -516,6 +670,7 @@ include_roots = ["include"]
           requested_requirement: Some(req.clone()),
           resolved_version: Some("11.1.2".into()),
           resolved_commit: "commit-fmt-11-1-2".into(),
+          declared_deps: Vec::new(),
         }),
         other => panic!("unexpected request: {other:?}"),
       })
@@ -602,6 +757,156 @@ packages = [{ id = "cycle/a", rev = "HEAD" }]
 
     match err {
       ResolverError::Cycle { package } => assert!(package.starts_with("cycle/")),
+      other => panic!("unexpected error: {other}"),
+    }
+  }
+
+  #[test]
+  fn expands_transitive_dependencies_from_declared_package_manifest_edges() {
+    let temp = TempDir::new().expect("tempdir");
+    write_recipe_store(temp.path(), &[]);
+    let recipes = RecipeStore::load_from_dir(temp.path()).expect("recipes");
+    let manifest = manifest_with_deps([("harnesslabs/igneous", "HEAD")]);
+
+    let resolved = resolve_manifest_with_selector(&manifest, &recipes, |pkg, _source, request| {
+      match (pkg.as_str(), request) {
+        ("harnesslabs/igneous", ResolveRequest::Rev(rev)) if rev == "HEAD" => {
+          Ok(ResolvedSelection {
+            registry: None,
+            source_package: None,
+            requested_rev: "HEAD".into(),
+            requested_requirement: None,
+            resolved_version: None,
+            resolved_commit: "commit-igneous".into(),
+            declared_deps: vec![DeclaredDependency {
+              package: PackageId::parse("xsimd/xsimd").expect("package id"),
+              source: DependencySource::Github,
+              request: ResolveRequest::Rev("HEAD".into()),
+            }],
+          })
+        },
+        ("xsimd/xsimd", ResolveRequest::Rev(rev)) if rev == "HEAD" => Ok(ResolvedSelection {
+          registry: None,
+          source_package: None,
+          requested_rev: "HEAD".into(),
+          requested_requirement: None,
+          resolved_version: None,
+          resolved_commit: "commit-xsimd".into(),
+          declared_deps: Vec::new(),
+        }),
+        other => panic!("unexpected request: {other:?}"),
+      }
+    })
+    .expect("resolve");
+
+    let order = resolved.build_order_ids().expect("toposort");
+    let xsimd_idx = order.iter().position(|id| id == "xsimd/xsimd").expect("xsimd in order");
+    let igneous_idx =
+      order.iter().position(|id| id == "harnesslabs/igneous").expect("igneous in order");
+    assert!(xsimd_idx < igneous_idx, "transitive dep should precede parent: {order:?}");
+    assert_eq!(
+      resolved.dependency_ids("harnesslabs/igneous").expect("igneous deps"),
+      vec!["xsimd/xsimd".to_string()]
+    );
+  }
+
+  #[test]
+  fn curated_recipe_dependencies_take_precedence_over_declared_package_manifest_edges() {
+    let temp = TempDir::new().expect("tempdir");
+    write_recipe_store(
+      temp.path(),
+      &[(
+        "igneous",
+        "harnesslabs/igneous",
+        r#"
+[deps]
+packages = [{ id = "curated/transitive", rev = "v1" }]
+"#,
+      )],
+    );
+    let recipes = RecipeStore::load_from_dir(temp.path()).expect("recipes");
+    let manifest = manifest_with_deps([("harnesslabs/igneous", "HEAD")]);
+
+    let resolved = resolve_manifest_with_selector(&manifest, &recipes, |pkg, _source, request| {
+      match (pkg.as_str(), request) {
+        ("harnesslabs/igneous", ResolveRequest::Rev(rev)) if rev == "HEAD" => {
+          Ok(ResolvedSelection {
+            registry: None,
+            source_package: None,
+            requested_rev: "HEAD".into(),
+            requested_requirement: None,
+            resolved_version: None,
+            resolved_commit: "commit-igneous".into(),
+            declared_deps: vec![DeclaredDependency {
+              package: PackageId::parse("ignored/from-manifest").expect("package id"),
+              source: DependencySource::Github,
+              request: ResolveRequest::Rev("HEAD".into()),
+            }],
+          })
+        },
+        ("curated/transitive", ResolveRequest::Rev(rev)) if rev == "v1" => Ok(ResolvedSelection {
+          registry: None,
+          source_package: None,
+          requested_rev: "v1".into(),
+          requested_requirement: None,
+          resolved_version: None,
+          resolved_commit: "commit-curated-v1".into(),
+          declared_deps: Vec::new(),
+        }),
+        other => panic!("unexpected request: {other:?}"),
+      }
+    })
+    .expect("resolve");
+
+    assert!(resolved.package("curated/transitive").is_some());
+    assert!(resolved.package("ignored/from-manifest").is_none());
+    assert_eq!(
+      resolved.dependency_ids("harnesslabs/igneous").expect("igneous deps"),
+      vec!["curated/transitive".to_string()]
+    );
+  }
+
+  #[test]
+  fn registry_manifest_digest_mismatch_is_reported_when_package_manifest_exists() {
+    let temp = TempDir::new().expect("tempdir");
+    std::fs::write(
+      temp.path().join("joy.toml"),
+      r#"[package]
+id = "harnesslabs/igneous"
+version = "0.3.0"
+kind = "header_only"
+
+[headers]
+include_roots = ["include"]
+
+[dependencies]
+"xsimd/xsimd" = { source = "github", rev = "HEAD" }
+"#,
+    )
+    .expect("write package manifest");
+
+    let package = PackageId::parse("harnesslabs/igneous").expect("package id");
+    let err = registry_release_declared_dependencies_with_fallback(
+      &package,
+      temp.path(),
+      Some(&RegistryManifestSummary {
+        digest: Some("sha256:not-the-real-digest".into()),
+        kind: Some("header_only".into()),
+        headers_include_roots: vec!["include".into()],
+        dependencies: vec![RegistryManifestDependency {
+          id: "xsimd/xsimd".into(),
+          source: DependencySource::Github,
+          rev: Some("HEAD".into()),
+          version: None,
+        }],
+      }),
+    )
+    .expect_err("mismatch expected");
+
+    match err {
+      ResolverError::PackageMetadataMismatch { package, .. } => {
+        assert_eq!(package, "harnesslabs/igneous")
+      },
       other => panic!("unexpected error: {other}"),
     }
   }

@@ -89,6 +89,12 @@ fn doctor_json_reports_environment_checks() {
   assert!(payload["data"]["cache"]["ok"].is_boolean());
   assert!(payload["data"]["recipes"]["ok"].is_boolean());
   assert!(payload["data"]["toolchain"]["ok"].is_boolean());
+  assert!(payload["data"]["project"].is_object() || payload["data"]["project"].is_null());
+  assert!(payload["data"]["artifacts"].is_object() || payload["data"]["artifacts"].is_null());
+  assert!(payload["data"]["lockfile"].is_object() || payload["data"]["lockfile"].is_null());
+  assert!(payload["data"]["dependency_metadata"].is_object());
+  assert!(payload["data"]["project_warnings"].is_array());
+  assert!(payload["data"]["project_hints"].is_array());
 }
 
 #[test]

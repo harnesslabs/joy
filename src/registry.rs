@@ -16,6 +16,7 @@ use thiserror::Error;
 
 use crate::fetch;
 use crate::global_cache::{GlobalCache, GlobalCacheError};
+use crate::manifest::DependencySource;
 use crate::output::progress_detail_tty;
 use crate::package_id::PackageId;
 
@@ -38,6 +39,7 @@ pub struct ResolvedRegistryRelease {
   pub source_kind: RegistrySourceKind,
   pub source_package: String,
   pub source_rev: String,
+  pub manifest: Option<RegistryManifestSummary>,
 }
 
 /// Supported source backends for a registry release entry.
@@ -52,6 +54,24 @@ impl RegistrySourceKind {
       Self::Github => "github",
     }
   }
+}
+
+/// Optional embedded package-manifest summary from registry index v2 releases.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct RegistryManifestSummary {
+  pub digest: Option<String>,
+  pub kind: Option<String>,
+  pub headers_include_roots: Vec<String>,
+  pub dependencies: Vec<RegistryManifestDependency>,
+}
+
+/// A single dependency edge declared inside an embedded registry manifest summary.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct RegistryManifestDependency {
+  pub id: String,
+  pub source: DependencySource,
+  pub rev: Option<String>,
+  pub version: Option<String>,
 }
 
 /// Loaded registry index with deterministic package lookup and version selection.
@@ -139,6 +159,7 @@ impl RegistryStore {
       source_kind: selected.raw.source,
       source_package: selected.raw.package.clone(),
       source_rev: selected.raw.rev.clone(),
+      manifest: selected.raw.manifest.clone().map(Into::into),
     })
   }
 
@@ -202,7 +223,7 @@ fn load_registry_from_checkout(
     path: index_path.clone(),
     source: Box::new(source),
   })?;
-  if parsed.version != 1 {
+  if parsed.version != 1 && parsed.version != 2 {
     return Err(RegistryError::UnsupportedIndexVersion(parsed.version));
   }
 
@@ -259,6 +280,52 @@ fn load_registry_from_checkout(
             )));
           }
         },
+      }
+      if let Some(manifest) = &release.manifest {
+        if let Some(digest) = &manifest.digest
+          && digest.trim().is_empty()
+        {
+          return Err(RegistryError::Validation(format!(
+            "registry release `{}` for `{}` has empty manifest digest",
+            release.version, pkg.id
+          )));
+        }
+        if let Some(kind) = &manifest.kind
+          && kind.trim().is_empty()
+        {
+          return Err(RegistryError::Validation(format!(
+            "registry release `{}` for `{}` has empty manifest kind",
+            release.version, pkg.id
+          )));
+        }
+        if manifest.headers_include_roots.iter().any(|root| root.trim().is_empty()) {
+          return Err(RegistryError::Validation(format!(
+            "registry release `{}` for `{}` has empty manifest headers_include_roots entry",
+            release.version, pkg.id
+          )));
+        }
+        for dep in &manifest.dependencies {
+          let _ = PackageId::parse(&dep.id).map_err(|_| {
+            RegistryError::Validation(format!(
+              "registry release `{}` for `{}` has invalid manifest dependency id `{}`",
+              release.version, pkg.id, dep.id
+            ))
+          })?;
+          let has_rev = dep.rev.as_deref().is_some_and(|rev| !rev.trim().is_empty());
+          let has_version = dep.version.as_deref().is_some_and(|v| !v.trim().is_empty());
+          if has_rev == has_version {
+            return Err(RegistryError::Validation(format!(
+              "registry release `{}` for `{}` manifest dependency `{}` must set exactly one of `rev` or `version`",
+              release.version, pkg.id, dep.id
+            )));
+          }
+          if matches!(dep.source, DependencySource::Registry) && has_rev {
+            return Err(RegistryError::Validation(format!(
+              "registry release `{}` for `{}` manifest dependency `{}` uses source `registry` and must set `version`",
+              release.version, pkg.id, dep.id
+            )));
+          }
+        }
       }
       releases.push(RegistryRelease { version, raw: release });
     }
@@ -507,6 +574,47 @@ struct RegistryReleaseEntry {
   source: RegistrySourceKind,
   package: String,
   rev: String,
+  #[serde(default)]
+  manifest: Option<RegistryManifestSummaryEntry>,
+}
+
+#[derive(Debug, Clone, Deserialize)]
+struct RegistryManifestSummaryEntry {
+  #[serde(default)]
+  digest: Option<String>,
+  #[serde(default)]
+  kind: Option<String>,
+  #[serde(default)]
+  headers_include_roots: Vec<String>,
+  #[serde(default)]
+  dependencies: Vec<RegistryManifestDependencyEntry>,
+}
+
+#[derive(Debug, Clone, Deserialize)]
+struct RegistryManifestDependencyEntry {
+  id: String,
+  source: DependencySource,
+  #[serde(default)]
+  rev: Option<String>,
+  #[serde(default)]
+  version: Option<String>,
+}
+
+impl From<RegistryManifestSummaryEntry> for RegistryManifestSummary {
+  fn from(value: RegistryManifestSummaryEntry) -> Self {
+    Self {
+      digest: value.digest,
+      kind: value.kind,
+      headers_include_roots: value.headers_include_roots,
+      dependencies: value.dependencies.into_iter().map(Into::into).collect(),
+    }
+  }
+}
+
+impl From<RegistryManifestDependencyEntry> for RegistryManifestDependency {
+  fn from(value: RegistryManifestDependencyEntry) -> Self {
+    Self { id: value.id, source: value.source, rev: value.rev, version: value.version }
+  }
 }
 
 impl<'de> Deserialize<'de> for RegistrySourceKind {
@@ -653,6 +761,83 @@ rev = "v11.1.2"
     assert_eq!(resolved.source_kind.as_str(), "github");
     assert_eq!(resolved.source_package, "fmtlib/fmt");
     assert_eq!(resolved.source_rev, "v11.1.2");
+    assert!(resolved.manifest.is_none());
+  }
+
+  #[test]
+  fn parses_registry_index_v2_embedded_manifest_summary() {
+    let temp = TempDir::new().expect("tempdir");
+    write_index(
+      temp.path(),
+      r#"version = 2
+
+[[packages]]
+id = "harnesslabs/igneous"
+
+[[packages.versions]]
+version = "0.3.0"
+source = "github"
+package = "harnesslabs/igneous"
+rev = "v0.3.0"
+
+[packages.versions.manifest]
+digest = "sha256:deadbeef"
+kind = "header_only"
+headers_include_roots = ["include"]
+
+[[packages.versions.manifest.dependencies]]
+id = "xsimd/xsimd"
+source = "registry"
+version = "^13"
+"#,
+    );
+
+    let registry = RegistryStore::load_from_dir("default", temp.path()).expect("load registry");
+    let resolved = registry
+      .resolve("harnesslabs/igneous", RegistryRequirement::ExactVersion("0.3.0"))
+      .expect("resolve");
+
+    let manifest = resolved.manifest.expect("embedded manifest summary");
+    assert_eq!(manifest.digest.as_deref(), Some("sha256:deadbeef"));
+    assert_eq!(manifest.kind.as_deref(), Some("header_only"));
+    assert_eq!(manifest.headers_include_roots, vec!["include"]);
+    assert_eq!(manifest.dependencies.len(), 1);
+    assert_eq!(manifest.dependencies[0].id, "xsimd/xsimd");
+    assert_eq!(manifest.dependencies[0].source, crate::manifest::DependencySource::Registry);
+    assert_eq!(manifest.dependencies[0].version.as_deref(), Some("^13"));
+    assert_eq!(manifest.dependencies[0].rev, None);
+  }
+
+  #[test]
+  fn rejects_invalid_registry_v2_manifest_dependency_requirement_shape() {
+    let temp = TempDir::new().expect("tempdir");
+    write_index(
+      temp.path(),
+      r#"version = 2
+
+[[packages]]
+id = "harnesslabs/igneous"
+
+[[packages.versions]]
+version = "0.3.0"
+source = "github"
+package = "harnesslabs/igneous"
+rev = "v0.3.0"
+
+[packages.versions.manifest]
+kind = "header_only"
+
+[[packages.versions.manifest.dependencies]]
+id = "xsimd/xsimd"
+source = "registry"
+rev = "v1"
+version = "^1"
+"#,
+    );
+
+    let err =
+      RegistryStore::load_from_dir("default", temp.path()).expect_err("expected validation");
+    assert!(err.to_string().contains("must set exactly one of `rev` or `version`"));
   }
 
   #[test]

@@ -36,6 +36,12 @@ pub struct LockedPackage {
   pub resolved_ref: Option<String>,
   #[serde(default)]
   pub recipe: Option<String>,
+  #[serde(default)]
+  pub metadata_source: Option<String>,
+  #[serde(default)]
+  pub package_manifest_digest: Option<String>,
+  #[serde(default)]
+  pub declared_deps_source: Option<String>,
   pub header_only: bool,
   #[serde(default)]
   pub header_roots: Vec<String>,
@@ -147,6 +153,9 @@ mod tests {
         resolved_commit: "deadbeef".into(),
         resolved_ref: Some("refs/heads/main".into()),
         recipe: Some("nlohmann_json".into()),
+        metadata_source: Some("recipe".into()),
+        package_manifest_digest: None,
+        declared_deps_source: Some("recipe".into()),
         header_only: true,
         header_roots: vec!["include".into()],
         deps: Vec::new(),
