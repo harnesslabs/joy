@@ -14,7 +14,8 @@ It aims to make common C++ workflows feel predictable and reproducible:
 
 The full user guide and reference docs live in the mdBook:
 
-- Live docs (GitHub Pages): <https://harnesslabs.github.io/joy/>
+- Live docs (custom domain): <https://joy.harnesslabs.dev/>
+- GitHub Pages fallback URL: <https://harnesslabs.github.io/joy/>
 - Local docs source: [`book/`](book/)
 
 ## Status (Pre-1.0)

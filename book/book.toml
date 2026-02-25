@@ -15,7 +15,7 @@ default-theme = "light"
 preferred-dark-theme = "navy"
 git-repository-url = "https://github.com/harnesslabs/joy"
 edit-url-template = "https://github.com/harnesslabs/joy/edit/main/book/{path}"
-site-url = "/joy/"
+site-url = "/"
 additional-css = ["theme/custom.css"]
 smart-punctuation = true
 

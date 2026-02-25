@@ -82,6 +82,9 @@ jobs:
       - name: Build docs
         run: mdbook build book
 
+      - name: Write custom domain CNAME
+        run: echo "joy.harnesslabs.dev" > book/dist/CNAME
+
       - name: Configure Pages
         uses: actions/configure-pages@v5
 

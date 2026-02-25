@@ -24,7 +24,7 @@ Human UX controls:
   joy --progress never build
 
 Docs:
-  https://harnesslabs.github.io/joy/
+  https://joy.harnesslabs.dev/
 ";
 
 #[derive(Debug, Parser)]
