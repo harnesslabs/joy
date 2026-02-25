@@ -288,6 +288,9 @@ pub enum Commands {
   /// Explain why a dependency is present in the resolved graph.
   #[command(after_help = "Examples:\n  joy why nlohmann/json\n  joy why fmtlib/fmt --locked")]
   Why(WhyArgs),
+  /// Report available updates for direct and transitive dependencies.
+  #[command(after_help = "Examples:\n  joy outdated\n  joy --json outdated")]
+  Outdated(OutdatedArgs),
   /// Emit machine-oriented project/dependency/editor metadata.
   #[command(after_help = "Examples:\n  joy metadata\n  joy --json metadata")]
   Metadata(MetadataArgs),
@@ -357,6 +360,9 @@ pub struct WhyArgs {
   #[arg(long)]
   pub locked: bool,
 }
+
+#[derive(Debug, Args)]
+pub struct OutdatedArgs {}
 
 #[derive(Debug, Args)]
 pub struct MetadataArgs {}
@@ -539,6 +545,15 @@ mod tests {
         assert!(args.locked);
       },
       other => panic!("expected why, got {other:?}"),
+    }
+  }
+
+  #[test]
+  fn parses_outdated_command() {
+    let cli = Cli::parse_from(["joy", "outdated"]);
+    match cli.command {
+      Commands::Outdated(_) => {},
+      other => panic!("expected outdated, got {other:?}"),
     }
   }
 

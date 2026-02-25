@@ -30,6 +30,7 @@ pub fn handle(args: WhyArgs, runtime: RuntimeFlags) -> Result<CommandOutput, Joy
   }
   let manifest = Manifest::load(&manifest_path)
     .map_err(|err| JoyError::new("why", "manifest_parse_error", err.to_string(), 1))?;
+  let provenance_overlay = load_fresh_lockfile_provenance_overlay(&cwd, &manifest_path);
 
   let mut roots = manifest.dependencies.keys().cloned().collect::<Vec<_>>();
   roots.sort();
@@ -52,7 +53,23 @@ pub fn handle(args: WhyArgs, runtime: RuntimeFlags) -> Result<CommandOutput, Joy
     find_paths(&roots, &args.package, |id| resolved.dependency_ids(id).unwrap_or_default());
 
   let pkg = resolved.package(&args.package).expect("checked");
-  let human = render_why_human(&args.package, &paths);
+  let provenance = pkg.recipe_slug.as_ref().map(|_| "recipe".to_string()).or_else(|| {
+    provenance_overlay
+      .as_ref()
+      .and_then(|m| m.get(args.package.as_str()))
+      .and_then(|p| p.metadata_source.clone())
+  });
+  let package_manifest_digest = provenance_overlay
+    .as_ref()
+    .and_then(|m| m.get(args.package.as_str()))
+    .and_then(|p| p.package_manifest_digest.clone());
+  let declared_deps_source = pkg.recipe_slug.as_ref().map(|_| "recipe".to_string()).or_else(|| {
+    provenance_overlay
+      .as_ref()
+      .and_then(|m| m.get(args.package.as_str()))
+      .and_then(|p| p.declared_deps_source.clone())
+  });
+  let human = render_why_human(&args.package, &paths, provenance.as_deref());
   Ok(CommandOutput::new(
     "why",
     human,
@@ -76,6 +93,9 @@ pub fn handle(args: WhyArgs, runtime: RuntimeFlags) -> Result<CommandOutput, Joy
         "resolved_commit": pkg.resolved_commit,
         "header_only": pkg.header_only,
         "recipe": pkg.recipe_slug,
+        "metadata_source": provenance,
+        "package_manifest_digest": package_manifest_digest,
+        "declared_deps_source": declared_deps_source,
       }
     }),
   ))
@@ -125,7 +145,7 @@ fn handle_locked(
 
   let paths =
     find_paths(roots, target, |id| by_id.get(id).map(|p| p.deps.clone()).unwrap_or_default());
-  let human = render_why_human(target, &paths);
+  let human = render_why_human(target, &paths, pkg.metadata_source.as_deref());
   Ok(CommandOutput::new(
     "why",
     human,
@@ -146,12 +166,15 @@ fn handle_locked(
         "resolved_commit": pkg.resolved_commit,
         "header_only": pkg.header_only,
         "recipe": pkg.recipe,
+        "metadata_source": pkg.metadata_source,
+        "package_manifest_digest": pkg.package_manifest_digest,
+        "declared_deps_source": pkg.declared_deps_source,
       }
     }),
   ))
 }
 
-fn render_why_human(target: &str, paths: &[Vec<String>]) -> String {
+fn render_why_human(target: &str, paths: &[Vec<String>], metadata_source: Option<&str>) -> String {
   if paths.is_empty() {
     return crate::output::HumanMessageBuilder::new(format!(
       "No dependency path found for `{target}`"
@@ -161,6 +184,9 @@ fn render_why_human(target: &str, paths: &[Vec<String>]) -> String {
   }
 
   let mut builder = crate::output::HumanMessageBuilder::new(format!("Why `{target}` is present"));
+  if let Some(source) = metadata_source {
+    builder = builder.kv("metadata", source.to_string());
+  }
   for path in paths {
     builder = builder.line(format!("- {}", path.join(" -> ")));
   }
@@ -246,4 +272,40 @@ fn map_resolver_error(err: resolver::ResolverError) -> JoyError {
     _ => "dependency_resolve_failed",
   };
   JoyError::new("why", code, err.to_string(), 1)
+}
+
+#[derive(Debug, Clone)]
+struct ProvenanceOverlay {
+  metadata_source: Option<String>,
+  package_manifest_digest: Option<String>,
+  declared_deps_source: Option<String>,
+}
+
+fn load_fresh_lockfile_provenance_overlay(
+  cwd: &std::path::Path,
+  manifest_path: &std::path::Path,
+) -> Option<BTreeMap<String, ProvenanceOverlay>> {
+  let lockfile_path = cwd.join("joy.lock");
+  let lock = lockfile::Lockfile::load(&lockfile_path).ok()?;
+  let manifest_hash = lockfile::compute_manifest_hash(manifest_path).ok()?;
+  if lock.manifest_hash != manifest_hash {
+    return None;
+  }
+
+  Some(
+    lock
+      .packages
+      .into_iter()
+      .map(|pkg| {
+        (
+          pkg.id,
+          ProvenanceOverlay {
+            metadata_source: pkg.metadata_source,
+            package_manifest_digest: pkg.package_manifest_digest,
+            declared_deps_source: pkg.declared_deps_source,
+          },
+        )
+      })
+      .collect(),
+  )
 }

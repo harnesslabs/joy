@@ -479,6 +479,13 @@ fn update_local_registry_index(work: &Path, package: &str, versions: &[(&str, &s
   run_git(Some(work), ["push", "origin", "HEAD:refs/heads/main"]).expect("git push updated index");
 }
 
+fn update_local_registry_index_raw(work: &Path, index_contents: &str) {
+  fs::write(work.join("index.toml"), index_contents).expect("write index");
+  run_git(Some(work), ["add", "index.toml"]).expect("git add updated index");
+  run_git(Some(work), ["commit", "-m", "update registry index"]).expect("git commit updated index");
+  run_git(Some(work), ["push", "origin", "HEAD:refs/heads/main"]).expect("git push updated index");
+}
+
 #[test]
 fn add_mutates_manifest_and_creates_local_env() {
   let temp = TempDir::new().expect("tempdir");
@@ -1203,6 +1210,7 @@ fn metadata_and_why_and_tree_locked_use_graph_and_lockfile_state() {
   let why_payload = json_stdout(&why_assert.get_output().stdout);
   assert_eq!(why_payload["command"], "why");
   assert_eq!(why_payload["data"]["locked"], true);
+  assert_eq!(why_payload["data"]["package_info"]["metadata_source"].as_str(), Some("recipe"));
   let first_path = why_payload["data"]["paths"]
     .as_array()
     .expect("paths")
@@ -1223,9 +1231,11 @@ fn metadata_and_why_and_tree_locked_use_graph_and_lockfile_state() {
   let tree_payload = json_stdout(&tree_assert.get_output().stdout);
   assert_eq!(tree_payload["command"], "tree");
   let packages = tree_payload["data"]["packages"].as_array().expect("packages");
-  assert!(
-    packages.iter().any(|pkg| pkg.get("id").and_then(|v| v.as_str()) == Some("nlohmann/json"))
-  );
+  let json_pkg = packages
+    .iter()
+    .find(|pkg| pkg.get("id").and_then(|v| v.as_str()) == Some("nlohmann/json"))
+    .expect("nlohmann/json tree package");
+  assert_eq!(json_pkg["metadata_source"].as_str(), Some("recipe"));
 }
 
 #[test]
@@ -1332,11 +1342,19 @@ include_roots = ["include"]
     .find(|pkg| pkg.get("id").and_then(|v| v.as_str()) == Some("harnesslabs/igneous"))
     .expect("igneous package");
   assert_eq!(igneous_pkg["deps"], serde_json::json!(["xsimd/xsimd"]));
+  assert_eq!(igneous_pkg["metadata_source"].as_str(), Some("package_manifest"));
+  assert_eq!(igneous_pkg["declared_deps_source"].as_str(), Some("package_manifest"));
+  assert!(
+    igneous_pkg["package_manifest_digest"]
+      .as_str()
+      .is_some_and(|digest| digest.starts_with("sha256:"))
+  );
   let xsimd_pkg = tree_packages
     .iter()
     .find(|pkg| pkg.get("id").and_then(|v| v.as_str()) == Some("xsimd/xsimd"))
     .expect("xsimd package");
   assert_eq!(xsimd_pkg["direct"], false);
+  assert_eq!(xsimd_pkg["metadata_source"].as_str(), Some("none"));
 
   let mut why = cargo_bin_cmd!("joy");
   let why_assert = why
@@ -1349,6 +1367,7 @@ include_roots = ["include"]
   let why_payload = json_stdout(&why_assert.get_output().stdout);
   assert_eq!(why_payload["command"], "why");
   assert_eq!(why_payload["data"]["locked"], false);
+  assert_eq!(why_payload["data"]["package_info"]["metadata_source"].as_str(), Some("none"));
   assert!(
     why_payload["data"]["paths"]
       .as_array()
@@ -1356,6 +1375,44 @@ include_roots = ["include"]
       .iter()
       .any(|path| path == &serde_json::json!(["harnesslabs/igneous", "xsimd/xsimd"])),
     "expected why to show nested path"
+  );
+}
+
+#[test]
+fn doctor_reports_missing_graph_and_compile_db_for_project_with_dependencies() {
+  let temp = TempDir::new().expect("tempdir");
+  init_project(&temp);
+  append_manifest_dependency(&temp, "nlohmann/json", "HEAD");
+
+  let mut doctor = cargo_bin_cmd!("joy");
+  let assert = doctor.current_dir(temp.path()).args(["--json", "doctor"]).assert().success();
+  let payload = json_stdout(&assert.get_output().stdout);
+  assert_eq!(payload["command"], "doctor");
+  assert_eq!(payload["data"]["project"]["present"], true);
+  assert_eq!(payload["data"]["project"]["manifest_kind"], "project");
+  assert_eq!(payload["data"]["project"]["direct_dependency_count"], 1);
+  assert_eq!(payload["data"]["artifacts"]["dependency_graph"]["present"], false);
+  assert_eq!(payload["data"]["artifacts"]["root_compile_commands"]["present"], false);
+  assert!(
+    payload["data"]["project_warnings"]
+      .as_array()
+      .expect("project warnings")
+      .iter()
+      .any(|w| w.as_str().is_some_and(|msg| msg.contains("Dependency graph artifact is missing")))
+  );
+  assert!(
+    payload["data"]["project_warnings"]
+      .as_array()
+      .expect("project warnings")
+      .iter()
+      .any(|w| w.as_str().is_some_and(|msg| msg.contains("compile_commands.json")))
+  );
+  assert!(
+    payload["data"]["project_hints"]
+      .as_array()
+      .expect("project hints")
+      .iter()
+      .any(|h| h.as_str().is_some_and(|msg| msg.contains("joy sync") || msg.contains("joy build")))
   );
 }
 
@@ -2067,6 +2124,176 @@ fn registry_add_tree_sync_and_offline_tree_include_registry_metadata() {
     .args(["--json", "--offline", "tree"])
     .assert()
     .success();
+}
+
+#[test]
+fn outdated_reports_direct_and_transitive_registry_updates() {
+  let temp = TempDir::new().expect("tempdir");
+  init_project(&temp);
+  if !git_is_available() {
+    eprintln!("skipping test: git is not available");
+    return;
+  }
+
+  let pkg_remote_base = TempDir::new().expect("pkg remote base");
+  let Some((_nlohmann_bare, _nlohmann_commit)) = setup_local_github_remote_in_base(
+    pkg_remote_base.path(),
+    "nlohmann/json",
+    &[("include/nlohmann/json.hpp", "// nlohmann header\n")],
+  ) else {
+    return;
+  };
+  let Some((_xsimd_bare, _xsimd_commit)) = setup_local_github_remote_in_base(
+    pkg_remote_base.path(),
+    "xsimd/xsimd",
+    &[("include/xsimd/xsimd.hpp", "// xsimd header\n")],
+  ) else {
+    return;
+  };
+  let Some((_igneous_bare, _igneous_commit)) = setup_local_github_remote_in_base(
+    pkg_remote_base.path(),
+    "harnesslabs/igneous",
+    &[
+      (
+        "joy.toml",
+        r#"[package]
+id = "harnesslabs/igneous"
+version = "0.3.0"
+kind = "header_only"
+
+[headers]
+include_roots = ["include"]
+
+[dependencies]
+"xsimd/xsimd" = { source = "registry", version = "^1" }
+"#,
+      ),
+      ("include/igneous/igneous.hpp", "// igneous header\n"),
+    ],
+  ) else {
+    return;
+  };
+
+  let registry_v1_initial = r#"version = 1
+
+[[packages]]
+id = "nlohmann/json"
+
+[[packages.versions]]
+version = "1.0.0"
+source = "github"
+package = "nlohmann/json"
+rev = "HEAD"
+
+[[packages]]
+id = "xsimd/xsimd"
+
+[[packages.versions]]
+version = "1.0.0"
+source = "github"
+package = "xsimd/xsimd"
+rev = "HEAD"
+"#;
+  let Some((_registry_remote_base, registry_work, registry_bare_repo)) =
+    setup_local_registry_index_raw(registry_v1_initial)
+  else {
+    return;
+  };
+
+  let joy_home = temp.path().join("joy-home");
+
+  let mut add_direct = cargo_bin_cmd!("joy");
+  add_direct
+    .current_dir(temp.path())
+    .env("JOY_GITHUB_BASE", pkg_remote_base.path())
+    .env("JOY_REGISTRY_DEFAULT", &registry_bare_repo)
+    .env("JOY_HOME", &joy_home)
+    .args(["add", "registry:nlohmann/json", "--version", "^1"])
+    .assert()
+    .success();
+
+  let mut add_igneous = cargo_bin_cmd!("joy");
+  add_igneous
+    .current_dir(temp.path())
+    .env("JOY_GITHUB_BASE", pkg_remote_base.path())
+    .env("JOY_REGISTRY_DEFAULT", &registry_bare_repo)
+    .env("JOY_HOME", &joy_home)
+    .args(["add", "harnesslabs/igneous"])
+    .assert()
+    .success();
+
+  let registry_v1_updated = r#"version = 1
+
+[[packages]]
+id = "nlohmann/json"
+
+[[packages.versions]]
+version = "1.0.0"
+source = "github"
+package = "nlohmann/json"
+rev = "HEAD"
+
+[[packages.versions]]
+version = "1.2.0"
+source = "github"
+package = "nlohmann/json"
+rev = "HEAD"
+
+[[packages]]
+id = "xsimd/xsimd"
+
+[[packages.versions]]
+version = "1.0.0"
+source = "github"
+package = "xsimd/xsimd"
+rev = "HEAD"
+
+[[packages.versions]]
+version = "1.1.0"
+source = "github"
+package = "xsimd/xsimd"
+rev = "HEAD"
+"#;
+  update_local_registry_index_raw(registry_work.path(), registry_v1_updated);
+
+  let mut outdated = cargo_bin_cmd!("joy");
+  let assert = outdated
+    .current_dir(temp.path())
+    .env("JOY_GITHUB_BASE", pkg_remote_base.path())
+    .env("JOY_REGISTRY_DEFAULT", &registry_bare_repo)
+    .env("JOY_HOME", &joy_home)
+    .args(["--json", "outdated"])
+    .assert()
+    .success();
+  let payload = json_stdout(&assert.get_output().stdout);
+  assert_eq!(payload["command"], "outdated");
+  assert_eq!(payload["data"]["summary"]["outdated_count"].as_u64(), Some(2));
+
+  let outdated_rows = payload["data"]["outdated"].as_array().expect("outdated rows");
+  let nlohmann = outdated_rows
+    .iter()
+    .find(|row| row.get("id").and_then(|v| v.as_str()) == Some("nlohmann/json"))
+    .expect("nlohmann outdated row");
+  assert_eq!(nlohmann["direct"], true);
+  assert_eq!(nlohmann["status"], "outdated_compatible");
+  assert_eq!(nlohmann["resolved_version"], "1.0.0");
+  assert_eq!(nlohmann["latest_compatible"], "1.2.0");
+
+  let xsimd = outdated_rows
+    .iter()
+    .find(|row| row.get("id").and_then(|v| v.as_str()) == Some("xsimd/xsimd"))
+    .expect("xsimd outdated row");
+  assert_eq!(xsimd["direct"], false);
+  assert_eq!(xsimd["status"], "outdated_compatible");
+  assert_eq!(xsimd["resolved_version"], "1.0.0");
+  assert_eq!(xsimd["latest_compatible"], "1.1.0");
+
+  let all_rows = payload["data"]["packages"].as_array().expect("all rows");
+  let igneous = all_rows
+    .iter()
+    .find(|row| row.get("id").and_then(|v| v.as_str()) == Some("harnesslabs/igneous"))
+    .expect("igneous row");
+  assert_eq!(igneous["status"], "unsupported_source");
 }
 
 #[test]

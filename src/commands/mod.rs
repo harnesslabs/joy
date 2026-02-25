@@ -4,6 +4,7 @@ pub mod doctor;
 pub mod init;
 pub mod metadata;
 pub mod new;
+pub mod outdated;
 pub mod recipe_check;
 pub mod remove;
 pub mod run;
@@ -74,6 +75,9 @@ pub fn dispatch(command: Commands, runtime: RuntimeFlags) -> Result<CommandOutpu
     },
     Commands::Why(args) => {
       dispatch_project_scoped("why", runtime, |runtime| why::handle(args, runtime))
+    },
+    Commands::Outdated(args) => {
+      dispatch_project_scoped("outdated", runtime, |runtime| outdated::handle(args, runtime))
     },
     Commands::Metadata(args) => {
       dispatch_project_scoped("metadata", runtime, |runtime| metadata::handle(args, runtime))
