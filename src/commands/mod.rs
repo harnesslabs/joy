@@ -2,6 +2,7 @@ pub mod add;
 pub mod build;
 pub mod doctor;
 pub mod init;
+pub mod metadata;
 pub mod new;
 pub mod recipe_check;
 pub mod remove;
@@ -9,6 +10,7 @@ pub mod run;
 pub mod sync;
 pub mod tree;
 pub mod update;
+pub mod why;
 
 use serde::Serialize;
 use serde_json::Value;
@@ -69,6 +71,12 @@ pub fn dispatch(command: Commands, runtime: RuntimeFlags) -> Result<CommandOutpu
     },
     Commands::Tree(args) => {
       dispatch_project_scoped("tree", runtime, |runtime| tree::handle(args, runtime))
+    },
+    Commands::Why(args) => {
+      dispatch_project_scoped("why", runtime, |runtime| why::handle(args, runtime))
+    },
+    Commands::Metadata(args) => {
+      dispatch_project_scoped("metadata", runtime, |runtime| metadata::handle(args, runtime))
     },
     Commands::RecipeCheck(args) => recipe_check::handle(args),
     Commands::Doctor(args) => doctor::handle(args),
@@ -148,6 +156,12 @@ fn resolve_workspace_context(
     ManifestDocument::Workspace(ws) => {
       resolve_workspace_member_context(command, &cwd, ws, requested_member)
     },
+    ManifestDocument::Package(_) => Err(JoyError::new(
+      command,
+      "workspace_member_invalid",
+      "current `joy.toml` is a reusable package manifest (`[package]`), not a project/workspace manifest",
+      1,
+    )),
   }
 }
 
@@ -207,6 +221,14 @@ fn resolve_workspace_member_context(
       "workspace_member_not_found",
       format!(
         "workspace member `{selected}` points to another workspace root; nested workspace routing is not supported"
+      ),
+      1,
+    )),
+    ManifestDocument::Package(_) => Err(JoyError::new(
+      command,
+      "workspace_member_not_found",
+      format!(
+        "workspace member `{selected}` contains a reusable package manifest (`[package]`); workspace members must be project manifests"
       ),
       1,
     )),

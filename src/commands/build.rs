@@ -13,7 +13,7 @@ use crate::commands::CommandOutput;
 use crate::error::JoyError;
 use crate::install_index::InstallIndex;
 use crate::lockfile;
-use crate::manifest::{Manifest, SelectedTarget};
+use crate::manifest::{Manifest, ManifestDocument, SelectedTarget};
 use crate::ninja::{BuildProfile, NinjaBuildSpec};
 use crate::output::{HumanMessageBuilder, progress_detail, progress_stage};
 use crate::recipes::{Linkage as RecipeLinkage, RecipeStore};
@@ -228,6 +228,13 @@ pub(crate) fn build_project(options: BuildOptions) -> Result<BuildExecution, Joy
       .build_dir
       .join(format!("build-{}.ninja", sanitize_target_name(&selected_target.name)))
   };
+  let native_link = prepare_compiled_dependencies(
+    &manifest,
+    &env_layout.include_dir,
+    &env_layout.lib_dir,
+    &toolchain,
+    profile,
+  )?;
   let mut include_dirs = collect_include_dirs(&env_layout.include_dir).map_err(|err| {
     JoyError::io("build", "reading include directories", &env_layout.include_dir, &err)
   })?;
@@ -237,10 +244,15 @@ pub(crate) fn build_project(options: BuildOptions) -> Result<BuildExecution, Joy
   include_dirs.extend(target_include_dirs);
   include_dirs.sort();
   include_dirs.dedup();
-  let native_link =
-    prepare_compiled_dependencies(&manifest, &env_layout.lib_dir, &toolchain, profile)?;
   validate_locked_package_metadata_if_needed("build", &lock_plan, &native_link.lockfile_packages)?;
-  refresh_install_index(&env_layout, &manifest, &native_link)?;
+  write_dependency_graph_artifact(
+    &env_layout.state_dir,
+    &project_root,
+    &manifest_path,
+    &manifest,
+    &native_link.lockfile_packages,
+  )?;
+  refresh_install_index(&env_layout, &native_link)?;
 
   if options.progress {
     progress_detail("Generating build graph");
@@ -263,6 +275,13 @@ pub(crate) fn build_project(options: BuildOptions) -> Result<BuildExecution, Joy
   };
   ninja::write_build_ninja(&build_file, &spec)
     .map_err(|err| JoyError::new("build", "ninja_file_write_failed", err.to_string(), 1))?;
+  let _ = refresh_compile_commands_best_effort(
+    &project_root,
+    &manifest,
+    Some(selected_target.name.as_str()),
+    &env_layout,
+    profile,
+  );
 
   if options.progress {
     progress_detail("Compiling and linking");
@@ -368,24 +387,38 @@ pub(crate) fn sync_project(options: BuildOptions) -> Result<SyncExecution, JoyEr
       &compiled_stage.compiled_lock_metadata,
     )
     .map_err(|err| JoyError::new("sync", err.code, err.message, err.exit_code))?;
+    let installed_header_paths =
+      materialize_dependency_headers(&env_layout.include_dir, &lockfile_packages, &all_by_key)
+        .map_err(|err| JoyError::new("sync", err.code, err.message, err.exit_code))?;
 
     NativeLinkInputs {
       link_dirs: compiled_stage.link_dirs,
       link_libs: compiled_stage.link_libs,
       built_packages: compiled_stage.built_packages,
       installed_lib_files: compiled_stage.installed_lib_files,
+      installed_header_paths,
       lockfile_packages,
     }
   };
 
   validate_locked_package_metadata_if_needed("sync", &lock_plan, &native_link.lockfile_packages)
     .map_err(|err| JoyError::new("sync", err.code, err.message, err.exit_code))?;
-  refresh_install_index(&env_layout, &manifest, &native_link)
+  write_dependency_graph_artifact(
+    &env_layout.state_dir,
+    &project_root,
+    &manifest_path,
+    &manifest,
+    &native_link.lockfile_packages,
+  )
+  .map_err(|err| JoyError::new("sync", err.code, err.message, err.exit_code))?;
+  refresh_install_index(&env_layout, &native_link)
     .map_err(|err| JoyError::new("sync", err.code, err.message, err.exit_code))?;
 
   let include_dirs = collect_include_dirs(&env_layout.include_dir).map_err(|err| {
     JoyError::io("sync", "reading include directories", &env_layout.include_dir, &err)
   })?;
+  let _ =
+    refresh_compile_commands_best_effort(&project_root, &manifest, None, &env_layout, profile);
   let lockfile_updated = write_lockfile_if_needed(
     "sync",
     lock_plan,
@@ -415,6 +448,7 @@ struct NativeLinkInputs {
   link_libs: Vec<String>,
   built_packages: Vec<String>,
   installed_lib_files: Vec<PathBuf>,
+  installed_header_paths: Vec<PathBuf>,
   lockfile_packages: Vec<lockfile::LockedPackage>,
 }
 
@@ -456,6 +490,7 @@ struct CompiledDependencyBuildStage {
 
 fn prepare_compiled_dependencies(
   manifest: &Manifest,
+  project_include_dir: &Path,
   project_lib_dir: &Path,
   toolchain: &toolchain::Toolchain,
   profile: BuildProfile,
@@ -481,12 +516,15 @@ fn prepare_compiled_dependencies(
     &all_by_key,
     &compiled_stage.compiled_lock_metadata,
   )?;
+  let installed_header_paths =
+    materialize_dependency_headers(project_include_dir, &lockfile_packages, &all_by_key)?;
 
   Ok(NativeLinkInputs {
     link_dirs: compiled_stage.link_dirs,
     link_libs: compiled_stage.link_libs,
     built_packages: compiled_stage.built_packages,
     installed_lib_files: compiled_stage.installed_lib_files,
+    installed_header_paths,
     lockfile_packages,
   })
 }
@@ -677,21 +715,146 @@ fn build_compiled_dependency_stage(
 }
 
 fn collect_include_dirs(project_include_dir: &Path) -> std::io::Result<Vec<PathBuf>> {
-  let deps_dir = project_include_dir.join("deps");
-  if !deps_dir.is_dir() {
-    return Ok(Vec::new());
+  let mut dirs = Vec::new();
+
+  let pkg_dir = project_include_dir.join("pkg");
+  if pkg_dir.is_dir() {
+    for package_entry in fs::read_dir(&pkg_dir)? {
+      let package_entry = package_entry?;
+      let package_path = package_entry.path();
+      if !package_path.is_dir() {
+        continue;
+      }
+      for root_entry in fs::read_dir(&package_path)? {
+        let root_entry = root_entry?;
+        let root_path = root_entry.path();
+        if root_path.is_dir() {
+          dirs.push(root_path);
+        }
+      }
+    }
   }
 
-  let mut dirs = Vec::new();
-  for entry in fs::read_dir(deps_dir)? {
-    let entry = entry?;
-    let path = entry.path();
-    if path.is_dir() {
-      dirs.push(path);
+  let deps_dir = project_include_dir.join("deps");
+  if deps_dir.is_dir() {
+    for entry in fs::read_dir(deps_dir)? {
+      let entry = entry?;
+      let path = entry.path();
+      if path.is_dir() {
+        dirs.push(path);
+      }
     }
   }
   dirs.sort();
+  dirs.dedup();
   Ok(dirs)
+}
+
+fn materialize_dependency_headers(
+  project_include_dir: &Path,
+  lockfile_packages: &[lockfile::LockedPackage],
+  prefetched_by_key: &BTreeMap<(String, String), fetch::FetchResult>,
+) -> Result<Vec<PathBuf>, JoyError> {
+  let mut installed_paths = Vec::new();
+
+  for pkg in lockfile_packages {
+    if pkg.header_roots.is_empty() {
+      continue;
+    }
+    let package = crate::package_id::PackageId::parse(&pkg.id).map_err(|err| {
+      JoyError::new(
+        "build",
+        "invalid_package_id",
+        format!("invalid package id `{}` while materializing headers: {err}", pkg.id),
+        1,
+      )
+    })?;
+    let fetched = prefetched_by_key
+      .get(&(pkg.id.clone(), pkg.requested_rev.clone()))
+      .ok_or_else(|| {
+        JoyError::new(
+          "build",
+          "header_install_failed",
+          format!(
+            "missing prefetched source checkout metadata for `{}` at `{}` while materializing headers",
+            pkg.id, pkg.requested_rev
+          ),
+          1,
+        )
+      })?;
+
+    let canonical_pkg_dir = project_include_dir.join("pkg").join(package.slug());
+    let mut first_source_root: Option<PathBuf> = None;
+    let mut installed_any = false;
+    for header_root in &pkg.header_roots {
+      let source_header_root = fetched.source_dir.join(header_root);
+      if !source_header_root.is_dir() {
+        continue;
+      }
+      let dest = canonical_pkg_dir.join(sanitize_header_root_key(header_root));
+      linking::install_header_root_to_path(&source_header_root, &dest)
+        .map_err(|err| JoyError::new("build", "header_install_failed", err.to_string(), 1))?;
+      if first_source_root.is_none() {
+        first_source_root = Some(source_header_root);
+      }
+      installed_any = true;
+      installed_paths.push(dest);
+    }
+
+    if !installed_any && let Ok(fallback_root) = linking::discover_header_root(&fetched.source_dir)
+    {
+      let relative = fallback_root
+        .strip_prefix(&fetched.source_dir)
+        .unwrap_or(fallback_root.as_path())
+        .to_string_lossy()
+        .replace('\\', "/");
+      let dest = canonical_pkg_dir.join(sanitize_header_root_key(&relative));
+      linking::install_header_root_to_path(&fallback_root, &dest)
+        .map_err(|err| JoyError::new("build", "header_install_failed", err.to_string(), 1))?;
+      first_source_root = Some(fallback_root);
+      installed_paths.push(dest);
+      installed_any = true;
+    }
+
+    if !installed_any {
+      return Err(JoyError::new(
+        "build",
+        "header_install_failed",
+        format!(
+          "package `{}` declares header roots {:?}, but none were found in `{}`",
+          pkg.id,
+          pkg.header_roots,
+          fetched.source_dir.display()
+        ),
+        1,
+      ));
+    }
+
+    if let Some(first_root) = first_source_root {
+      let compat_dest = project_include_dir.join("deps").join(package.slug());
+      linking::install_header_root_to_path(&first_root, &compat_dest)
+        .map_err(|err| JoyError::new("build", "header_install_failed", err.to_string(), 1))?;
+      installed_paths.push(compat_dest);
+    }
+  }
+
+  installed_paths.sort();
+  installed_paths.dedup();
+  Ok(installed_paths)
+}
+
+fn sanitize_header_root_key(raw: &str) -> String {
+  let trimmed = raw.trim().trim_matches('/');
+  let normalized = if trimmed.is_empty() { "root" } else { trimmed };
+  let mut out = String::with_capacity(normalized.len());
+  for ch in normalized.chars() {
+    if ch.is_ascii_alphanumeric() {
+      out.push(ch);
+    } else {
+      out.push('_');
+    }
+  }
+  if out.is_empty() { "root".to_string() } else { out }
 }
 
 fn collect_user_include_dirs(
@@ -886,6 +1049,8 @@ fn assemble_lockfile_packages(
       linkage = compiled_meta.linkage.clone();
       abi_hash = compiled_meta.abi_hash.clone();
     }
+    let (metadata_source, package_manifest_digest, declared_deps_source) =
+      lockfile_metadata_provenance(recipe.is_some(), &fetched.source_dir);
 
     packages.push(lockfile::LockedPackage {
       id: pkg.id.to_string(),
@@ -898,6 +1063,9 @@ fn assemble_lockfile_packages(
       resolved_commit: pkg.resolved_commit.clone(),
       resolved_ref: None,
       recipe: pkg.recipe_slug.clone(),
+      metadata_source,
+      package_manifest_digest,
+      declared_deps_source,
       header_only: pkg.header_only,
       header_roots,
       deps: resolved.dependency_ids(pkg.id.as_str()).unwrap_or_default(),
@@ -930,6 +1098,30 @@ fn infer_header_roots_from_source_dir(source_dir: &Path) -> Vec<String> {
   roots
 }
 
+fn lockfile_metadata_provenance(
+  has_recipe: bool,
+  source_dir: &Path,
+) -> (Option<String>, Option<String>, Option<String>) {
+  if has_recipe {
+    return (Some("recipe".to_string()), None, Some("recipe".to_string()));
+  }
+
+  let manifest_path = source_dir.join("joy.toml");
+  if !manifest_path.is_file() {
+    return (Some("none".to_string()), None, None);
+  }
+
+  let is_package_manifest =
+    matches!(ManifestDocument::load(&manifest_path), Ok(ManifestDocument::Package(_)));
+  if !is_package_manifest {
+    return (Some("none".to_string()), None, None);
+  }
+
+  let digest =
+    lockfile::compute_manifest_hash(&manifest_path).ok().map(|hash| format!("sha256:{hash}"));
+  (Some("package_manifest".to_string()), digest, Some("package_manifest".to_string()))
+}
+
 fn dependency_source_name(source: &crate::manifest::DependencySource) -> &'static str {
   match source {
     crate::manifest::DependencySource::Github => "github",
@@ -960,21 +1152,187 @@ fn target_triple_guess(compiler_kind: toolchain::CompilerKind) -> String {
   })
 }
 
+fn write_dependency_graph_artifact(
+  state_dir: &Path,
+  project_root: &Path,
+  manifest_path: &Path,
+  manifest: &Manifest,
+  lockfile_packages: &[lockfile::LockedPackage],
+) -> Result<(), JoyError> {
+  let graph_path = state_dir.join("dependency-graph.json");
+  if let Some(parent) = graph_path.parent() {
+    fs::create_dir_all(parent)
+      .map_err(|err| JoyError::io("build", "creating graph state directory", parent, &err))?;
+  }
+
+  let mut roots = manifest.dependencies.keys().cloned().collect::<Vec<_>>();
+  roots.sort();
+  let mut packages = lockfile_packages.to_vec();
+  packages.sort_by(|a, b| a.id.cmp(&b.id).then_with(|| a.requested_rev.cmp(&b.requested_rev)));
+
+  let raw = serde_json::to_vec_pretty(&json!({
+    "version": 1,
+    "project_root": project_root.display().to_string(),
+    "manifest_path": manifest_path.display().to_string(),
+    "roots": roots,
+    "packages": packages,
+  }))
+  .map_err(|err| {
+    JoyError::new(
+      "build",
+      "state_graph_error",
+      format!("failed to serialize dependency graph state: {err}"),
+      1,
+    )
+  })?;
+  fs::write(&graph_path, raw)
+    .map_err(|err| JoyError::io("build", "writing dependency graph state", &graph_path, &err))
+}
+
+pub(crate) fn refresh_compile_commands_best_effort(
+  project_root: &Path,
+  manifest: &Manifest,
+  target_name: Option<&str>,
+  env_layout: &project_env::ProjectEnvLayout,
+  profile: BuildProfile,
+) -> Option<PathBuf> {
+  let toolchain = toolchain::discover().ok()?;
+  let target = manifest.select_target(target_name).ok()?;
+  let source_files = collect_project_source_files(project_root, &target).ok()?;
+
+  let mut include_dirs = collect_include_dirs(&env_layout.include_dir).ok()?;
+  let user_include_dirs = collect_user_include_dirs(project_root, manifest).ok()?;
+  let target_include_dirs = collect_target_include_dirs(project_root, &target).ok()?;
+  include_dirs.extend(user_include_dirs);
+  include_dirs.extend(target_include_dirs);
+  include_dirs.sort();
+  include_dirs.dedup();
+
+  let obj_dir = env_layout.build_dir.join("obj");
+  let compile_units = source_files
+    .iter()
+    .map(|src| ninja::NinjaCompileUnit {
+      source_file: src.clone(),
+      object_file: obj_dir.join(object_file_name_for_source(project_root, &target.name, src)),
+    })
+    .collect::<Vec<_>>();
+
+  write_compile_commands_files(CompileCommandsSpec {
+    project_root,
+    build_dir: &env_layout.build_dir,
+    toolchain: &toolchain,
+    cpp_standard: &manifest.project.cpp_standard,
+    profile,
+    target_name: &target.name,
+    include_dirs: &include_dirs,
+    compile_units: &compile_units,
+  })
+  .ok()
+}
+
+struct CompileCommandsSpec<'a> {
+  project_root: &'a Path,
+  build_dir: &'a Path,
+  toolchain: &'a toolchain::Toolchain,
+  cpp_standard: &'a str,
+  profile: BuildProfile,
+  target_name: &'a str,
+  include_dirs: &'a [PathBuf],
+  compile_units: &'a [ninja::NinjaCompileUnit],
+}
+
+fn write_compile_commands_files(spec: CompileCommandsSpec<'_>) -> Result<PathBuf, JoyError> {
+  let entries = spec
+    .compile_units
+    .iter()
+    .map(|unit| {
+      json!({
+        "directory": spec.project_root.display().to_string(),
+        "file": unit.source_file.display().to_string(),
+        "output": unit.object_file.display().to_string(),
+        "arguments": compile_db_arguments(spec.toolchain, spec.cpp_standard, spec.profile, spec.include_dirs, unit),
+      })
+    })
+    .collect::<Vec<_>>();
+
+  fs::create_dir_all(spec.build_dir).map_err(|err| {
+    JoyError::io("build", "creating compile database directory", spec.build_dir, &err)
+  })?;
+  let target_db_path = spec
+    .build_dir
+    .join(format!("compile_commands.{}.json", sanitize_target_name(spec.target_name)));
+  let raw = serde_json::to_vec_pretty(&entries).map_err(|err| {
+    JoyError::new(
+      "build",
+      "compile_db_write_failed",
+      format!("failed to serialize compile database: {err}"),
+      1,
+    )
+  })?;
+  fs::write(&target_db_path, &raw)
+    .map_err(|err| JoyError::io("build", "writing compile database", &target_db_path, &err))?;
+
+  let root_db_path = spec.project_root.join("compile_commands.json");
+  fs::write(&root_db_path, raw)
+    .map_err(|err| JoyError::io("build", "writing root compile database", &root_db_path, &err))?;
+  Ok(root_db_path)
+}
+
+fn compile_db_arguments(
+  toolchain: &toolchain::Toolchain,
+  cpp_standard: &str,
+  profile: BuildProfile,
+  include_dirs: &[PathBuf],
+  unit: &ninja::NinjaCompileUnit,
+) -> Vec<String> {
+  let mut args = vec![toolchain.compiler.path.display().to_string()];
+  match toolchain.compiler.kind {
+    toolchain::CompilerKind::Msvc => {
+      args.extend(["/nologo".into(), "/EHsc".into(), format!("/std:{cpp_standard}")]);
+      match profile {
+        BuildProfile::Debug => args.extend(["/Od".into(), "/Zi".into()]),
+        BuildProfile::Release => args.extend(["/O2".into(), "/DNDEBUG".into()]),
+      }
+      for include in include_dirs {
+        args.push(format!("/I{}", include.display()));
+      }
+      args.extend([
+        "/showIncludes".into(),
+        "/c".into(),
+        unit.source_file.display().to_string(),
+        format!("/Fo{}", unit.object_file.display()),
+      ]);
+    },
+    toolchain::CompilerKind::Clang | toolchain::CompilerKind::Gcc => {
+      args.push(format!("-std={cpp_standard}"));
+      match profile {
+        BuildProfile::Debug => args.extend(["-O0".into(), "-g".into()]),
+        BuildProfile::Release => args.extend(["-O3".into(), "-DNDEBUG".into()]),
+      }
+      for include in include_dirs {
+        args.push(format!("-I{}", include.display()));
+      }
+      args.extend([
+        "-c".into(),
+        unit.source_file.display().to_string(),
+        "-o".into(),
+        unit.object_file.display().to_string(),
+      ]);
+    },
+  }
+  args
+}
+
 fn refresh_install_index(
   env_layout: &project_env::ProjectEnvLayout,
-  manifest: &Manifest,
   native_link: &NativeLinkInputs,
 ) -> Result<(), JoyError> {
   let index_path = env_layout.state_dir.join("install-index.json");
   let mut index = InstallIndex::load_or_default(&index_path)
     .map_err(|err| JoyError::new("build", "state_index_error", err.to_string(), 1))?;
 
-  let desired_header_links = manifest
-    .dependencies
-    .keys()
-    .filter_map(|id| crate::package_id::PackageId::parse(id).ok())
-    .map(|pkg| env_layout.include_dir.join("deps").join(pkg.slug()))
-    .collect::<BTreeSet<_>>();
+  let desired_header_links =
+    native_link.installed_header_paths.iter().cloned().collect::<BTreeSet<_>>();
   let desired_library_files =
     native_link.installed_lib_files.iter().cloned().collect::<BTreeSet<_>>();
 
@@ -1208,6 +1566,7 @@ fn map_dependency_resolve_error(err: resolver::ResolverError) -> JoyError {
     resolver::ResolverError::RegistryLoad { .. }
     | resolver::ResolverError::RegistryResolve { .. } => "registry_load_failed",
     resolver::ResolverError::RegistryAliasUnsupported { .. } => "registry_alias_unsupported",
+    resolver::ResolverError::PackageMetadataMismatch { .. } => "package_metadata_mismatch",
     _ => "dependency_resolve_failed",
   };
   JoyError::new("build", code, err.to_string(), 1)

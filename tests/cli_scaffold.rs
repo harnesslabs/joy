@@ -60,6 +60,7 @@ int main() {
   assert_eq!(
     read_to_string(&gitignore),
     r#".joy/
+compile_commands.json
 build/
 *.o
 *.obj

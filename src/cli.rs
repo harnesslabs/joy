@@ -285,6 +285,12 @@ pub enum Commands {
   /// Show the resolved dependency graph.
   #[command(after_help = "Examples:\n  joy tree\n  joy --json tree")]
   Tree(TreeArgs),
+  /// Explain why a dependency is present in the resolved graph.
+  #[command(after_help = "Examples:\n  joy why nlohmann/json\n  joy why fmtlib/fmt --locked")]
+  Why(WhyArgs),
+  /// Emit machine-oriented project/dependency/editor metadata.
+  #[command(after_help = "Examples:\n  joy metadata\n  joy --json metadata")]
+  Metadata(MetadataArgs),
   /// Validate bundled recipe metadata (for local checks and CI).
   RecipeCheck(RecipeCheckArgs),
   /// Diagnose local toolchain, cache, and recipe environment health.
@@ -321,6 +327,8 @@ pub struct AddArgs {
   pub rev: Option<String>,
   #[arg(long)]
   pub version: Option<String>,
+  #[arg(long)]
+  pub no_sync: bool,
 }
 
 #[derive(Debug, Args)]
@@ -338,7 +346,20 @@ pub struct UpdateArgs {
 }
 
 #[derive(Debug, Args)]
-pub struct TreeArgs {}
+pub struct TreeArgs {
+  #[arg(long)]
+  pub locked: bool,
+}
+
+#[derive(Debug, Args)]
+pub struct WhyArgs {
+  pub package: String,
+  #[arg(long)]
+  pub locked: bool,
+}
+
+#[derive(Debug, Args)]
+pub struct MetadataArgs {}
 
 #[derive(Debug, Args)]
 pub struct RecipeCheckArgs {}
@@ -476,7 +497,17 @@ mod tests {
         assert_eq!(args.package, "fmtlib/fmt");
         assert_eq!(args.version.as_deref(), Some("^11"));
         assert_eq!(args.rev, None);
+        assert!(!args.no_sync);
       },
+      other => panic!("expected add, got {other:?}"),
+    }
+  }
+
+  #[test]
+  fn parses_add_with_no_sync_flag() {
+    let cli = Cli::parse_from(["joy", "add", "nlohmann/json", "--no-sync"]);
+    match cli.command {
+      Commands::Add(args) => assert!(args.no_sync),
       other => panic!("expected add, got {other:?}"),
     }
   }
@@ -485,8 +516,38 @@ mod tests {
   fn parses_tree_command() {
     let cli = Cli::parse_from(["joy", "tree"]);
     match cli.command {
-      Commands::Tree(_) => {},
+      Commands::Tree(args) => assert!(!args.locked),
       other => panic!("expected tree, got {other:?}"),
+    }
+  }
+
+  #[test]
+  fn parses_tree_locked_flag() {
+    let cli = Cli::parse_from(["joy", "tree", "--locked"]);
+    match cli.command {
+      Commands::Tree(args) => assert!(args.locked),
+      other => panic!("expected tree, got {other:?}"),
+    }
+  }
+
+  #[test]
+  fn parses_why_command() {
+    let cli = Cli::parse_from(["joy", "why", "nlohmann/json", "--locked"]);
+    match cli.command {
+      Commands::Why(args) => {
+        assert_eq!(args.package, "nlohmann/json");
+        assert!(args.locked);
+      },
+      other => panic!("expected why, got {other:?}"),
+    }
+  }
+
+  #[test]
+  fn parses_metadata_command() {
+    let cli = Cli::parse_from(["joy", "metadata"]);
+    match cli.command {
+      Commands::Metadata(_) => {},
+      other => panic!("expected metadata, got {other:?}"),
     }
   }
 

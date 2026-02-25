@@ -58,6 +58,15 @@ fn git_is_available() -> bool {
     .unwrap_or(false)
 }
 
+fn compile_db_toolchain_is_available() -> bool {
+  let ninja = which("ninja").is_ok();
+  let compiler = which("clang++").is_ok()
+    || which("g++").is_ok()
+    || which("cl.exe").is_ok()
+    || which("cl").is_ok();
+  ninja && compiler
+}
+
 fn setup_local_github_remote(package: &str) -> Option<(TempDir, PathBuf, String)> {
   if !git_is_available() {
     eprintln!("skipping test: git is not available");
@@ -114,6 +123,73 @@ fn setup_local_github_remote(package: &str) -> Option<(TempDir, PathBuf, String)
   .expect("set bare HEAD");
 
   Some((remote_base, bare_repo, commit))
+}
+
+fn setup_local_github_remote_in_base(
+  remote_base: &Path,
+  package: &str,
+  files: &[(&str, &str)],
+) -> Option<(PathBuf, String)> {
+  if !git_is_available() {
+    eprintln!("skipping test: git is not available");
+    return None;
+  }
+
+  let mut parts = package.split('/');
+  let owner = parts.next().expect("owner");
+  let repo = parts.next().expect("repo");
+
+  let work = TempDir::new().expect("work repo");
+  let bare_repo = remote_base.join(owner).join(format!("{repo}.git"));
+  fs::create_dir_all(bare_repo.parent().expect("bare parent")).expect("create bare parent");
+
+  run_git(Some(work.path()), ["init"]).expect("git init");
+  run_git(Some(work.path()), ["config", "user.email", "joy-tests@example.com"])
+    .expect("git config email");
+  run_git(Some(work.path()), ["config", "user.name", "Joy Tests"]).expect("git config name");
+
+  if files.is_empty() {
+    fs::write(work.path().join("README.md"), "# fixture\n").expect("write readme");
+  } else {
+    for (rel_path, contents) in files {
+      let file_path = work.path().join(rel_path);
+      if let Some(parent) = file_path.parent() {
+        fs::create_dir_all(parent).expect("create file parent");
+      }
+      fs::write(&file_path, contents)
+        .unwrap_or_else(|err| panic!("write fixture file `{}`: {err}", file_path.display()));
+    }
+  }
+
+  run_git(Some(work.path()), ["add", "."]).expect("git add");
+  run_git(Some(work.path()), ["commit", "-m", "fixture"]).expect("git commit");
+  let commit = run_git_capture(Some(work.path()), ["rev-parse", "HEAD"]).expect("rev-parse");
+  let commit = commit.trim().to_string();
+
+  run_git_owned(
+    None,
+    vec!["init".into(), "--bare".into(), bare_repo.to_string_lossy().into_owned()],
+  )
+  .expect("git init --bare");
+  run_git_owned(
+    Some(work.path()),
+    vec!["remote".into(), "add".into(), "origin".into(), bare_repo.to_string_lossy().into_owned()],
+  )
+  .expect("git remote add");
+  run_git(Some(work.path()), ["push", "origin", "HEAD:refs/heads/main"]).expect("git push");
+  run_git_owned(
+    None,
+    vec![
+      "--git-dir".into(),
+      bare_repo.to_string_lossy().into_owned(),
+      "symbolic-ref".into(),
+      "HEAD".into(),
+      "refs/heads/main".into(),
+    ],
+  )
+  .expect("set bare HEAD");
+
+  Some((bare_repo, commit))
 }
 
 fn setup_local_github_remote_two_commits(
@@ -343,10 +419,7 @@ fn render_registry_index(package: &str, versions: &[(&str, &str)]) -> String {
   out
 }
 
-fn setup_local_registry_index(
-  package: &str,
-  versions: &[(&str, &str)],
-) -> Option<(TempDir, TempDir, PathBuf)> {
+fn setup_local_registry_index_raw(index_contents: &str) -> Option<(TempDir, TempDir, PathBuf)> {
   if !git_is_available() {
     eprintln!("skipping test: git is not available");
     return None;
@@ -360,8 +433,7 @@ fn setup_local_registry_index(
   run_git(Some(work.path()), ["config", "user.email", "joy-tests@example.com"])
     .expect("git config email");
   run_git(Some(work.path()), ["config", "user.name", "Joy Tests"]).expect("git config name");
-  fs::write(work.path().join("index.toml"), render_registry_index(package, versions))
-    .expect("write registry index");
+  fs::write(work.path().join("index.toml"), index_contents).expect("write registry index");
   run_git(Some(work.path()), ["add", "index.toml"]).expect("git add index");
   run_git(Some(work.path()), ["commit", "-m", "registry index"]).expect("git commit index");
 
@@ -390,6 +462,13 @@ fn setup_local_registry_index(
   .expect("set registry bare HEAD");
 
   Some((remote_base, work, bare_repo))
+}
+
+fn setup_local_registry_index(
+  package: &str,
+  versions: &[(&str, &str)],
+) -> Option<(TempDir, TempDir, PathBuf)> {
+  setup_local_registry_index_raw(&render_registry_index(package, versions))
 }
 
 fn update_local_registry_index(work: &Path, package: &str, versions: &[(&str, &str)]) {
@@ -899,7 +978,7 @@ fn sync_materializes_header_only_dependencies_and_lockfile_without_app_build() {
 
   assert_eq!(payload["ok"], true);
   assert_eq!(payload["command"], "sync");
-  assert_eq!(payload["data"]["lockfile_updated"], true);
+  assert_eq!(payload["data"]["lockfile_updated"], false);
   assert_eq!(payload["data"]["toolchain"], Value::Null);
   assert_eq!(payload["data"]["compiled_dependencies_built"], serde_json::json!([]));
   assert!(
@@ -910,6 +989,32 @@ fn sync_materializes_header_only_dependencies_and_lockfile_without_app_build() {
     }),
     "expected staged header include dir in sync output"
   );
+  assert!(
+    temp
+      .path()
+      .join(".joy")
+      .join("include")
+      .join("pkg")
+      .join("nlohmann_json")
+      .join("include")
+      .is_dir(),
+    "expected canonical header root materialization path"
+  );
+  assert!(
+    temp.path().join(".joy").join("state").join("dependency-graph.json").is_file(),
+    "expected dependency graph artifact to be written during sync"
+  );
+  if compile_db_toolchain_is_available() {
+    let compile_db = temp.path().join("compile_commands.json");
+    assert!(compile_db.is_file(), "expected root compile_commands.json after sync");
+    let compile_db_raw = fs::read_to_string(&compile_db).expect("read compile db");
+    let normalized = compile_db_raw.replace('\\', "/");
+    assert!(
+      normalized.contains("/.joy/include/deps/nlohmann_json")
+        || normalized.contains("/.joy/include/pkg/nlohmann_json/include"),
+      "expected dependency include path in compile db"
+    );
+  }
 
   assert!(temp.path().join("joy.lock").is_file(), "expected joy.lock to be written");
   let lock = read_lockfile_toml(&temp);
@@ -932,6 +1037,422 @@ fn sync_materializes_header_only_dependencies_and_lockfile_without_app_build() {
     !temp.path().join(".joy/bin").join(binary_name).exists(),
     "sync should not compile or emit app binary"
   );
+}
+
+#[test]
+fn add_generates_compile_commands_json_when_toolchain_is_available() {
+  if !compile_db_toolchain_is_available() {
+    eprintln!("skipping test: compiler or ninja is not available");
+    return;
+  }
+
+  let temp = TempDir::new().expect("tempdir");
+  init_project(&temp);
+  let Some((remote_base, _bare_repo, _expected_commit)) =
+    setup_local_github_remote("nlohmann/json")
+  else {
+    return;
+  };
+  let joy_home = temp.path().join("joy-home");
+
+  let mut add = cargo_bin_cmd!("joy");
+  add
+    .current_dir(temp.path())
+    .env("JOY_GITHUB_BASE", remote_base.path())
+    .env("JOY_HOME", &joy_home)
+    .args(["add", "nlohmann/json"])
+    .assert()
+    .success();
+
+  let compile_db = temp.path().join("compile_commands.json");
+  assert!(compile_db.is_file(), "expected add to refresh compile_commands.json");
+  let raw = fs::read_to_string(&compile_db).expect("read compile db");
+  let normalized = raw.replace('\\', "/");
+  assert!(normalized.contains("src/main.cpp"), "expected project source in compile db");
+  assert!(
+    normalized.contains("/.joy/include/deps/nlohmann_json")
+      || normalized.contains("/.joy/include/pkg/nlohmann_json/include"),
+    "expected dependency include path in compile db"
+  );
+}
+
+#[test]
+fn add_default_runs_sync_lite_and_writes_lockfile_and_graph_artifact() {
+  let temp = TempDir::new().expect("tempdir");
+  init_project(&temp);
+  let Some((remote_base, _bare_repo, _expected_commit)) =
+    setup_local_github_remote("nlohmann/json")
+  else {
+    return;
+  };
+  let joy_home = temp.path().join("joy-home");
+
+  let mut add = cargo_bin_cmd!("joy");
+  let add_assert = add
+    .current_dir(temp.path())
+    .env("JOY_GITHUB_BASE", remote_base.path())
+    .env("JOY_HOME", &joy_home)
+    .args(["--json", "add", "nlohmann/json"])
+    .assert()
+    .success();
+  let payload = json_stdout(&add_assert.get_output().stdout);
+  assert_eq!(payload["command"], "add");
+  assert_eq!(payload["ok"], true);
+
+  assert!(temp.path().join("joy.lock").is_file(), "expected add sync-lite to write lockfile");
+  assert!(
+    temp.path().join(".joy/state/dependency-graph.json").is_file(),
+    "expected add sync-lite to write dependency graph artifact"
+  );
+}
+
+#[test]
+fn add_no_sync_preserves_legacy_behavior_without_lockfile_or_graph_refresh() {
+  let temp = TempDir::new().expect("tempdir");
+  init_project(&temp);
+  let Some((remote_base, _bare_repo, _expected_commit)) =
+    setup_local_github_remote("nlohmann/json")
+  else {
+    return;
+  };
+  let joy_home = temp.path().join("joy-home");
+
+  let mut add = cargo_bin_cmd!("joy");
+  let add_assert = add
+    .current_dir(temp.path())
+    .env("JOY_GITHUB_BASE", remote_base.path())
+    .env("JOY_HOME", &joy_home)
+    .args(["--json", "add", "--no-sync", "nlohmann/json"])
+    .assert()
+    .success();
+  let payload = json_stdout(&add_assert.get_output().stdout);
+  assert_eq!(payload["command"], "add");
+  assert_eq!(payload["ok"], true);
+
+  assert!(
+    !temp.path().join("joy.lock").exists(),
+    "legacy add should not write lockfile when --no-sync is set"
+  );
+  assert!(
+    !temp.path().join(".joy/state/dependency-graph.json").exists(),
+    "--no-sync should not refresh graph artifact"
+  );
+  assert!(
+    !temp.path().join("compile_commands.json").exists(),
+    "--no-sync should not refresh editor artifacts"
+  );
+}
+
+#[test]
+fn metadata_and_why_and_tree_locked_use_graph_and_lockfile_state() {
+  let temp = TempDir::new().expect("tempdir");
+  init_project(&temp);
+  let Some((remote_base, _bare_repo, _expected_commit)) =
+    setup_local_github_remote("nlohmann/json")
+  else {
+    return;
+  };
+  let joy_home = temp.path().join("joy-home");
+
+  let mut add = cargo_bin_cmd!("joy");
+  add
+    .current_dir(temp.path())
+    .env("JOY_GITHUB_BASE", remote_base.path())
+    .env("JOY_HOME", &joy_home)
+    .args(["add", "nlohmann/json"])
+    .assert()
+    .success();
+
+  let mut sync = cargo_bin_cmd!("joy");
+  sync
+    .current_dir(temp.path())
+    .env("JOY_GITHUB_BASE", remote_base.path())
+    .env("JOY_HOME", &joy_home)
+    .args(["--json", "sync"])
+    .assert()
+    .success();
+
+  let mut metadata = cargo_bin_cmd!("joy");
+  let metadata_assert = metadata
+    .current_dir(temp.path())
+    .env("JOY_GITHUB_BASE", remote_base.path())
+    .env("JOY_HOME", &joy_home)
+    .args(["--json", "metadata"])
+    .assert()
+    .success();
+  let metadata_payload = json_stdout(&metadata_assert.get_output().stdout);
+  assert_eq!(metadata_payload["command"], "metadata");
+  assert_eq!(metadata_payload["data"]["artifacts"]["graph_present"], true);
+  assert_eq!(metadata_payload["data"]["lockfile"]["present"], true);
+  let graph_packages =
+    metadata_payload["data"]["graph"]["packages"].as_array().expect("graph packages");
+  assert!(
+    graph_packages
+      .iter()
+      .any(|pkg| pkg.get("id").and_then(|v| v.as_str()) == Some("nlohmann/json"))
+  );
+
+  let mut why = cargo_bin_cmd!("joy");
+  let why_assert = why
+    .current_dir(temp.path())
+    .env("JOY_GITHUB_BASE", remote_base.path())
+    .env("JOY_HOME", &joy_home)
+    .args(["--json", "why", "nlohmann/json", "--locked"])
+    .assert()
+    .success();
+  let why_payload = json_stdout(&why_assert.get_output().stdout);
+  assert_eq!(why_payload["command"], "why");
+  assert_eq!(why_payload["data"]["locked"], true);
+  let first_path = why_payload["data"]["paths"]
+    .as_array()
+    .expect("paths")
+    .first()
+    .expect("first path")
+    .as_array()
+    .expect("path array");
+  assert_eq!(first_path.first().and_then(|v| v.as_str()), Some("nlohmann/json"));
+
+  let mut tree = cargo_bin_cmd!("joy");
+  let tree_assert = tree
+    .current_dir(temp.path())
+    .env("JOY_GITHUB_BASE", remote_base.path())
+    .env("JOY_HOME", &joy_home)
+    .args(["--json", "tree", "--locked"])
+    .assert()
+    .success();
+  let tree_payload = json_stdout(&tree_assert.get_output().stdout);
+  assert_eq!(tree_payload["command"], "tree");
+  let packages = tree_payload["data"]["packages"].as_array().expect("packages");
+  assert!(
+    packages.iter().any(|pkg| pkg.get("id").and_then(|v| v.as_str()) == Some("nlohmann/json"))
+  );
+}
+
+#[test]
+fn add_resolves_nested_package_manifest_dependencies_and_materializes_transitive_headers() {
+  let temp = TempDir::new().expect("tempdir");
+  init_project(&temp);
+  if !git_is_available() {
+    eprintln!("skipping test: git is not available");
+    return;
+  }
+
+  let remote_base = TempDir::new().expect("remote base");
+  let Some((_xsimd_bare, _xsimd_commit)) = setup_local_github_remote_in_base(
+    remote_base.path(),
+    "xsimd/xsimd",
+    &[("README.md", "# xsimd fixture\n"), ("include/xsimd/xsimd.hpp", "// xsimd fixture header\n")],
+  ) else {
+    return;
+  };
+  let Some((_igneous_bare, _igneous_commit)) = setup_local_github_remote_in_base(
+    remote_base.path(),
+    "harnesslabs/igneous",
+    &[
+      (
+        "joy.toml",
+        r#"[package]
+id = "harnesslabs/igneous"
+version = "0.3.0"
+kind = "header_only"
+
+[headers]
+include_roots = ["include"]
+
+[dependencies]
+"xsimd/xsimd" = { source = "github", rev = "HEAD" }
+"#,
+      ),
+      ("README.md", "# igneous fixture\n"),
+      ("include/igneous/igneous.hpp", "// igneous fixture header\n"),
+    ],
+  ) else {
+    return;
+  };
+  let joy_home = temp.path().join("joy-home");
+
+  let mut add = cargo_bin_cmd!("joy");
+  add
+    .current_dir(temp.path())
+    .env("JOY_GITHUB_BASE", remote_base.path())
+    .env("JOY_HOME", &joy_home)
+    .args(["add", "harnesslabs/igneous"])
+    .assert()
+    .success();
+
+  assert!(
+    temp.path().join(".joy/include/deps/harnesslabs_igneous/igneous/igneous.hpp").is_file(),
+    "expected direct package headers to be materialized"
+  );
+  assert!(
+    temp.path().join(".joy/include/deps/xsimd_xsimd/xsimd/xsimd.hpp").is_file(),
+    "expected transitive package headers to be materialized"
+  );
+  assert!(
+    temp.path().join(".joy/include/pkg/xsimd_xsimd/include/xsimd/xsimd.hpp").is_file(),
+    "expected canonical transitive header root layout"
+  );
+  assert!(
+    temp.path().join(".joy/state/dependency-graph.json").is_file(),
+    "expected graph artifact after add sync-lite"
+  );
+
+  let lock = read_lockfile_toml(&temp);
+  let lock_packages = lock["packages"].as_array().expect("lock packages");
+  let igneous_locked = lock_packages
+    .iter()
+    .find(|pkg| pkg.get("id").and_then(|v| v.as_str()) == Some("harnesslabs/igneous"))
+    .expect("igneous lock package");
+  assert_eq!(igneous_locked["metadata_source"].as_str(), Some("package_manifest"));
+  assert_eq!(igneous_locked["declared_deps_source"].as_str(), Some("package_manifest"));
+  assert!(
+    igneous_locked["package_manifest_digest"]
+      .as_str()
+      .is_some_and(|digest| digest.starts_with("sha256:"))
+  );
+  let xsimd_locked = lock_packages
+    .iter()
+    .find(|pkg| pkg.get("id").and_then(|v| v.as_str()) == Some("xsimd/xsimd"))
+    .expect("xsimd lock package");
+  assert_eq!(xsimd_locked["metadata_source"].as_str(), Some("none"));
+
+  let mut tree = cargo_bin_cmd!("joy");
+  let tree_assert = tree
+    .current_dir(temp.path())
+    .env("JOY_GITHUB_BASE", remote_base.path())
+    .env("JOY_HOME", &joy_home)
+    .args(["--json", "tree"])
+    .assert()
+    .success();
+  let tree_payload = json_stdout(&tree_assert.get_output().stdout);
+  assert_eq!(tree_payload["data"]["roots"], serde_json::json!(["harnesslabs/igneous"]));
+  let tree_packages = tree_payload["data"]["packages"].as_array().expect("tree packages");
+  let igneous_pkg = tree_packages
+    .iter()
+    .find(|pkg| pkg.get("id").and_then(|v| v.as_str()) == Some("harnesslabs/igneous"))
+    .expect("igneous package");
+  assert_eq!(igneous_pkg["deps"], serde_json::json!(["xsimd/xsimd"]));
+  let xsimd_pkg = tree_packages
+    .iter()
+    .find(|pkg| pkg.get("id").and_then(|v| v.as_str()) == Some("xsimd/xsimd"))
+    .expect("xsimd package");
+  assert_eq!(xsimd_pkg["direct"], false);
+
+  let mut why = cargo_bin_cmd!("joy");
+  let why_assert = why
+    .current_dir(temp.path())
+    .env("JOY_GITHUB_BASE", remote_base.path())
+    .env("JOY_HOME", &joy_home)
+    .args(["--json", "why", "xsimd/xsimd"])
+    .assert()
+    .success();
+  let why_payload = json_stdout(&why_assert.get_output().stdout);
+  assert_eq!(why_payload["command"], "why");
+  assert_eq!(why_payload["data"]["locked"], false);
+  assert!(
+    why_payload["data"]["paths"]
+      .as_array()
+      .expect("paths")
+      .iter()
+      .any(|path| path == &serde_json::json!(["harnesslabs/igneous", "xsimd/xsimd"])),
+    "expected why to show nested path"
+  );
+}
+
+#[test]
+fn add_resolves_nested_registry_dependency_declared_by_package_manifest() {
+  let temp = TempDir::new().expect("tempdir");
+  init_project(&temp);
+  if !git_is_available() {
+    eprintln!("skipping test: git is not available");
+    return;
+  }
+
+  let remote_base = TempDir::new().expect("remote base");
+  let Some((_xsimd_bare, _xsimd_commit)) = setup_local_github_remote_in_base(
+    remote_base.path(),
+    "xsimd/xsimd",
+    &[("include/xsimd/xsimd.hpp", "// xsimd fixture header\n")],
+  ) else {
+    return;
+  };
+  let Some((_igneous_bare, _igneous_commit)) = setup_local_github_remote_in_base(
+    remote_base.path(),
+    "harnesslabs/igneous",
+    &[
+      (
+        "joy.toml",
+        r#"[package]
+id = "harnesslabs/igneous"
+version = "0.3.0"
+kind = "header_only"
+
+[headers]
+include_roots = ["include"]
+
+[dependencies]
+"xsimd/xsimd" = { source = "registry", version = "^1" }
+"#,
+      ),
+      ("include/igneous/igneous.hpp", "// igneous fixture header\n"),
+    ],
+  ) else {
+    return;
+  };
+  let Some((_registry_remote_base, _registry_work, registry_bare_repo)) =
+    setup_local_registry_index("xsimd/xsimd", &[("1.0.0", "HEAD")])
+  else {
+    return;
+  };
+  let joy_home = temp.path().join("joy-home");
+
+  let mut add = cargo_bin_cmd!("joy");
+  add
+    .current_dir(temp.path())
+    .env("JOY_GITHUB_BASE", remote_base.path())
+    .env("JOY_REGISTRY_DEFAULT", &registry_bare_repo)
+    .env("JOY_HOME", &joy_home)
+    .args(["add", "harnesslabs/igneous"])
+    .assert()
+    .success();
+
+  assert!(
+    temp.path().join(".joy/include/deps/xsimd_xsimd/xsimd/xsimd.hpp").is_file(),
+    "expected nested registry dependency headers to be materialized"
+  );
+
+  let lock = read_lockfile_toml(&temp);
+  let xsimd_locked = lock["packages"]
+    .as_array()
+    .expect("lock packages")
+    .iter()
+    .find(|pkg| pkg.get("id").and_then(|v| v.as_str()) == Some("xsimd/xsimd"))
+    .expect("xsimd lock package");
+  assert_eq!(xsimd_locked["source"].as_str(), Some("registry"));
+  assert_eq!(xsimd_locked["registry"].as_str(), Some("default"));
+  assert_eq!(xsimd_locked["source_package"].as_str(), Some("xsimd/xsimd"));
+  assert_eq!(xsimd_locked["requested_requirement"].as_str(), Some("^1"));
+  assert_eq!(xsimd_locked["resolved_version"].as_str(), Some("1.0.0"));
+
+  let mut why = cargo_bin_cmd!("joy");
+  let why_assert = why
+    .current_dir(temp.path())
+    .env("JOY_GITHUB_BASE", remote_base.path())
+    .env("JOY_REGISTRY_DEFAULT", &registry_bare_repo)
+    .env("JOY_HOME", &joy_home)
+    .args(["--json", "why", "xsimd/xsimd"])
+    .assert()
+    .success();
+  let why_payload = json_stdout(&why_assert.get_output().stdout);
+  assert!(
+    why_payload["data"]["paths"]
+      .as_array()
+      .expect("paths")
+      .iter()
+      .any(|path| path == &serde_json::json!(["harnesslabs/igneous", "xsimd/xsimd"]))
+  );
+  assert_eq!(why_payload["data"]["package_info"]["source"].as_str(), Some("registry"));
+  assert_eq!(why_payload["data"]["package_info"]["registry"].as_str(), Some("default"));
 }
 
 #[test]
@@ -997,7 +1518,7 @@ fn sync_offline_succeeds_with_warm_cache() {
   assert_eq!(payload["command"], "sync");
   assert_eq!(payload["ok"], true);
   assert_eq!(payload["data"]["toolchain"], Value::Null);
-  assert_eq!(payload["data"]["lockfile_updated"], true);
+  assert_eq!(payload["data"]["lockfile_updated"], false);
   let lock = read_lockfile_toml(&temp);
   let pkg = lock["packages"]
     .as_array()
@@ -1131,7 +1652,7 @@ fn build_offline_succeeds_with_warm_cache() {
   let payload = json_stdout(&assert.get_output().stdout);
   assert_eq!(payload["command"], "build");
   assert_eq!(payload["ok"], true);
-  assert_eq!(payload["data"]["lockfile_updated"], true);
+  assert_eq!(payload["data"]["lockfile_updated"], false);
 }
 
 #[test]
@@ -1546,6 +2067,195 @@ fn registry_add_tree_sync_and_offline_tree_include_registry_metadata() {
     .args(["--json", "--offline", "tree"])
     .assert()
     .success();
+}
+
+#[test]
+fn registry_v2_manifest_summary_fallback_resolves_nested_dependencies_without_package_manifest_file()
+ {
+  let temp = TempDir::new().expect("tempdir");
+  init_project(&temp);
+  if !git_is_available() {
+    eprintln!("skipping test: git is not available");
+    return;
+  }
+
+  let pkg_remote_base = TempDir::new().expect("pkg remote base");
+  let Some((_xsimd_bare, _xsimd_commit)) = setup_local_github_remote_in_base(
+    pkg_remote_base.path(),
+    "xsimd/xsimd",
+    &[("include/xsimd/xsimd.hpp", "// xsimd header\n")],
+  ) else {
+    return;
+  };
+  let Some((_igneous_bare, _igneous_commit)) = setup_local_github_remote_in_base(
+    pkg_remote_base.path(),
+    "harnesslabs/igneous",
+    &[
+      ("README.md", "# igneous no joy manifest\n"),
+      ("include/igneous/igneous.hpp", "// igneous header\n"),
+    ],
+  ) else {
+    return;
+  };
+
+  let registry_index = r#"version = 2
+
+[[packages]]
+id = "harnesslabs/igneous"
+
+[[packages.versions]]
+version = "0.3.0"
+source = "github"
+package = "harnesslabs/igneous"
+rev = "HEAD"
+
+[packages.versions.manifest]
+kind = "header_only"
+headers_include_roots = ["include"]
+
+[[packages.versions.manifest.dependencies]]
+id = "xsimd/xsimd"
+source = "github"
+rev = "HEAD"
+"#;
+  let Some((_registry_remote_base, _registry_work, registry_bare_repo)) =
+    setup_local_registry_index_raw(registry_index)
+  else {
+    return;
+  };
+
+  let joy_home = temp.path().join("joy-home");
+
+  let mut add = cargo_bin_cmd!("joy");
+  let add_assert = add
+    .current_dir(temp.path())
+    .env("JOY_GITHUB_BASE", pkg_remote_base.path())
+    .env("JOY_REGISTRY_DEFAULT", &registry_bare_repo)
+    .env("JOY_HOME", &joy_home)
+    .args(["--json", "add", "registry:harnesslabs/igneous", "--version", "^0"])
+    .assert()
+    .success();
+  let add_payload = json_stdout(&add_assert.get_output().stdout);
+  assert_eq!(add_payload["data"]["source"], "registry");
+  assert_eq!(add_payload["data"]["registry"], "default");
+  assert_eq!(add_payload["data"]["resolved_version"], "0.3.0");
+
+  assert!(
+    temp.path().join(".joy/include/deps/xsimd_xsimd/xsimd/xsimd.hpp").is_file(),
+    "expected nested dependency from registry v2 manifest summary fallback"
+  );
+
+  let lock = read_lockfile_toml(&temp);
+  let igneous_locked = lock["packages"]
+    .as_array()
+    .expect("lock packages")
+    .iter()
+    .find(|pkg| pkg.get("id").and_then(|v| v.as_str()) == Some("harnesslabs/igneous"))
+    .expect("igneous lock package");
+  assert_eq!(igneous_locked["source"].as_str(), Some("registry"));
+  assert_eq!(igneous_locked["resolved_version"].as_str(), Some("0.3.0"));
+  let xsimd_locked = lock["packages"]
+    .as_array()
+    .expect("lock packages")
+    .iter()
+    .find(|pkg| pkg.get("id").and_then(|v| v.as_str()) == Some("xsimd/xsimd"))
+    .expect("xsimd lock package");
+  assert_eq!(xsimd_locked["source"].as_str(), Some("github"));
+
+  let mut why = cargo_bin_cmd!("joy");
+  let why_assert = why
+    .current_dir(temp.path())
+    .env("JOY_GITHUB_BASE", pkg_remote_base.path())
+    .env("JOY_REGISTRY_DEFAULT", &registry_bare_repo)
+    .env("JOY_HOME", &joy_home)
+    .args(["--json", "why", "xsimd/xsimd"])
+    .assert()
+    .success();
+  let why_payload = json_stdout(&why_assert.get_output().stdout);
+  assert!(
+    why_payload["data"]["paths"]
+      .as_array()
+      .expect("paths")
+      .iter()
+      .any(|path| path == &serde_json::json!(["harnesslabs/igneous", "xsimd/xsimd"]))
+  );
+}
+
+#[test]
+fn registry_v2_manifest_digest_mismatch_returns_stable_error_code() {
+  let temp = TempDir::new().expect("tempdir");
+  init_project(&temp);
+  if !git_is_available() {
+    eprintln!("skipping test: git is not available");
+    return;
+  }
+
+  let pkg_remote_base = TempDir::new().expect("pkg remote base");
+  let Some((_igneous_bare, _igneous_commit)) = setup_local_github_remote_in_base(
+    pkg_remote_base.path(),
+    "harnesslabs/igneous",
+    &[
+      (
+        "joy.toml",
+        r#"[package]
+id = "harnesslabs/igneous"
+version = "0.3.0"
+kind = "header_only"
+
+[headers]
+include_roots = ["include"]
+"#,
+      ),
+      ("include/igneous/igneous.hpp", "// igneous header\n"),
+    ],
+  ) else {
+    return;
+  };
+
+  let registry_index = r#"version = 2
+
+[[packages]]
+id = "harnesslabs/igneous"
+
+[[packages.versions]]
+version = "0.3.0"
+source = "github"
+package = "harnesslabs/igneous"
+rev = "HEAD"
+
+[packages.versions.manifest]
+digest = "sha256:not-the-real-digest"
+kind = "header_only"
+headers_include_roots = ["include"]
+"#;
+  let Some((_registry_remote_base, _registry_work, registry_bare_repo)) =
+    setup_local_registry_index_raw(registry_index)
+  else {
+    return;
+  };
+  let joy_home = temp.path().join("joy-home");
+
+  let manifest_path = temp.path().join("joy.toml");
+  let mut manifest = fs::read_to_string(&manifest_path).expect("manifest");
+  manifest
+    .push_str("[dependencies.\"harnesslabs/igneous\"]\nsource = \"registry\"\nversion = \"^0\"\n");
+  fs::write(&manifest_path, manifest).expect("write manifest");
+
+  let mut tree = cargo_bin_cmd!("joy");
+  let assert = tree
+    .current_dir(temp.path())
+    .env("JOY_GITHUB_BASE", pkg_remote_base.path())
+    .env("JOY_REGISTRY_DEFAULT", &registry_bare_repo)
+    .env("JOY_HOME", &joy_home)
+    .args(["--json", "tree"])
+    .assert()
+    .failure();
+  let payload = json_stdout(&assert.get_output().stdout);
+  assert_eq!(payload["command"], "tree");
+  assert_eq!(payload["error"]["code"], "package_metadata_mismatch");
+  assert!(
+    payload["error"]["message"].as_str().is_some_and(|msg| msg.contains("harnesslabs/igneous"))
+  );
 }
 
 #[test]

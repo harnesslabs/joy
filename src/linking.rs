@@ -46,6 +46,39 @@ pub fn install_headers(
   install_headers_inner(project_include_dir, package, source_dir, LinkMode::Auto)
 }
 
+/// Install a specific header root directory into an explicit destination path.
+///
+/// This is used by the graph-driven materialization path to place multiple exported header roots
+/// under canonical per-package directories while preserving the legacy `include/deps/<slug>` alias.
+pub fn install_header_root_to_path(
+  source_header_root: &Path,
+  dest_path: &Path,
+) -> Result<&'static str, LinkingError> {
+  if !source_header_root.is_dir() {
+    return Err(LinkingError::Io {
+      action: "reading source header root".into(),
+      path: source_header_root.to_path_buf(),
+      source: std::io::Error::new(std::io::ErrorKind::NotFound, "header root directory missing"),
+    });
+  }
+
+  if let Some(parent) = dest_path.parent() {
+    fs::create_dir_all(parent).map_err(|source| LinkingError::Io {
+      action: "creating header install parent directory".into(),
+      path: parent.to_path_buf(),
+      source,
+    })?;
+  }
+
+  remove_existing_path(dest_path).map_err(|source| LinkingError::Io {
+    action: "removing existing header install path".into(),
+    path: dest_path.to_path_buf(),
+    source,
+  })?;
+
+  link_or_copy_dir(source_header_root, dest_path, LinkMode::Auto)
+}
+
 /// Copy compiled library artifacts from the ABI cache into the project-local `.joy/lib`.
 pub fn install_compiled_libraries(
   project_lib_dir: &Path,
