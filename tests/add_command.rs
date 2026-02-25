@@ -13,6 +13,17 @@ fn json_stdout(output: &[u8]) -> Value {
   serde_json::from_slice(output).expect("valid json")
 }
 
+fn normalize_pathish_text(raw: &str) -> String {
+  // Compile database JSON on Windows stores escaped backslashes (e.g. `\\`),
+  // so a naive slash replacement produces `//`. Collapse repeated slashes so
+  // path-fragment assertions remain platform-agnostic.
+  let mut normalized = raw.replace('\\', "/");
+  while normalized.contains("//") {
+    normalized = normalized.replace("//", "/");
+  }
+  normalized
+}
+
 fn json_object_keys(value: &Value) -> Vec<String> {
   let mut keys =
     value.as_object().expect("json object").keys().map(ToString::to_string).collect::<Vec<_>>();
@@ -1015,7 +1026,7 @@ fn sync_materializes_header_only_dependencies_and_lockfile_without_app_build() {
     let compile_db = temp.path().join("compile_commands.json");
     assert!(compile_db.is_file(), "expected root compile_commands.json after sync");
     let compile_db_raw = fs::read_to_string(&compile_db).expect("read compile db");
-    let normalized = compile_db_raw.replace('\\', "/");
+    let normalized = normalize_pathish_text(&compile_db_raw);
     assert!(
       normalized.contains("/.joy/include/deps/nlohmann_json")
         || normalized.contains("/.joy/include/pkg/nlohmann_json/include"),
@@ -1074,7 +1085,7 @@ fn add_generates_compile_commands_json_when_toolchain_is_available() {
   let compile_db = temp.path().join("compile_commands.json");
   assert!(compile_db.is_file(), "expected add to refresh compile_commands.json");
   let raw = fs::read_to_string(&compile_db).expect("read compile db");
-  let normalized = raw.replace('\\', "/");
+  let normalized = normalize_pathish_text(&raw);
   assert!(normalized.contains("src/main.cpp"), "expected project source in compile db");
   assert!(
     normalized.contains("/.joy/include/deps/nlohmann_json")
