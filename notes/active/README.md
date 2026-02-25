@@ -1,9 +1,11 @@
 # Active Notes
 
-Use this directory for current and upcoming work notes after the Phase 1–6 milestone archive.
+Use this directory only for the current roadmap wave and immediately actionable work.
 
-Recommended files:
-- `next-work.md` for short-term planning
-- milestone notes with YAML frontmatter as implementation proceeds
+Keep this directory compact:
 
-When a milestone is complete, move its tracker and source notes into a new archive folder under `/Users/autoparallel/Code/joy/notes/archive/` and create a `MILESTONE.md` summary.
+- one roadmap wave note (tracker + issue map)
+- one `next-work.md` queue note
+- focused audit / design notes for in-progress work
+
+Move completed milestone notes and stale source notes into `/Users/autoparallel/Code/joy/notes/archive/` once they are no longer part of active execution.

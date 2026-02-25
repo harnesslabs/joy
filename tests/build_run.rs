@@ -49,7 +49,7 @@ fn build_json_compiles_template_project_when_tooling_is_available() {
   assert!(payload["data"]["toolchain"]["compiler_kind"].is_string());
   assert!(payload["data"]["toolchain"]["ninja_path"].is_string());
   let stderr = String::from_utf8_lossy(&assert.get_output().stderr);
-  assert!(!stderr.contains("==>"), "json mode should not emit human progress prefixes");
+  assert!(!stderr.contains("Starting build"), "json mode should not emit human progress lines");
 
   assert!(temp.path().join(".joy/build/build.ninja").is_file());
   let project_name = temp.path().file_name().and_then(|name| name.to_str()).expect("temp name");
@@ -71,9 +71,9 @@ fn build_human_mode_emits_progress_prefixes_when_tooling_is_available() {
   let mut cmd = cargo_bin_cmd!("joy");
   let assert = cmd.current_dir(temp.path()).arg("build").assert().success();
   let stderr = String::from_utf8_lossy(&assert.get_output().stderr);
-  assert!(stderr.contains("==> Starting build"));
-  assert!(stderr.contains("-> Generating build graph"));
-  assert!(stderr.contains("-> Compiling and linking"));
+  assert!(stderr.contains("Starting build"));
+  assert!(stderr.contains("Generating build graph"));
+  assert!(stderr.contains("Compiling and linking"));
 }
 
 #[test]

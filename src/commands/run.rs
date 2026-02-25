@@ -4,7 +4,7 @@ use std::process::Command;
 use crate::cli::{RunArgs, RuntimeFlags};
 use crate::commands::CommandOutput;
 use crate::error::JoyError;
-use crate::output::HumanMessageBuilder;
+use crate::output::{HumanMessageBuilder, progress_detail};
 
 use super::build;
 
@@ -18,6 +18,10 @@ pub fn handle(args: RunArgs, runtime: RuntimeFlags) -> Result<CommandOutput, Joy
     progress: runtime.progress,
   })
   .map_err(remap_build_error_for_run)?;
+
+  if runtime.progress {
+    progress_detail("Executing built binary");
+  }
 
   let output = Command::new(&execution.binary_path).args(&args.args).output().map_err(|err| {
     JoyError::new(

@@ -1,6 +1,10 @@
-use clap::{Args, Parser, Subcommand};
+use clap::{Args, Parser, Subcommand, ValueEnum};
+use std::env;
+use std::io::IsTerminal;
 
-use crate::output::OutputMode;
+use crate::output::{
+  ColorPreference, GlyphMode, GlyphPreference, HumanUiConfig, OutputMode, ProgressPreference,
+};
 
 const CLI_AFTER_HELP: &str = "\
 Examples:
@@ -14,6 +18,13 @@ Common workflow:
   1. `joy add <package>` to declare dependencies
   2. `joy sync` to materialize dependency + lockfile state
   3. `joy build` or `joy run` to compile and execute
+
+Human UX controls:
+  joy --color always --glyphs unicode doctor
+  joy --progress never build
+
+Docs:
+  https://harnesslabs.github.io/joy/
 ";
 
 #[derive(Debug, Parser)]
@@ -27,6 +38,26 @@ pub struct Cli {
   /// Emit machine-readable JSON output.
   #[arg(long, visible_alias = "machine", global = true)]
   pub json: bool,
+
+  /// Control ANSI color rendering in human output.
+  #[arg(long, value_enum, global = true)]
+  pub color: Option<CliColorArg>,
+
+  /// Control progress/spinner rendering in human output.
+  #[arg(long, value_enum, global = true)]
+  pub progress: Option<CliProgressArg>,
+
+  /// Control terminal glyph style in human output (Unicode vs ASCII fallbacks).
+  #[arg(long, value_enum, global = true)]
+  pub glyphs: Option<CliGlyphsArg>,
+
+  /// Disable progress output (`--progress=never`).
+  #[arg(long, hide = true, global = true, conflicts_with = "progress")]
+  pub no_progress: bool,
+
+  /// Force ASCII glyphs (`--glyphs=ascii`).
+  #[arg(long, hide = true, global = true, conflicts_with = "glyphs")]
+  pub ascii: bool,
 
   /// Workspace member package to operate on when running from a workspace root.
   #[arg(long, short = 'p', global = true)]
@@ -50,12 +81,54 @@ impl Cli {
   }
 
   pub fn runtime_flags(&self) -> RuntimeFlags {
+    let ui = self.resolve_human_ui();
+    let progress_enabled =
+      !self.json && !matches!(resolved_progress_preference(self), ProgressPreference::Never);
     RuntimeFlags {
       offline: self.offline || self.frozen,
       frozen: self.frozen,
-      progress: !self.json,
+      progress: progress_enabled,
+      ui,
       workspace_package: self.workspace_package.clone(),
     }
+  }
+
+  fn resolve_human_ui(&self) -> HumanUiConfig {
+    if self.json {
+      return HumanUiConfig::default();
+    }
+
+    let stderr_is_tty = std::io::stderr().is_terminal();
+    let term_dumb = env::var("TERM").ok().map(|v| v.eq_ignore_ascii_case("dumb")).unwrap_or(false);
+    let ci = env::var_os("CI").is_some();
+
+    let color_pref = resolved_color_preference(self);
+    let progress_pref = resolved_progress_preference(self);
+    let glyph_pref = resolved_glyph_preference(self);
+
+    let color_enabled = match color_pref {
+      ColorPreference::Always => true,
+      ColorPreference::Never => false,
+      ColorPreference::Auto => stderr_is_tty && !term_dumb,
+    };
+    let progress_enabled = match progress_pref {
+      ProgressPreference::Always => true,
+      ProgressPreference::Never => false,
+      ProgressPreference::Auto => stderr_is_tty && !term_dumb && !ci,
+    };
+    let glyph_mode = match glyph_pref {
+      GlyphPreference::Unicode => GlyphMode::Unicode,
+      GlyphPreference::Ascii => GlyphMode::Ascii,
+      GlyphPreference::Auto => {
+        if stderr_is_tty && !term_dumb {
+          GlyphMode::Unicode
+        } else {
+          GlyphMode::Ascii
+        }
+      },
+    };
+
+    HumanUiConfig { color_enabled, progress_enabled, glyph_mode, stderr_is_tty }
   }
 }
 
@@ -64,7 +137,135 @@ pub struct RuntimeFlags {
   pub offline: bool,
   pub frozen: bool,
   pub progress: bool,
+  pub ui: HumanUiConfig,
   pub workspace_package: Option<String>,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, ValueEnum)]
+pub enum CliColorArg {
+  Auto,
+  Always,
+  Never,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, ValueEnum)]
+pub enum CliProgressArg {
+  Auto,
+  Always,
+  Never,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, ValueEnum)]
+pub enum CliGlyphsArg {
+  Auto,
+  Unicode,
+  Ascii,
+}
+
+fn resolved_color_preference(cli: &Cli) -> ColorPreference {
+  if let Some(value) = cli.color {
+    return map_color_arg(value);
+  }
+  if let Some(value) = parse_color_env(env::var("JOY_COLOR").ok().as_deref()) {
+    return value;
+  }
+  if env::var_os("NO_COLOR").is_some() {
+    return ColorPreference::Never;
+  }
+  if env_var_truthy("CLICOLOR_FORCE") {
+    return ColorPreference::Always;
+  }
+  if env::var("CLICOLOR").ok().as_deref() == Some("0") {
+    return ColorPreference::Never;
+  }
+  ColorPreference::Auto
+}
+
+fn resolved_progress_preference(cli: &Cli) -> ProgressPreference {
+  if cli.no_progress {
+    return ProgressPreference::Never;
+  }
+  if let Some(value) = cli.progress {
+    return map_progress_arg(value);
+  }
+  if let Some(value) = parse_progress_env(env::var("JOY_PROGRESS").ok().as_deref()) {
+    return value;
+  }
+  ProgressPreference::Auto
+}
+
+fn resolved_glyph_preference(cli: &Cli) -> GlyphPreference {
+  if cli.ascii {
+    return GlyphPreference::Ascii;
+  }
+  if let Some(value) = cli.glyphs {
+    return map_glyphs_arg(value);
+  }
+  if let Some(value) = parse_glyphs_env(env::var("JOY_GLYPHS").ok().as_deref()) {
+    return value;
+  }
+  GlyphPreference::Auto
+}
+
+fn map_color_arg(value: CliColorArg) -> ColorPreference {
+  match value {
+    CliColorArg::Auto => ColorPreference::Auto,
+    CliColorArg::Always => ColorPreference::Always,
+    CliColorArg::Never => ColorPreference::Never,
+  }
+}
+
+fn map_progress_arg(value: CliProgressArg) -> ProgressPreference {
+  match value {
+    CliProgressArg::Auto => ProgressPreference::Auto,
+    CliProgressArg::Always => ProgressPreference::Always,
+    CliProgressArg::Never => ProgressPreference::Never,
+  }
+}
+
+fn map_glyphs_arg(value: CliGlyphsArg) -> GlyphPreference {
+  match value {
+    CliGlyphsArg::Auto => GlyphPreference::Auto,
+    CliGlyphsArg::Unicode => GlyphPreference::Unicode,
+    CliGlyphsArg::Ascii => GlyphPreference::Ascii,
+  }
+}
+
+fn parse_color_env(value: Option<&str>) -> Option<ColorPreference> {
+  match value?.trim().to_ascii_lowercase().as_str() {
+    "auto" => Some(ColorPreference::Auto),
+    "always" | "1" | "true" | "on" => Some(ColorPreference::Always),
+    "never" | "0" | "false" | "off" => Some(ColorPreference::Never),
+    _ => None,
+  }
+}
+
+fn parse_progress_env(value: Option<&str>) -> Option<ProgressPreference> {
+  match value?.trim().to_ascii_lowercase().as_str() {
+    "auto" => Some(ProgressPreference::Auto),
+    "always" | "1" | "true" | "on" => Some(ProgressPreference::Always),
+    "never" | "0" | "false" | "off" => Some(ProgressPreference::Never),
+    _ => None,
+  }
+}
+
+fn parse_glyphs_env(value: Option<&str>) -> Option<GlyphPreference> {
+  match value?.trim().to_ascii_lowercase().as_str() {
+    "auto" => Some(GlyphPreference::Auto),
+    "unicode" | "utf8" | "utf-8" | "1" | "true" => Some(GlyphPreference::Unicode),
+    "ascii" | "0" | "false" => Some(GlyphPreference::Ascii),
+    _ => None,
+  }
+}
+
+fn env_var_truthy(name: &str) -> bool {
+  env::var(name)
+    .ok()
+    .map(|v| {
+      let trimmed = v.trim();
+      !trimmed.is_empty() && trimmed != "0"
+    })
+    .unwrap_or(false)
 }
 
 #[derive(Debug, Subcommand)]
@@ -185,7 +386,7 @@ pub struct RunArgs {
 mod tests {
   use clap::Parser;
 
-  use super::{Cli, Commands};
+  use super::{Cli, CliColorArg, CliGlyphsArg, CliProgressArg, Commands};
 
   #[test]
   fn requires_a_subcommand() {
@@ -210,10 +411,11 @@ mod tests {
   fn parses_init_force_with_json_alias() {
     let cli = Cli::parse_from(["joy", "--machine", "init", "--force"]);
     match cli.command {
-      Commands::Init(args) => assert!(args.force),
+      Commands::Init(ref args) => assert!(args.force),
       other => panic!("expected init, got {other:?}"),
     }
     assert!(cli.json);
+    assert!(!cli.runtime_flags().progress);
   }
 
   #[test]
@@ -362,5 +564,37 @@ mod tests {
       },
       other => panic!("expected sync, got {other:?}"),
     }
+  }
+
+  #[test]
+  fn parses_global_ui_flags() {
+    let cli = Cli::parse_from([
+      "joy",
+      "--color",
+      "always",
+      "--progress",
+      "never",
+      "--glyphs",
+      "ascii",
+      "doctor",
+    ]);
+    assert_eq!(cli.color, Some(CliColorArg::Always));
+    assert_eq!(cli.progress, Some(CliProgressArg::Never));
+    assert_eq!(cli.glyphs, Some(CliGlyphsArg::Ascii));
+    assert!(!cli.no_progress);
+    assert!(!cli.ascii);
+    let runtime = cli.runtime_flags();
+    assert!(!runtime.progress);
+    assert!(runtime.ui.color_enabled);
+  }
+
+  #[test]
+  fn parses_hidden_ui_alias_flags() {
+    let cli = Cli::parse_from(["joy", "--no-progress", "--ascii", "doctor"]);
+    assert!(cli.no_progress);
+    assert!(cli.ascii);
+    let runtime = cli.runtime_flags();
+    assert!(!runtime.progress);
+    assert_eq!(runtime.ui.glyph_mode, crate::output::GlyphMode::Ascii);
   }
 }

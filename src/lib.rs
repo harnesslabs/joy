@@ -34,7 +34,7 @@ use std::process::ExitCode;
 
 use crate::cli::Cli;
 use crate::commands::dispatch;
-use crate::output::{print_error, print_success};
+use crate::output::{configure_ui, print_error, print_success};
 
 /// Run the `joy` CLI using the current process arguments.
 pub fn run() -> ExitCode {
@@ -69,6 +69,7 @@ where
 
   let mode = cli.output_mode();
   let runtime = cli.runtime_flags();
+  configure_ui(mode, runtime.ui);
   match dispatch(cli.command, runtime) {
     Ok(result) => {
       if let Err(err) = print_success(mode, &result) {

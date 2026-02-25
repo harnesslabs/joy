@@ -14,6 +14,16 @@ lint:
 recipe-check:
   cargo run --quiet -- recipe-check --json
 
+docs-build:
+  mdbook build book
+
+docs-serve:
+  mdbook serve book
+
+docs-lint:
+  mdbook build book
+  mdbook test book
+
 dist-metadata-check:
   ruby -c packaging/homebrew/joy.rb
   jq empty packaging/scoop/joy.json
@@ -75,6 +85,10 @@ ci-local:
 
 ci-pr:
   just ci-local
+  just ci-docs
+
+ci-docs:
+  just docs-lint
 
 clean:
   rm -rf target .joy
