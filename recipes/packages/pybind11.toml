@@ -1,0 +1,10 @@
+id = "pybind/pybind11"
+slug = "pybind11"
+source = "github"
+kind = "header_only"
+
+[headers]
+include_roots = ["include"]
+
+[deps]
+packages = []

@@ -1,0 +1,10 @@
+id = "martinmoene/span-lite"
+slug = "span_lite"
+source = "github"
+kind = "header_only"
+
+[headers]
+include_roots = ["include"]
+
+[deps]
+packages = []

@@ -1,0 +1,10 @@
+id = "doctest/doctest"
+slug = "doctest"
+source = "github"
+kind = "header_only"
+
+[headers]
+include_roots = ["doctest"]
+
+[deps]
+packages = []

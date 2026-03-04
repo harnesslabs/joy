@@ -1,0 +1,10 @@
+id = "martinus/nanobench"
+slug = "nanobench"
+source = "github"
+kind = "header_only"
+
+[headers]
+include_roots = ["src/include"]
+
+[deps]
+packages = []

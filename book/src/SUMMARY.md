@@ -19,6 +19,7 @@
   - [Machine Interface](reference/machine-interface.md)
   - [Error Codes](reference/error-codes.md)
   - [Releasing](reference/releasing.md)
+  - [Incident Response Runbook](reference/incident-response.md)
 - [Project Status](status/index.md)
   - [Roadmap / Deferred Features](status/deferred.md)
 - [Contributing Docs](contributing/docs.md)

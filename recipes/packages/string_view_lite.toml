@@ -1,0 +1,10 @@
+id = "martinmoene/string-view-lite"
+slug = "string_view_lite"
+source = "github"
+kind = "header_only"
+
+[headers]
+include_roots = ["include"]
+
+[deps]
+packages = []

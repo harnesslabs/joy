@@ -270,6 +270,9 @@ fn env_var_truthy(name: &str) -> bool {
 
 #[derive(Debug, Subcommand)]
 pub enum Commands {
+  /// Print CLI/build version information.
+  #[command(after_help = "Examples:\n  joy version\n  joy --json version")]
+  Version(VersionArgs),
   /// Create a new joy project in a new directory.
   New(NewArgs),
   /// Initialize a joy project in the current directory.
@@ -361,8 +364,22 @@ pub struct WhyArgs {
   pub locked: bool,
 }
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq, ValueEnum)]
+pub enum OutdatedSourceArg {
+  All,
+  Registry,
+  Github,
+}
+
 #[derive(Debug, Args)]
-pub struct OutdatedArgs {}
+pub struct OutdatedArgs {
+  /// Restrict update checks to a dependency source subset.
+  #[arg(long, value_enum, default_value_t = OutdatedSourceArg::All)]
+  pub sources: OutdatedSourceArg,
+}
+
+#[derive(Debug, Args)]
+pub struct VersionArgs {}
 
 #[derive(Debug, Args)]
 pub struct MetadataArgs {}
@@ -413,7 +430,16 @@ pub struct RunArgs {
 mod tests {
   use clap::Parser;
 
-  use super::{Cli, CliColorArg, CliGlyphsArg, CliProgressArg, Commands};
+  use super::{Cli, CliColorArg, CliGlyphsArg, CliProgressArg, Commands, OutdatedSourceArg};
+
+  #[test]
+  fn parses_version_command() {
+    let cli = Cli::parse_from(["joy", "version"]);
+    match cli.command {
+      Commands::Version(_) => {},
+      other => panic!("expected version, got {other:?}"),
+    }
+  }
 
   #[test]
   fn requires_a_subcommand() {
@@ -552,7 +578,16 @@ mod tests {
   fn parses_outdated_command() {
     let cli = Cli::parse_from(["joy", "outdated"]);
     match cli.command {
-      Commands::Outdated(_) => {},
+      Commands::Outdated(args) => assert_eq!(args.sources, OutdatedSourceArg::All),
+      other => panic!("expected outdated, got {other:?}"),
+    }
+  }
+
+  #[test]
+  fn parses_outdated_sources_filter() {
+    let cli = Cli::parse_from(["joy", "outdated", "--sources", "github"]);
+    match cli.command {
+      Commands::Outdated(args) => assert_eq!(args.sources, OutdatedSourceArg::Github),
       other => panic!("expected outdated, got {other:?}"),
     }
   }

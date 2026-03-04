@@ -6,7 +6,13 @@ Status: `Shipped` (git-backed registry index mode, with optional v2 embedded met
 
 ## Configure the Default Registry
 
-Set `JOY_REGISTRY_DEFAULT` to a git URL or a local git repo path for the registry index.
+By default, `joy` uses the public default registry:
+
+```text
+https://github.com/harnesslabs/joy-registry.git
+```
+
+Override with `JOY_REGISTRY_DEFAULT` to point to a custom git URL or local git repo path.
 
 ```bash
 export JOY_REGISTRY_DEFAULT=/path/to/joy-registry.git

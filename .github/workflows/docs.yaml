@@ -40,10 +40,9 @@ jobs:
         with:
           key: docs/mdbook-tools
 
-      - name: Install mdBook and linkcheck
+      - name: Install mdBook
         run: |
-          cargo install --locked mdbook --version 0.4.43
-          cargo install --locked mdbook-linkcheck --version 0.7.7
+          cargo install --locked mdbook --version 0.5.2
 
       - name: Build docs
         run: mdbook build book
@@ -74,16 +73,15 @@ jobs:
         with:
           key: docs/mdbook-tools
 
-      - name: Install mdBook and linkcheck
+      - name: Install mdBook
         run: |
-          cargo install --locked mdbook --version 0.4.43
-          cargo install --locked mdbook-linkcheck --version 0.7.7
+          cargo install --locked mdbook --version 0.5.2
 
       - name: Build docs
         run: mdbook build book
 
       - name: Write custom domain CNAME
-        run: echo "joy.harnesslabs.dev" > book/dist/html/CNAME
+        run: echo "joy.harnesslabs.dev" > book/dist/CNAME
 
       - name: Configure Pages
         uses: actions/configure-pages@v5
@@ -91,7 +89,7 @@ jobs:
       - name: Upload Pages artifact
         uses: actions/upload-pages-artifact@v3
         with:
-          path: book/dist/html
+          path: book/dist
 
       - name: Deploy to GitHub Pages
         id: deployment

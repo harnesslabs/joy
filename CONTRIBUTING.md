@@ -73,6 +73,24 @@ Development history and milestone notes live in `/Users/autoparallel/Code/joy/no
   - `--json` / `--machine` is the stable automation interface
 - update the mdBook (`book/`) first for in-depth usage/reference docs; keep `README.md` as the overview/entrypoint
 
+## Branch Protection / Required Checks
+
+`main` should enforce required status checks before merge. Recommended required checks:
+
+- `fmt`
+- `docs`
+- `build / x86_64-unknown-linux-gnu`
+- `lint / x86_64-unknown-linux-gnu`
+- `test / x86_64-unknown-linux-gnu`
+- `compiled-e2e / x86_64-unknown-linux-gnu`
+
+Advisory/non-blocking checks:
+
+- `udeps / ...`
+- `semver`
+
+Release tags (`v*`) should be protected so only maintainers can create them, and admin bypass should remain disabled for standard branch protections.
+
 ## Release Process
 
 Release/versioning policy and the tagged GitHub release workflow are documented in:

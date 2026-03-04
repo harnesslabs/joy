@@ -90,6 +90,20 @@ Automation should use `--json` / `--machine` and rely on stable `error.code` val
 
 Reference docs live in the book and legacy stubs under [`docs/`](docs/).
 
+JSON envelopes include:
+
+- `schema_version`
+- `joy_version`
+- `ok`
+- `command`
+- `data` or `error`
+
+Use `joy --json version` for build/version metadata.
+
+## License
+
+MIT. See [`LICENSE`](LICENSE).
+
 ## Development
 
 Contributor docs and workflow notes:

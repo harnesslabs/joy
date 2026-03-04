@@ -5,17 +5,31 @@
 JSON output always uses one of two top-level envelopes:
 
 ```json
-{ "ok": true, "command": "<name>", "data": { ... } }
+{
+  "schema_version": "1",
+  "joy_version": "<semver>",
+  "ok": true,
+  "command": "<name>",
+  "data": { ... }
+}
 ```
 
 ```json
-{ "ok": false, "command": "<name>", "error": { "code": "<stable_code>", "message": "<text>" } }
+{
+  "schema_version": "1",
+  "joy_version": "<semver>",
+  "ok": false,
+  "command": "<name>",
+  "error": { "code": "<stable_code>", "message": "<text>" }
+}
 ```
 
 ## Compatibility Policy
 
 - Top-level envelope keys are stable: `ok`, `command`, and `data` or `error`.
-- Existing command payload keys are additive-only within the current roadmap wave.
+- Existing command payload keys are additive-only within a given `schema_version`.
+- `schema_version` changes only for intentional machine-interface contract revisions.
+- `joy_version` reports the CLI build version that produced the envelope.
 - Stable automation should key off `error.code`, not free-form `error.message`.
 - Human-mode output may change for UX improvements; automation should use `--json`.
 

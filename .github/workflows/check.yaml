@@ -16,12 +16,11 @@ jobs:
   recipes:
     name: recipes
     runs-on: ubuntu-latest
-    continue-on-error: true
     steps:
       - uses: actions/checkout@v4
 
       - name: Install Rust
-        uses: dtolnay/rust-toolchain@nightly
+        uses: dtolnay/rust-toolchain@stable
 
       - name: Rust Cache
         uses: Swatinem/rust-cache@v2
@@ -34,7 +33,6 @@ jobs:
   distribution-metadata:
     name: distribution-metadata
     runs-on: ubuntu-latest
-    continue-on-error: true
     steps:
       - uses: actions/checkout@v4
 
@@ -47,29 +45,52 @@ jobs:
   format:
     name: fmt
     runs-on: ubuntu-latest
-    continue-on-error: true
     steps:
       - uses: actions/checkout@v4
-      
-      - name: install Rust
-        uses: dtolnay/rust-toolchain@nightly
+
+      - name: Install Rust
+        uses: dtolnay/rust-toolchain@stable
         with:
           components: rustfmt
 
-      - name: install taplo
-        run: cargo install taplo-cli
+      - name: Install taplo
+        run: cargo install taplo-cli --locked
 
-      - name: run Rust fmt
+      - name: Run Rust fmt
         run: cargo fmt --all -- --check
 
-      - name: run TOML fmt
+      - name: Run TOML fmt
         run: taplo fmt --check
+
+  docs:
+    name: docs
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Install Rust
+        uses: dtolnay/rust-toolchain@stable
+
+      - name: Rust Cache
+        uses: Swatinem/rust-cache@v2
+        with:
+          key: check/docs/mdbook-tools
+
+      - name: Install mdBook
+        run: |
+          cargo install --locked mdbook --version 0.5.2
+
+      - name: Build docs
+        run: mdbook build book
+
+      - name: Test docs code blocks
+        run: mdbook test book
 
   per-target:
     name: ${{ matrix.job }} / ${{ matrix.target }}
     runs-on: ${{ matrix.os }}
-    continue-on-error: true
     strategy:
+      fail-fast: false
       matrix:
         include:
           - job: build
@@ -100,7 +121,7 @@ jobs:
       - uses: actions/checkout@v4
 
       - name: Install Rust
-        uses: dtolnay/rust-toolchain@nightly
+        uses: dtolnay/rust-toolchain@stable
         with:
           targets: ${{ matrix.target }}
           components: ${{ matrix.job == 'lint' && 'clippy' || '' }}
@@ -133,8 +154,8 @@ jobs:
   test:
     name: test / ${{ matrix.target }}
     runs-on: ${{ matrix.os }}
-    continue-on-error: true
     strategy:
+      fail-fast: false
       matrix:
         include:
           - os: ubuntu-latest
@@ -149,7 +170,7 @@ jobs:
       - uses: actions/checkout@v4
 
       - name: Install Rust
-        uses: dtolnay/rust-toolchain@nightly
+        uses: dtolnay/rust-toolchain@stable
         with:
           targets: ${{ matrix.target }}
 
@@ -176,8 +197,8 @@ jobs:
   compiled-e2e:
     name: compiled-e2e / ${{ matrix.target }}
     runs-on: ${{ matrix.os }}
-    continue-on-error: true
     strategy:
+      fail-fast: false
       matrix:
         include:
           - os: ubuntu-latest
@@ -192,7 +213,7 @@ jobs:
       - uses: actions/checkout@v4
 
       - name: Install Rust
-        uses: dtolnay/rust-toolchain@nightly
+        uses: dtolnay/rust-toolchain@stable
         with:
           targets: ${{ matrix.target }}
 
@@ -240,6 +261,7 @@ jobs:
     runs-on: ${{ matrix.os }}
     continue-on-error: true
     strategy:
+      fail-fast: false
       matrix:
         include:
           - os: ubuntu-latest
@@ -250,12 +272,12 @@ jobs:
             target: x86_64-pc-windows-gnu
     steps:
       - uses: actions/checkout@v4
-      
+
       - name: Install Rust
         uses: dtolnay/rust-toolchain@nightly
         with:
           targets: ${{ matrix.target }}
-      
+
       - name: Install MinGW (Windows)
         if: runner.os == 'Windows'
         run: |
@@ -268,10 +290,10 @@ jobs:
         uses: Swatinem/rust-cache@v2
         with:
           key: check/udeps/${{ matrix.target }}
-      
+
       - name: Install cargo-udeps
         run: cargo install cargo-udeps --locked
-      
+
       - name: Check unused dependencies
         run: cargo +nightly udeps --target ${{ matrix.target }} --workspace
 
@@ -285,12 +307,10 @@ jobs:
           fetch-depth: 0
 
       - name: Install Rust
-        uses: dtolnay/rust-toolchain@nightly
+        uses: dtolnay/rust-toolchain@stable
 
-      - name: Skip semver checks for unpublished crate baseline
-        run: |
-          echo "Skipping cargo-semver-checks in CI for now."
-          echo "Reason: crates.io already has an unrelated crate named 'joy', so the default"
-          echo "baseline resolution is not meaningful for this repository and causes false failures."
-          echo "Use a repo-local baseline command (see justfile: semver-main) when semver checks are"
-          echo "reintroduced as a required CI signal."
+      - name: Install cargo-semver-checks
+        run: cargo install cargo-semver-checks --locked
+
+      - name: Run semver checks against origin/main baseline
+        run: cargo semver-checks check-release --workspace --baseline-rev origin/main

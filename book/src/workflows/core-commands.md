@@ -49,6 +49,14 @@ joy tree
 joy --json tree
 ```
 
+Report available updates, optionally scoped by source backend:
+
+```bash
+joy outdated
+joy outdated --sources github
+joy outdated --sources registry
+```
+
 ## Build and Run
 
 Build the current project:
@@ -67,6 +75,13 @@ Pass arguments through to your program:
 
 ```bash
 joy run -- --app-arg value
+```
+
+## Version Metadata
+
+```bash
+joy version
+joy --json version
 ```
 
 ## Diagnose Local Environment

@@ -64,8 +64,7 @@ udeps:
   cargo +nightly udeps --workspace
 
 semver:
-  @echo "Skipping semver checks locally by default: crates.io baseline for crate name \`joy\` is unrelated to this repo."
-  @echo "Use \`just semver-main\` (preferred) or \`just semver-cratesio\` for debugging."
+  cargo semver-checks check-release --workspace --baseline-rev origin/main
 
 semver-main:
   cargo semver-checks check-release --workspace --baseline-rev origin/main

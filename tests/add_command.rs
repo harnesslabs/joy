@@ -2278,7 +2278,9 @@ rev = "HEAD"
     .success();
   let payload = json_stdout(&assert.get_output().stdout);
   assert_eq!(payload["command"], "outdated");
+  assert_eq!(payload["data"]["sources"], "all");
   assert_eq!(payload["data"]["summary"]["outdated_count"].as_u64(), Some(2));
+  assert_eq!(payload["data"]["summary"]["github_backed_count"].as_u64(), Some(1));
 
   let outdated_rows = payload["data"]["outdated"].as_array().expect("outdated rows");
   let nlohmann = outdated_rows
@@ -2304,7 +2306,38 @@ rev = "HEAD"
     .iter()
     .find(|row| row.get("id").and_then(|v| v.as_str()) == Some("harnesslabs/igneous"))
     .expect("igneous row");
-  assert_eq!(igneous["status"], "unsupported_source");
+  assert_eq!(igneous["status"], "github_non_semver_tags");
+  assert_eq!(igneous["check_method"], "unknown");
+}
+
+#[test]
+fn outdated_source_filter_can_exclude_github_without_registry_config() {
+  let temp = TempDir::new().expect("tempdir");
+  init_project(&temp);
+  let Some((remote_base, _bare_repo, _commit)) = setup_local_github_remote("harnesslabs/igneous")
+  else {
+    return;
+  };
+
+  let mut add = cargo_bin_cmd!("joy");
+  add
+    .current_dir(temp.path())
+    .env("JOY_GITHUB_BASE", remote_base.path())
+    .args(["add", "harnesslabs/igneous"])
+    .assert()
+    .success();
+
+  let mut outdated = cargo_bin_cmd!("joy");
+  let assert = outdated
+    .current_dir(temp.path())
+    .env("JOY_GITHUB_BASE", remote_base.path())
+    .args(["--json", "outdated", "--sources", "registry"])
+    .assert()
+    .success();
+  let payload = json_stdout(&assert.get_output().stdout);
+  assert_eq!(payload["command"], "outdated");
+  assert_eq!(payload["data"]["sources"], "registry");
+  assert_eq!(payload["data"]["summary"]["package_count"], 0);
 }
 
 #[test]

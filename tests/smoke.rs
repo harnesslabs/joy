@@ -44,6 +44,8 @@ fn json_mode_returns_json_for_missing_subcommand_parse_errors() {
 
   assert_eq!(payload["ok"], false);
   assert_eq!(payload["command"], "cli");
+  assert_eq!(payload["schema_version"], "1");
+  assert!(payload["joy_version"].as_str().is_some());
   assert_eq!(payload["error"]["code"], "cli_parse_error");
 }
 
@@ -55,6 +57,8 @@ fn json_mode_returns_json_for_subcommand_argument_parse_errors() {
 
   assert_eq!(payload["ok"], false);
   assert_eq!(payload["command"], "cli");
+  assert_eq!(payload["schema_version"], "1");
+  assert!(payload["joy_version"].as_str().is_some());
   assert_eq!(payload["error"]["code"], "cli_parse_error");
 }
 
@@ -66,6 +70,8 @@ fn recipe_check_json_validates_bundled_recipes() {
 
   assert_eq!(payload["ok"], true);
   assert_eq!(payload["command"], "recipe-check");
+  assert_eq!(payload["schema_version"], "1");
+  assert!(payload["joy_version"].as_str().is_some());
   assert!(payload["data"]["recipe_count"].as_u64().is_some_and(|n| n >= 3));
   assert!(
     payload["data"]["packages"]
@@ -84,6 +90,8 @@ fn doctor_json_reports_environment_checks() {
 
   assert_eq!(payload["ok"], true);
   assert_eq!(payload["command"], "doctor");
+  assert_eq!(payload["schema_version"], "1");
+  assert!(payload["joy_version"].as_str().is_some());
   assert!(payload["data"]["env"]["path_present"].is_boolean());
   assert!(payload["data"]["tools"]["git"]["ok"].is_boolean());
   assert!(payload["data"]["cache"]["ok"].is_boolean());
@@ -115,4 +123,19 @@ fn recipe_check_human_output_is_structured() {
   let stdout = String::from_utf8_lossy(&assert.get_output().stdout);
   assert!(stdout.contains("Recipe metadata validation passed"));
   assert!(stdout.contains("- bundled recipes:"));
+}
+
+#[test]
+fn version_json_reports_build_metadata() {
+  let mut cmd = cargo_bin_cmd!("joy");
+  let assert = cmd.args(["--json", "version"]).assert().success();
+  let payload = json_stdout(&assert.get_output().stdout);
+
+  assert_eq!(payload["ok"], true);
+  assert_eq!(payload["command"], "version");
+  assert_eq!(payload["schema_version"], "1");
+  assert!(payload["joy_version"].as_str().is_some());
+  assert_eq!(payload["data"]["schema_version"], "1");
+  assert!(payload["data"]["joy_version"].as_str().is_some());
+  assert!(payload["data"]["build_target"].as_str().is_some());
 }

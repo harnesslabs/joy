@@ -1,0 +1,10 @@
+id = "Neargye/nameof"
+slug = "nameof"
+source = "github"
+kind = "header_only"
+
+[headers]
+include_roots = ["include"]
+
+[deps]
+packages = []

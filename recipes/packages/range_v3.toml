@@ -1,0 +1,10 @@
+id = "ericniebler/range-v3"
+slug = "range_v3"
+source = "github"
+kind = "header_only"
+
+[headers]
+include_roots = ["include"]
+
+[deps]
+packages = []
