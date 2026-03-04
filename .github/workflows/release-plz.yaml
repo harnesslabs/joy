@@ -16,42 +16,50 @@ jobs:
   release-pr:
     name: release-pr
     runs-on: ubuntu-latest
+    env:
+      RELEASE_PLZ_PAT: ${{ secrets.RELEASE_PLZ_PAT }}
+      RELEASE_PLZ_TOKEN: ${{ secrets.RELEASE_PLZ_TOKEN }}
     steps:
       - uses: actions/checkout@v4
         with:
           fetch-depth: 0
 
-      - name: Warn when RELEASE_PLZ_TOKEN is unset
-        if: ${{ secrets.RELEASE_PLZ_TOKEN == '' }}
+      - name: Warn when release-plz PAT is unset
         run: |
-          echo "::warning::RELEASE_PLZ_TOKEN is not set; tag-driven workflows may not trigger."
-          echo "::warning::Set RELEASE_PLZ_TOKEN (PAT with repo contents/pull_request write) for full automation."
+          if [ -z "${RELEASE_PLZ_PAT}" ] && [ -z "${RELEASE_PLZ_TOKEN}" ]; then
+            echo "::warning::Neither RELEASE_PLZ_PAT nor RELEASE_PLZ_TOKEN is set; tag-driven workflows may not trigger."
+            echo "::warning::Set RELEASE_PLZ_PAT (preferred) as a PAT with repo contents + pull_request write permissions."
+          fi
 
       - name: Create or update release PR
         uses: release-plz/action@v0.5
         with:
           command: release-pr
         env:
-          GITHUB_TOKEN: ${{ secrets.RELEASE_PLZ_TOKEN != '' && secrets.RELEASE_PLZ_TOKEN || secrets.GITHUB_TOKEN }}
+          GITHUB_TOKEN: ${{ secrets.RELEASE_PLZ_PAT != '' && secrets.RELEASE_PLZ_PAT || secrets.RELEASE_PLZ_TOKEN != '' && secrets.RELEASE_PLZ_TOKEN || secrets.GITHUB_TOKEN }}
 
   release:
     name: release
     runs-on: ubuntu-latest
     needs: release-pr
+    env:
+      RELEASE_PLZ_PAT: ${{ secrets.RELEASE_PLZ_PAT }}
+      RELEASE_PLZ_TOKEN: ${{ secrets.RELEASE_PLZ_TOKEN }}
     steps:
       - uses: actions/checkout@v4
         with:
           fetch-depth: 0
 
-      - name: Warn when RELEASE_PLZ_TOKEN is unset
-        if: ${{ secrets.RELEASE_PLZ_TOKEN == '' }}
+      - name: Warn when release-plz PAT is unset
         run: |
-          echo "::warning::RELEASE_PLZ_TOKEN is not set; tag-driven workflows may not trigger."
-          echo "::warning::Set RELEASE_PLZ_TOKEN (PAT with repo contents/pull_request write) for full automation."
+          if [ -z "${RELEASE_PLZ_PAT}" ] && [ -z "${RELEASE_PLZ_TOKEN}" ]; then
+            echo "::warning::Neither RELEASE_PLZ_PAT nor RELEASE_PLZ_TOKEN is set; tag-driven workflows may not trigger."
+            echo "::warning::Set RELEASE_PLZ_PAT (preferred) as a PAT with repo contents + pull_request write permissions."
+          fi
 
       - name: Create tags for merged release PRs
         uses: release-plz/action@v0.5
         with:
           command: release
         env:
-          GITHUB_TOKEN: ${{ secrets.RELEASE_PLZ_TOKEN != '' && secrets.RELEASE_PLZ_TOKEN || secrets.GITHUB_TOKEN }}
+          GITHUB_TOKEN: ${{ secrets.RELEASE_PLZ_PAT != '' && secrets.RELEASE_PLZ_PAT || secrets.RELEASE_PLZ_TOKEN != '' && secrets.RELEASE_PLZ_TOKEN || secrets.GITHUB_TOKEN }}

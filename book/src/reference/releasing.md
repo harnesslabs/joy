@@ -34,7 +34,7 @@ Tag pushes (`v*`) trigger the binary release workflow.
 3. Run CI-parity commands (`just ci-local`; optionally compiled e2e checks).
 4. Validate distribution metadata templates (`just dist-metadata-check`).
 5. Confirm PR checks (`gh pr checks <pr-number>`).
-6. Ensure `RELEASE_PLZ_TOKEN` secret is configured with `contents` + `pull_requests` write permission.
+6. Ensure `RELEASE_PLZ_PAT` secret is configured with `contents` + `pull_requests` write permission (`RELEASE_PLZ_TOKEN` is also supported as a fallback name).
 7. If default-branch protection blocks workflow pushes, set `JOY_RELEASE_PAT` so release metadata commits can update `Formula/joy.rb`.
 
 ## Automated Flow (Recommended)
