@@ -2,6 +2,8 @@ use semver::Version;
 use serde_json::json;
 use std::env;
 
+use super::dependency_common::map_registry_error;
+use super::graph_common::validate_locked_graph_lockfile;
 use crate::cli::{OutdatedArgs, OutdatedSourceArg, RuntimeFlags};
 use crate::commands::CommandOutput;
 use crate::error::JoyError;
@@ -10,7 +12,7 @@ use crate::lockfile;
 use crate::manifest::Manifest;
 use crate::output::HumanMessageBuilder;
 use crate::package_id::PackageId;
-use crate::registry::{RegistryError, RegistryRequirement, RegistryStore};
+use crate::registry::{RegistryRequirement, RegistryStore};
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 enum OutdatedSources {
@@ -69,38 +71,7 @@ pub fn handle(args: OutdatedArgs, runtime: RuntimeFlags) -> Result<CommandOutput
     .map_err(|err| JoyError::new("outdated", "manifest_parse_error", err.to_string(), 1))?;
 
   let lockfile_path = cwd.join("joy.lock");
-  if !lockfile_path.is_file() {
-    return Err(JoyError::new(
-      "outdated",
-      "lockfile_missing",
-      format!(
-        "`joy outdated` requires `{}`; create or refresh it with `joy sync --update-lock`",
-        lockfile_path.display()
-      ),
-      1,
-    ));
-  }
-  let lock = lockfile::Lockfile::load(&lockfile_path)
-    .map_err(|err| JoyError::new("outdated", "lockfile_parse_error", err.to_string(), 1))?;
-  let manifest_hash = lockfile::compute_manifest_hash(&manifest_path)
-    .map_err(|err| JoyError::new("outdated", "lockfile_hash_failed", err.to_string(), 1))?;
-  if lock.manifest_hash != manifest_hash {
-    return Err(JoyError::new(
-      "outdated",
-      "lockfile_stale",
-      "joy.lock manifest hash does not match joy.toml; rerun `joy sync --update-lock`".to_string(),
-      1,
-    ));
-  }
-  if !manifest.dependencies.is_empty() && lock.packages.is_empty() {
-    return Err(JoyError::new(
-      "outdated",
-      "lockfile_incomplete",
-      "joy.lock package metadata is missing for current dependencies; rerun `joy sync --update-lock`"
-        .to_string(),
-      1,
-    ));
-  }
+  let lock = validate_locked_graph_lockfile("outdated", &manifest, &manifest_path, &lockfile_path)?;
 
   let mut roots = manifest.dependencies.keys().cloned().collect::<Vec<_>>();
   roots.sort();
@@ -239,13 +210,15 @@ fn compute_registry_outdated_row(
   let store = if let Some(store) = registry_store.as_ref() {
     store.clone()
   } else {
-    let loaded = RegistryStore::load_default().map_err(map_registry_error)?;
+    let loaded =
+      RegistryStore::load_default().map_err(|err| map_registry_error("outdated", err))?;
     *registry_store = Some(loaded.clone());
     loaded
   };
 
-  let latest_available_release =
-    store.resolve(&pkg.id, RegistryRequirement::Semver("*")).map_err(map_registry_error)?;
+  let latest_available_release = store
+    .resolve(&pkg.id, RegistryRequirement::Semver("*"))
+    .map_err(|err| map_registry_error("outdated", err))?;
   let latest_available = latest_available_release.resolved_version.clone();
   let latest_available_parsed = Version::parse(&latest_available).map_err(|err| {
     JoyError::new(
@@ -260,7 +233,7 @@ fn compute_registry_outdated_row(
     Some(
       store
         .resolve(&pkg.id, RegistryRequirement::Semver(req))
-        .map_err(map_registry_error)?
+        .map_err(|err| map_registry_error("outdated", err))?
         .resolved_version,
     )
   } else {
@@ -546,21 +519,4 @@ fn render_human_outdated(
   }
 
   builder.build()
-}
-
-fn map_registry_error(err: RegistryError) -> JoyError {
-  let code = if err.is_offline_cache_miss() {
-    "offline_cache_miss"
-  } else if err.is_not_configured() {
-    "registry_not_configured"
-  } else if err.is_package_not_found() {
-    "registry_package_not_found"
-  } else if err.is_invalid_version_requirement() {
-    "invalid_version_requirement"
-  } else if err.is_version_not_found() {
-    "version_not_found"
-  } else {
-    "registry_load_failed"
-  };
-  JoyError::new("outdated", code, err.to_string(), 1)
 }
