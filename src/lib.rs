@@ -4,29 +4,29 @@
 //! around [`run`], while command dispatch, manifest parsing, dependency fetching, resolution, and
 //! local build orchestration live in modules here.
 //!
-//! TODO(phase7): Narrow the public module surface to a stable, intentional library API (or mark
-//! `joy` as CLI-only) once downstream usage expectations are finalized.
-
-pub mod abi;
-pub mod cli;
-pub mod cmake;
-pub mod commands;
-pub mod error;
-pub mod fetch;
-pub mod global_cache;
-pub mod install_index;
-pub mod linking;
-pub mod lockfile;
+mod abi;
+mod cli;
+mod cmake;
+mod commands;
+mod error;
+mod fetch;
+mod fs_ops;
+mod git_ops;
+mod global_cache;
+mod install_index;
+mod linking;
+mod lockfile;
 pub mod manifest;
-pub mod ninja;
-pub mod output;
-pub mod package_id;
-pub mod project_env;
+mod ninja;
+mod output;
+mod package_id;
+mod project_env;
+mod project_probe;
 pub mod recipes;
-pub mod registry;
+mod registry;
 pub mod resolver;
-pub mod templates;
-pub mod toolchain;
+mod templates;
+mod toolchain;
 
 use clap::Parser;
 use std::ffi::OsString;
@@ -45,7 +45,7 @@ pub fn run() -> ExitCode {
 ///
 /// This is used heavily by tests so command parsing and dispatch can be exercised without spawning
 /// a subprocess.
-pub fn run_from<I, T>(args: I) -> ExitCode
+fn run_from<I, T>(args: I) -> ExitCode
 where
   I: IntoIterator<Item = T>,
   T: Into<OsString> + Clone,
