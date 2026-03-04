@@ -385,9 +385,15 @@ jobs:
             find dist -maxdepth 5 -type f
             exit 1
           fi
+          formula_target="dist/Formula/joy.rb"
+          scoop_target="dist/packaging/scoop/joy.json"
           mkdir -p dist/Formula dist/packaging/scoop
-          cp "${formula_path}" dist/Formula/joy.rb
-          cp "${scoop_path}" dist/packaging/scoop/joy.json
+          if [ "${formula_path}" != "${formula_target}" ]; then
+            cp "${formula_path}" "${formula_target}"
+          fi
+          if [ "${scoop_path}" != "${scoop_target}" ]; then
+            cp "${scoop_path}" "${scoop_target}"
+          fi
 
       - name: Publish GitHub Release
         uses: softprops/action-gh-release@v2
