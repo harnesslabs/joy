@@ -196,8 +196,17 @@ jobs:
 
       - name: Generate CycloneDX SBOM
         run: |
-          cargo cyclonedx --workspace --all-features --format json --override-filename joy-sbom
-          cp joy-sbom.cdx.json dist-joy-sbom.cdx.json
+          set -euo pipefail
+          cargo cyclonedx --all-features --format json --override-filename joy-sbom
+          if [ -f joy-sbom.cdx.json ]; then
+            cp joy-sbom.cdx.json dist-joy-sbom.cdx.json
+          elif [ -f joy-sbom.json ]; then
+            cp joy-sbom.json dist-joy-sbom.cdx.json
+          else
+            echo "CycloneDX output file not found." >&2
+            ls -la
+            exit 1
+          fi
 
       - name: Upload SBOM artifact
         uses: actions/upload-artifact@v4
@@ -324,7 +333,7 @@ jobs:
               "github": "https://github.com/harnesslabs/joy"
             },
             "autoupdate": {
-              "url": "https://github.com/harnesslabs/joy/releases/download/v$version/joy-v$version-x86_64-pc-windows-msvc.zip"
+              "url": "https://github.com/harnesslabs/joy/releases/download/v\$version/joy-v\$version-x86_64-pc-windows-msvc.zip"
             }
           }
           SCOOP
