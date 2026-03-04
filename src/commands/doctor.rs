@@ -1,15 +1,13 @@
 use serde_json::{Value, json};
 use std::env;
-use std::fs;
-use std::path::{Path, PathBuf};
+use std::path::PathBuf;
 
 use crate::cli::DoctorArgs;
 use crate::commands::CommandOutput;
 use crate::error::JoyError;
 use crate::global_cache::GlobalCache;
-use crate::lockfile;
-use crate::manifest::ManifestDocument;
 use crate::output::HumanMessageBuilder;
+use crate::project_probe;
 use crate::recipes::RecipeStore;
 use crate::toolchain;
 
@@ -286,214 +284,88 @@ fn inspect_project_context() -> Value {
       });
     },
   };
-  let manifest_path = cwd.join("joy.toml");
-  if !manifest_path.is_file() {
+
+  let probe = project_probe::probe(&cwd);
+  if !probe.present {
     return json!({
       "ok": true,
-      "project": { "present": false, "manifest_path": manifest_path.display().to_string() },
-      "warnings": [],
-      "hints": [],
+      "project": {
+        "present": false,
+        "manifest_path": probe.manifest_path.display().to_string(),
+      },
+      "warnings": probe.warnings,
+      "hints": probe.hints,
     });
   }
 
-  let mut warnings = Vec::<String>::new();
-  let mut hints = Vec::<String>::new();
-
-  let doc = match ManifestDocument::load(&manifest_path) {
-    Ok(doc) => doc,
-    Err(err) => {
-      return json!({
-        "ok": false,
-        "project": {
-          "present": true,
-          "manifest_path": manifest_path.display().to_string(),
-          "manifest_kind": "unknown",
-          "parse_error": err.to_string(),
-          "direct_dependency_count": 0,
-        },
-        "warnings": [format!("Project manifest parse failed: {err}")],
-        "hints": ["Fix `joy.toml` parse/validation errors, then rerun `joy doctor`"],
-      });
-    },
-  };
-
-  let (manifest_kind, direct_dependency_count) = match &doc {
-    ManifestDocument::Project(m) => ("project", m.dependencies.len()),
-    ManifestDocument::Workspace(ws) => ("workspace", ws.workspace.members.len()),
-    ManifestDocument::Package(pkg) => ("package", pkg.dependencies.len()),
-  };
-
-  let joy_root = cwd.join(".joy");
-  let state_dir = joy_root.join("state");
-  let build_dir = joy_root.join("build");
-  let graph_path = state_dir.join("dependency-graph.json");
-  let root_compile_db = cwd.join("compile_commands.json");
-  let lockfile_path = cwd.join("joy.lock");
-
-  let graph_parse_error = if graph_path.is_file() {
-    match fs::read(&graph_path)
-      .and_then(|bytes| serde_json::from_slice::<Value>(&bytes).map_err(invalid_json_io))
-    {
-      Ok(_) => None,
-      Err(err) => Some(err.to_string()),
-    }
+  let lockfile_json = if !probe.lockfile.present {
+    json!({
+      "present": false,
+      "path": probe.lockfile.path.display().to_string(),
+      "fresh": Value::Null,
+      "package_count": Value::Null,
+      "parse_error": Value::Null,
+    })
+  } else if let Some(parse_error) = &probe.lockfile.parse_error {
+    json!({
+      "present": true,
+      "path": probe.lockfile.path.display().to_string(),
+      "fresh": Value::Null,
+      "package_count": Value::Null,
+      "parse_error": parse_error,
+    })
   } else {
-    None
+    json!({
+      "present": true,
+      "path": probe.lockfile.path.display().to_string(),
+      "fresh": probe.lockfile.fresh,
+      "package_count": probe.lockfile.package_count,
+      "parse_error": Value::Null,
+    })
   };
 
-  let target_compile_commands_count = if build_dir.is_dir() {
-    fs::read_dir(&build_dir)
-      .ok()
-      .into_iter()
-      .flatten()
-      .filter_map(Result::ok)
-      .map(|entry| entry.path())
-      .filter(|path| {
-        path
-          .file_name()
-          .and_then(|n| n.to_str())
-          .is_some_and(|n| n.starts_with("compile_commands.") && n.ends_with(".json"))
-      })
-      .count()
+  let dependency_metadata_json = if let Some(meta) = &probe.dependency_metadata {
+    json!({
+      "present": true,
+      "package_count": meta.package_count,
+      "metadata_source_counts": meta.metadata_source_counts,
+      "declared_deps_source_counts": meta.declared_deps_source_counts,
+      "package_manifest_count": meta.package_manifest_count,
+      "registry_manifest_count": meta.registry_manifest_count,
+    })
   } else {
-    0
+    json!({ "present": false })
   };
 
-  let mut lockfile_ok = true;
-  let mut lockfile_json = json!({
-    "present": false,
-    "path": lockfile_path.display().to_string(),
-    "fresh": Value::Null,
-    "package_count": Value::Null,
-    "parse_error": Value::Null,
-  });
-  let mut dependency_metadata_json = json!({ "present": false });
-
-  if lockfile_path.is_file() {
-    match lockfile::Lockfile::load(&lockfile_path) {
-      Ok(lock) => {
-        let manifest_hash = lockfile::compute_manifest_hash(&manifest_path).ok();
-        let fresh = manifest_hash.as_deref().is_some_and(|hash| hash == lock.manifest_hash);
-        if !fresh {
-          lockfile_ok = false;
-          warnings.push("joy.lock is stale (manifest hash mismatch)".into());
-          hints.push(
-            "Run `joy sync --update-lock` to refresh lockfile and graph/editor artifacts".into(),
-          );
-        }
-
-        let mut metadata_source_counts = std::collections::BTreeMap::<String, u64>::new();
-        let mut declared_deps_source_counts = std::collections::BTreeMap::<String, u64>::new();
-        for pkg in &lock.packages {
-          *metadata_source_counts
-            .entry(pkg.metadata_source.clone().unwrap_or_else(|| "unknown".into()))
-            .or_default() += 1;
-          *declared_deps_source_counts
-            .entry(pkg.declared_deps_source.clone().unwrap_or_else(|| "unknown".into()))
-            .or_default() += 1;
-        }
-        let missing_metadata = metadata_source_counts.get("none").copied().unwrap_or_default();
-        if missing_metadata > 0 {
-          warnings.push(format!(
-            "{missing_metadata} locked package(s) have no package metadata provenance (`metadata_source = none`)"
-          ));
-          hints.push(
-            "Nested dependency expansion may rely on recipes or registry summaries for those packages".into(),
-          );
-        }
-
-        let package_manifest_count =
-          metadata_source_counts.get("package_manifest").copied().unwrap_or_default();
-        let registry_manifest_count =
-          metadata_source_counts.get("registry_manifest").copied().unwrap_or_default();
-
-        lockfile_json = json!({
-          "present": true,
-          "path": lockfile_path.display().to_string(),
-          "fresh": fresh,
-          "package_count": lock.packages.len(),
-          "parse_error": Value::Null,
-        });
-        dependency_metadata_json = json!({
-          "present": true,
-          "package_count": lock.packages.len(),
-          "metadata_source_counts": metadata_source_counts,
-          "declared_deps_source_counts": declared_deps_source_counts,
-          "package_manifest_count": package_manifest_count,
-          "registry_manifest_count": registry_manifest_count,
-        });
-      },
-      Err(err) => {
-        lockfile_ok = false;
-        lockfile_json = json!({
-          "present": true,
-          "path": lockfile_path.display().to_string(),
-          "fresh": Value::Null,
-          "package_count": Value::Null,
-          "parse_error": err.to_string(),
-        });
-        warnings.push(format!("joy.lock parse failed: {err}"));
-        hints.push("Regenerate lockfile with `joy sync --update-lock`".into());
-      },
-    }
-  }
-
-  let root_compile_db_present = root_compile_db.is_file();
-  let graph_present = graph_path.is_file();
-  if manifest_kind == "project" && direct_dependency_count > 0 {
-    if !graph_present {
-      warnings
-        .push("Dependency graph artifact is missing (`.joy/state/dependency-graph.json`)".into());
-      hints.push("Run `joy sync` or `joy build` to materialize dependency state".into());
-    }
-    if !root_compile_db_present {
-      warnings.push(
-        "Root `compile_commands.json` is missing; editors may not resolve dependency includes"
-          .into(),
-      );
-      hints.push(
-        "Run `joy sync` or `joy build`; if a toolchain is missing, install a compiler + `ninja` so compile DB generation can run".into(),
-      );
-    }
-  }
-  if graph_parse_error.is_some() {
-    warnings.push("Dependency graph artifact exists but failed to parse as JSON".into());
-    hints.push("Rerun `joy sync` to regenerate `.joy/state/dependency-graph.json`".into());
-  }
-
-  let project_ok = lockfile_ok && graph_parse_error.is_none();
   json!({
-    "ok": project_ok,
+    "ok": probe.ok,
     "project": {
       "present": true,
-      "manifest_path": manifest_path.display().to_string(),
-      "manifest_kind": manifest_kind,
-      "direct_dependency_count": direct_dependency_count,
+      "manifest_path": probe.manifest_path.display().to_string(),
+      "manifest_kind": probe.manifest_kind,
+      "parse_error": probe.manifest_parse_error,
+      "direct_dependency_count": probe.direct_dependency_count,
     },
     "artifacts": {
-      "joy_root": joy_root.display().to_string(),
-      "state_dir": state_dir.display().to_string(),
-      "build_dir": build_dir.display().to_string(),
+      "joy_root": probe.joy_root.display().to_string(),
+      "state_dir": probe.state_dir.display().to_string(),
+      "build_dir": probe.build_dir.display().to_string(),
       "dependency_graph": {
-        "path": graph_path.display().to_string(),
-        "present": graph_present,
-        "parse_error": graph_parse_error,
+        "path": probe.dependency_graph.path.display().to_string(),
+        "present": probe.dependency_graph.present,
+        "parse_error": probe.dependency_graph.parse_error,
       },
       "root_compile_commands": {
-        "path": root_compile_db.display().to_string(),
-        "present": root_compile_db_present,
+        "path": probe.root_compile_commands.path.display().to_string(),
+        "present": probe.root_compile_commands.present,
       },
-      "target_compile_commands_count": target_compile_commands_count,
+      "target_compile_commands_count": probe.target_compile_commands.len(),
     },
     "lockfile": lockfile_json,
     "dependency_metadata": dependency_metadata_json,
-    "warnings": warnings,
-    "hints": hints,
+    "warnings": probe.warnings,
+    "hints": probe.hints,
   })
-}
-
-fn invalid_json_io(err: serde_json::Error) -> std::io::Error {
-  std::io::Error::new(std::io::ErrorKind::InvalidData, format!("invalid json: {err}"))
 }
 
 fn artifact_status_human(value: &Value) -> String {
@@ -539,9 +411,4 @@ fn status_human(status: &ToolStatus) -> String {
 
 fn status_word(ok: bool) -> &'static str {
   if ok { "ok" } else { "issue" }
-}
-
-#[allow(dead_code)]
-fn _path_exists(path: &Path) -> bool {
-  path.exists()
 }
