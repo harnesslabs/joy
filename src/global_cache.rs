@@ -12,7 +12,6 @@ pub struct GlobalCache {
   pub cache_root: PathBuf,
   pub src_root: PathBuf,
   pub git_root: PathBuf,
-  pub archives_root: PathBuf,
   pub builds_root: PathBuf,
   pub tmp_root: PathBuf,
 }
@@ -50,7 +49,6 @@ impl GlobalCache {
       joy_home,
       src_root: cache_root.join("src"),
       git_root: cache_root.join("git"),
-      archives_root: cache_root.join("archives"),
       builds_root: cache_root.join("builds"),
       tmp_root: cache_root.join("tmp"),
       cache_root,
@@ -64,7 +62,6 @@ impl GlobalCache {
       &self.cache_root,
       &self.src_root,
       &self.git_root,
-      &self.archives_root,
       &self.builds_root,
       &self.tmp_root,
     ] {
@@ -82,11 +79,6 @@ impl GlobalCache {
   /// Path for the cached git mirror used to resolve refs and clone checkouts quickly.
   pub fn git_mirror_dir(&self, package: &PackageId) -> PathBuf {
     self.git_root.join("github").join(package.owner()).join(format!("{}.git", package.repo()))
-  }
-
-  /// Parent directory containing all cached source checkouts for a package.
-  pub fn source_parent_dir(&self, package: &PackageId) -> PathBuf {
-    self.src_root.join("github").join(package.owner()).join(package.repo())
   }
 
   /// Temporary directory root used for atomic-ish cache materialization.

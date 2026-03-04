@@ -2,20 +2,18 @@
 //!
 //! `joy` currently prefers a git-mirror workflow (using the system `git` binary) for GitHub
 //! shorthand dependencies so refs can be resolved locally and subsequent fetches can reuse the
-//! mirror. A `.tar.gz` archive path is also available for tests and future fallback behavior.
+//! mirror.
 
 use semver::{Version, VersionReq};
-use std::ffi::OsString;
 use std::fs;
-use std::io::Read;
 use std::path::{Path, PathBuf};
-use std::process::Command;
-use std::sync::Arc;
 use std::sync::atomic::{AtomicU8, Ordering};
 use std::time::Duration;
 use std::time::{SystemTime, UNIX_EPOCH};
 use thiserror::Error;
 
+use crate::fs_ops;
+use crate::git_ops::{self, GitCommandError};
 use crate::global_cache::{GlobalCache, GlobalCacheError};
 use crate::output::progress_detail_tty;
 use crate::package_id::PackageId;
@@ -181,43 +179,6 @@ pub fn fetch_github_semver_with_cache(
   })
 }
 
-/// Download and extract a `.tar.gz` archive into `dest_dir`.
-pub fn download_and_extract_tar_gz(url: &str, dest_dir: &Path) -> Result<(), FetchError> {
-  if runtime_offline_enabled() {
-    return Err(FetchError::OfflineNetworkDisabled {
-      action: "downloading archive".to_string(),
-      url: url.to_string(),
-    });
-  }
-
-  if let Some(parent) = dest_dir.parent() {
-    fs::create_dir_all(parent).map_err(|source| FetchError::Io {
-      action: "creating archive extraction parent".into(),
-      path: parent.to_path_buf(),
-      source,
-    })?;
-  }
-
-  if !dest_dir.exists() {
-    fs::create_dir_all(dest_dir).map_err(|source| FetchError::Io {
-      action: "creating archive extraction destination".into(),
-      path: dest_dir.to_path_buf(),
-      source,
-    })?;
-  }
-
-  retry_transient_network("downloading archive", || {
-    let client = reqwest::blocking::Client::new();
-    let response = client
-      .get(url)
-      .send()
-      .and_then(reqwest::blocking::Response::error_for_status)
-      .map_err(FetchError::Http)?;
-
-    extract_tar_gz_reader(response, dest_dir)
-  })
-}
-
 /// Prefetch multiple GitHub packages in parallel while preserving the original request ordering.
 pub fn prefetch_github_packages(
   requests: Vec<(PackageId, String)>,
@@ -226,45 +187,39 @@ pub fn prefetch_github_packages(
     return Ok(Vec::new());
   }
 
-  let concurrency = std::thread::available_parallelism().map(|n| n.get()).unwrap_or(4).max(1);
-  let runtime = tokio::runtime::Builder::new_multi_thread()
-    .worker_threads(concurrency)
-    .enable_all()
-    .build()
-    .map_err(FetchError::Runtime)?;
+  let total = requests.len();
+  let worker_count =
+    std::thread::available_parallelism().map(|n| n.get()).unwrap_or(4).max(1).min(total);
+  let requests = std::sync::Arc::new(requests);
+  let mut handles = Vec::with_capacity(worker_count);
 
-  runtime.block_on(async move {
-    let semaphore = Arc::new(tokio::sync::Semaphore::new(concurrency));
-    let total = requests.len();
-    let mut join_set = tokio::task::JoinSet::new();
+  for worker_idx in 0..worker_count {
+    let requests = std::sync::Arc::clone(&requests);
+    handles.push(std::thread::spawn(move || {
+      let mut partial = Vec::new();
+      let mut idx = worker_idx;
+      while idx < requests.len() {
+        let (package, rev) = &requests[idx];
+        partial.push((idx, fetch_github(package, rev)));
+        idx += worker_count;
+      }
+      partial
+    }));
+  }
 
-    for (index, (package, rev)) in requests.into_iter().enumerate() {
-      let semaphore = semaphore.clone();
-      join_set.spawn(async move {
-        let permit = semaphore
-          .acquire_owned()
-          .await
-          .map_err(|_| FetchError::TaskJoin("prefetch semaphore closed".into()))?;
-        let _permit = permit;
-        tokio::task::spawn_blocking(move || fetch_github(&package, &rev))
-          .await
-          .map_err(|err| FetchError::TaskJoin(format!("prefetch task join failed: {err}")))?
-          .map(|result| (index, result))
-      });
+  let mut results: Vec<Option<FetchResult>> = vec![None; total];
+  for handle in handles {
+    let partial =
+      handle.join().map_err(|_| FetchError::TaskJoin("prefetch worker thread panicked".into()))?;
+    for (idx, fetched) in partial {
+      results[idx] = Some(fetched?);
     }
+  }
 
-    let mut results: Vec<Option<FetchResult>> = vec![None; total];
-    while let Some(task_result) = join_set.join_next().await {
-      let (index, fetched) = task_result
-        .map_err(|err| FetchError::TaskJoin(format!("prefetch task failed: {err}")))??;
-      results[index] = Some(fetched);
-    }
-
-    results
-      .into_iter()
-      .map(|item| item.ok_or_else(|| FetchError::TaskJoin("missing prefetch result".into())))
-      .collect::<Result<Vec<_>, _>>()
-  })
+  results
+    .into_iter()
+    .map(|item| item.ok_or_else(|| FetchError::TaskJoin("missing prefetch result".into())))
+    .collect::<Result<Vec<_>, _>>()
 }
 
 fn github_remote_url(package: &PackageId) -> String {
@@ -281,16 +236,6 @@ fn github_remote_url(package: &PackageId) -> String {
   }
 }
 
-fn extract_tar_gz_reader(reader: impl Read, dest_dir: &Path) -> Result<(), FetchError> {
-  let decoder = flate2::read::GzDecoder::new(reader);
-  let mut archive = tar::Archive::new(decoder);
-  archive.unpack(dest_dir).map_err(|source| FetchError::Io {
-    action: "extracting tar.gz archive".into(),
-    path: dest_dir.to_path_buf(),
-    source,
-  })
-}
-
 fn ensure_mirror(remote_url: &str, mirror_dir: &Path) -> Result<(), FetchError> {
   if mirror_dir.exists() {
     if runtime_offline_enabled() {
@@ -305,7 +250,8 @@ fn ensure_mirror(remote_url: &str, mirror_dir: &Path) -> Result<(), FetchError> 
       mirror_dir.display()
     ));
     retry_transient_network("fetching mirror", || {
-      run_git(Some(mirror_dir), ["fetch", "--all", "--tags", "--prune"], "fetching mirror")
+      git_ops::run(Some(mirror_dir), ["fetch", "--all", "--tags", "--prune"], "fetching mirror")
+        .map_err(map_git_error)
     })?;
     return Ok(());
   }
@@ -323,7 +269,7 @@ fn ensure_mirror(remote_url: &str, mirror_dir: &Path) -> Result<(), FetchError> 
     mirror_dir.display()
   ));
   retry_transient_network("cloning mirror", || {
-    run_git_dynamic(
+    git_ops::run_dynamic(
       None,
       vec![
         "clone".into(),
@@ -333,6 +279,7 @@ fn ensure_mirror(remote_url: &str, mirror_dir: &Path) -> Result<(), FetchError> 
       ],
       "cloning mirror",
     )
+    .map_err(map_git_error)
   })?;
   Ok(())
 }
@@ -344,7 +291,9 @@ fn resolve_commit(mirror_dir: &Path, requested_rev: &str) -> Result<String, Fetc
     format!("{requested_rev}^{{commit}}")
   };
   let output =
-    match run_git_capture(Some(mirror_dir), ["rev-parse", rev.as_str()], "resolving revision") {
+    match git_ops::run_capture(Some(mirror_dir), ["rev-parse", rev.as_str()], "resolving revision")
+      .map_err(map_git_error)
+    {
       Ok(output) => output,
       Err(err) if runtime_offline_enabled() => {
         return Err(FetchError::OfflineRevisionUnavailable {
@@ -405,7 +354,8 @@ fn resolve_semver_tag(
 }
 
 fn list_tags(mirror_dir: &Path) -> Result<Vec<String>, FetchError> {
-  let raw = run_git_capture(Some(mirror_dir), ["tag", "--list"], "listing tags")?;
+  let raw = git_ops::run_capture(Some(mirror_dir), ["tag", "--list"], "listing tags")
+    .map_err(map_git_error)?;
   Ok(raw.lines().map(str::trim).filter(|line| !line.is_empty()).map(ToOwned::to_owned).collect())
 }
 
@@ -443,7 +393,7 @@ fn materialize_checkout(
   ));
 
   if tmp_dir.exists() {
-    remove_any(&tmp_dir).map_err(|source| FetchError::Io {
+    fs_ops::remove_path_if_exists(&tmp_dir).map_err(|source| FetchError::Io {
       action: "cleaning temp checkout".into(),
       path: tmp_dir.clone(),
       source,
@@ -455,7 +405,7 @@ fn materialize_checkout(
       "Materializing source checkout `{commit}` into cache ({})",
       dest_dir.display()
     ));
-    run_git_dynamic(
+    git_ops::run_dynamic(
       None,
       vec![
         "clone".into(),
@@ -464,10 +414,12 @@ fn materialize_checkout(
         tmp_dir.as_os_str().to_os_string(),
       ],
       "cloning cached checkout",
-    )?;
-    run_git(Some(&tmp_dir), ["checkout", "--detach", commit], "checking out resolved commit")?;
+    )
+    .map_err(map_git_error)?;
+    git_ops::run(Some(&tmp_dir), ["checkout", "--detach", commit], "checking out resolved commit")
+      .map_err(map_git_error)?;
     if dest_dir.exists() {
-      remove_any(dest_dir).map_err(|source| FetchError::Io {
+      fs_ops::remove_path_if_exists(dest_dir).map_err(|source| FetchError::Io {
         action: "removing stale destination checkout".into(),
         path: dest_dir.to_path_buf(),
         source,
@@ -482,7 +434,7 @@ fn materialize_checkout(
   })();
 
   if result.is_err() && tmp_dir.exists() {
-    let _ = remove_any(&tmp_dir);
+    let _ = fs_ops::remove_path_if_exists(&tmp_dir);
   }
   result
 }
@@ -541,72 +493,12 @@ fn transient_retry_delay(attempt: usize) -> Duration {
   Duration::from_millis(millis)
 }
 
-fn run_git_dynamic(
-  cwd: Option<&Path>,
-  args: Vec<OsString>,
-  action: &str,
-) -> Result<(), FetchError> {
-  let output = git_output(cwd, args, action)?;
-  if output.status.success() { Ok(()) } else { Err(git_failed_error(action, &output)) }
-}
-
-fn remove_any(path: &Path) -> std::io::Result<()> {
-  match fs::symlink_metadata(path) {
-    Ok(metadata) => {
-      if metadata.file_type().is_symlink() || metadata.is_file() {
-        fs::remove_file(path)
-      } else if metadata.is_dir() {
-        fs::remove_dir_all(path)
-      } else {
-        fs::remove_file(path)
-      }
+fn map_git_error(err: GitCommandError) -> FetchError {
+  match err {
+    GitCommandError::Spawn { action, source } => FetchError::SpawnGit { action, source },
+    GitCommandError::Failed { action, status, stdout, stderr } => {
+      FetchError::GitFailed { action, status, stdout, stderr }
     },
-    Err(err) if err.kind() == std::io::ErrorKind::NotFound => Ok(()),
-    Err(err) => Err(err),
-  }
-}
-
-fn run_git<const N: usize>(
-  cwd: Option<&Path>,
-  args: [&str; N],
-  action: &str,
-) -> Result<(), FetchError> {
-  let output = git_output(cwd, args.into_iter().map(OsString::from).collect(), action)?;
-  if output.status.success() { Ok(()) } else { Err(git_failed_error(action, &output)) }
-}
-
-fn run_git_capture<const N: usize>(
-  cwd: Option<&Path>,
-  args: [&str; N],
-  action: &str,
-) -> Result<String, FetchError> {
-  let output = git_output(cwd, args.into_iter().map(OsString::from).collect(), action)?;
-  if output.status.success() {
-    Ok(String::from_utf8_lossy(&output.stdout).to_string())
-  } else {
-    Err(git_failed_error(action, &output))
-  }
-}
-
-fn git_output(
-  cwd: Option<&Path>,
-  args: Vec<OsString>,
-  action: &str,
-) -> Result<std::process::Output, FetchError> {
-  let mut cmd = Command::new("git");
-  if let Some(dir) = cwd {
-    cmd.arg("-C").arg(dir);
-  }
-  cmd.args(args);
-  cmd.output().map_err(|source| FetchError::SpawnGit { action: action.into(), source })
-}
-
-fn git_failed_error(action: &str, output: &std::process::Output) -> FetchError {
-  FetchError::GitFailed {
-    action: action.into(),
-    status: output.status.code(),
-    stderr: String::from_utf8_lossy(&output.stderr).trim().to_string(),
-    stdout: String::from_utf8_lossy(&output.stdout).trim().to_string(),
   }
 }
 
@@ -614,8 +506,6 @@ fn git_failed_error(action: &str, output: &std::process::Output) -> FetchError {
 pub enum FetchError {
   #[error(transparent)]
   GlobalCache(#[from] GlobalCacheError),
-  #[error("http error while downloading archive: {0}")]
-  Http(#[from] reqwest::Error),
   #[error("failed to run git while {action}: {source}")]
   SpawnGit {
     action: String,
@@ -631,8 +521,6 @@ pub enum FetchError {
     #[source]
     source: std::io::Error,
   },
-  #[error("failed to create tokio runtime for parallel fetch: {0}")]
-  Runtime(std::io::Error),
   #[error("{0}")]
   TaskJoin(String),
   #[error("invalid semver requirement `{requirement}`: {source}")]
@@ -661,8 +549,6 @@ pub enum FetchError {
     #[source]
     source: Box<FetchError>,
   },
-  #[error("offline mode blocks {action} from `{url}`")]
-  OfflineNetworkDisabled { action: String, url: String },
   #[error("transient network failures while {action} after {attempts} attempts: {source}")]
   TransientRetriesExhausted {
     action: String,
@@ -678,7 +564,7 @@ impl FetchError {
   }
 
   pub fn is_offline_network_disabled(&self) -> bool {
-    matches!(self, Self::OfflineNetworkDisabled { .. })
+    false
   }
 
   pub fn is_invalid_version_requirement(&self) -> bool {
@@ -691,7 +577,6 @@ impl FetchError {
 
   pub fn is_transient_network(&self) -> bool {
     match self {
-      Self::Http(err) => err.is_timeout() || err.is_connect() || err.is_request(),
       Self::SpawnGit { source, .. } => matches!(
         source.kind(),
         std::io::ErrorKind::TimedOut
@@ -723,12 +608,10 @@ impl FetchError {
       Self::TransientRetriesExhausted { .. } => false,
       Self::OfflineCacheMiss { .. }
       | Self::OfflineRevisionUnavailable { .. }
-      | Self::OfflineNetworkDisabled { .. }
       | Self::InvalidVersionReq { .. }
       | Self::VersionNotFound { .. }
       | Self::GlobalCache(_)
       | Self::Io { .. }
-      | Self::Runtime(_)
       | Self::TaskJoin(_) => false,
     }
   }
@@ -736,31 +619,7 @@ impl FetchError {
 
 #[cfg(test)]
 mod tests {
-  use std::io::Write;
-
-  use flate2::Compression;
-  use flate2::write::GzEncoder;
-  use tempfile::TempDir;
-
-  use super::{
-    FetchError, download_and_extract_tar_gz, parse_tag_semver, retry_transient_network_with_sleep,
-  };
-
-  #[test]
-  fn downloads_and_extracts_tar_gz_from_mock_http_server() {
-    let mut server = mockito::Server::new();
-    let archive_bytes = build_fixture_tar_gz();
-
-    let mock = server.mock("GET", "/pkg.tar.gz").with_status(200).with_body(archive_bytes).create();
-
-    let temp = TempDir::new().expect("tempdir");
-    let url = format!("{}/pkg.tar.gz", server.url());
-    download_and_extract_tar_gz(&url, temp.path()).expect("download+extract");
-
-    mock.assert();
-    assert!(temp.path().join("fixture").join("include").join("demo.hpp").is_file());
-    assert!(temp.path().join("fixture").join("README.md").is_file());
-  }
+  use super::{FetchError, parse_tag_semver, retry_transient_network_with_sleep};
 
   #[test]
   fn retry_policy_retries_transient_errors_and_succeeds() {
@@ -843,30 +702,5 @@ mod tests {
     assert_eq!(parse_tag_semver("v1.2.3").map(|v| v.to_string()).as_deref(), Some("1.2.3"));
     assert_eq!(parse_tag_semver("2.0.0").map(|v| v.to_string()).as_deref(), Some("2.0.0"));
     assert!(parse_tag_semver("release-1.2.3").is_none());
-  }
-
-  fn build_fixture_tar_gz() -> Vec<u8> {
-    let mut tar_bytes = Vec::new();
-    {
-      let mut builder = tar::Builder::new(&mut tar_bytes);
-      let files = [
-        ("fixture/include/demo.hpp", b"// demo header\n".as_slice()),
-        ("fixture/README.md", b"# fixture\n".as_slice()),
-      ];
-
-      for (path, contents) in files {
-        let mut header = tar::Header::new_gnu();
-        header.set_path(path).expect("tar path");
-        header.set_size(contents.len() as u64);
-        header.set_mode(0o644);
-        header.set_cksum();
-        builder.append(&header, contents).expect("append tar entry");
-      }
-      builder.finish().expect("finish tar");
-    }
-
-    let mut encoder = GzEncoder::new(Vec::new(), Compression::default());
-    encoder.write_all(&tar_bytes).expect("write gzip payload");
-    encoder.finish().expect("finish gzip")
   }
 }
