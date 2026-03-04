@@ -6,6 +6,12 @@ The format is based on Keep a Changelog and this project adheres to Semantic Ver
 
 ## [Unreleased]
 
+## [0.1.1](https://github.com/harnesslabs/joy/compare/v0.1.0...v0.1.1) - 2026-03-04
+
+### Fixed
+
+- *(release)* unblock sbom and scoop metadata generation ([#153](https://github.com/harnesslabs/joy/pull/153))
+
 ### Added
 
 - Production-readiness baseline hardening:
