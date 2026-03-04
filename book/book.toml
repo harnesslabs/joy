@@ -1,7 +1,7 @@
 [book]
 authors = ["harnesslabs"]
 language = "en"
-multilingual = false
+text-direction = "ltr"
 title = "joy Book"
 description = "User and contributor documentation for joy, a cargo/uv-inspired native C++ package and build manager."
 src = "src"
@@ -22,8 +22,5 @@ smart-punctuation = true
 [output.html.search]
 enable = true
 limit-results = 30
-
-[output.linkcheck]
-follow-web-links = false
 
 [preprocessor]

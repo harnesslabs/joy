@@ -1,0 +1,10 @@
+id = "Tessil/robin-map"
+slug = "robin_map"
+source = "github"
+kind = "header_only"
+
+[headers]
+include_roots = ["include"]
+
+[deps]
+packages = []

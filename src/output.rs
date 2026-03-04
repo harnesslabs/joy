@@ -9,6 +9,8 @@ use std::time::Duration;
 use crate::commands::CommandOutput;
 use crate::error::JoyError;
 
+pub const JSON_SCHEMA_VERSION: &str = "1";
+
 /// Output mode selected by CLI flags.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum OutputMode {
@@ -137,6 +139,8 @@ impl HumanMessageBuilder {
 
 #[derive(Debug, Serialize)]
 struct SuccessEnvelope<'a> {
+  schema_version: &'static str,
+  joy_version: &'static str,
   ok: bool,
   command: &'a str,
   data: &'a Value,
@@ -144,6 +148,8 @@ struct SuccessEnvelope<'a> {
 
 #[derive(Debug, Serialize)]
 struct ErrorEnvelope<'a> {
+  schema_version: &'static str,
+  joy_version: &'static str,
   ok: bool,
   command: &'a str,
   error: ErrorPayload<'a>,
@@ -227,11 +233,19 @@ fn write_block(writer: &mut impl Write, text: &str) -> io::Result<()> {
 }
 
 fn success_envelope<'a>(result: &'a CommandOutput) -> SuccessEnvelope<'a> {
-  SuccessEnvelope { ok: true, command: result.command, data: &result.data }
+  SuccessEnvelope {
+    schema_version: JSON_SCHEMA_VERSION,
+    joy_version: env!("CARGO_PKG_VERSION"),
+    ok: true,
+    command: result.command,
+    data: &result.data,
+  }
 }
 
 fn error_envelope<'a>(command: &'a str, err: &'a JoyError) -> ErrorEnvelope<'a> {
   ErrorEnvelope {
+    schema_version: JSON_SCHEMA_VERSION,
+    joy_version: env!("CARGO_PKG_VERSION"),
     ok: false,
     command,
     error: ErrorPayload { code: err.code, message: &err.message },
@@ -679,6 +693,8 @@ mod tests {
     assert_eq!(
       value,
       json!({
+          "schema_version": "1",
+          "joy_version": env!("CARGO_PKG_VERSION"),
           "ok": false,
           "command": "build",
           "error": {
@@ -696,6 +712,8 @@ mod tests {
     assert_eq!(
       value,
       json!({
+        "schema_version": "1",
+        "joy_version": env!("CARGO_PKG_VERSION"),
         "ok": true,
         "command": "recipe-check",
         "data": {

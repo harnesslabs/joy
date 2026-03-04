@@ -11,6 +11,7 @@ pub mod run;
 pub mod sync;
 pub mod tree;
 pub mod update;
+pub mod version;
 pub mod why;
 
 use serde::Serialize;
@@ -59,6 +60,7 @@ impl CommandOutput {
 /// Dispatch the parsed CLI subcommand to its handler.
 pub fn dispatch(command: Commands, runtime: RuntimeFlags) -> Result<CommandOutput, JoyError> {
   match command {
+    Commands::Version(args) => version::handle(args),
     Commands::New(args) => new::handle(args),
     Commands::Init(args) => init::handle(args),
     Commands::Add(args) => {

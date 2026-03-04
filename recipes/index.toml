@@ -35,3 +35,47 @@ slug = "tl_expected"
 [[packages]]
 id = "gabime/spdlog"
 slug = "spdlog"
+
+[[packages]]
+id = "pybind/pybind11"
+slug = "pybind11"
+
+[[packages]]
+id = "ericniebler/range-v3"
+slug = "range_v3"
+
+[[packages]]
+id = "doctest/doctest"
+slug = "doctest"
+
+[[packages]]
+id = "microsoft/GSL"
+slug = "gsl"
+
+[[packages]]
+id = "Neargye/nameof"
+slug = "nameof"
+
+[[packages]]
+id = "foonathan/type_safe"
+slug = "type_safe"
+
+[[packages]]
+id = "martinmoene/span-lite"
+slug = "span_lite"
+
+[[packages]]
+id = "martinmoene/optional-lite"
+slug = "optional_lite"
+
+[[packages]]
+id = "martinmoene/string-view-lite"
+slug = "string_view_lite"
+
+[[packages]]
+id = "Tessil/robin-map"
+slug = "robin_map"
+
+[[packages]]
+id = "martinus/nanobench"
+slug = "nanobench"

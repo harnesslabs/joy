@@ -21,6 +21,7 @@ use crate::output::progress_detail_tty;
 use crate::package_id::PackageId;
 
 const DEFAULT_REGISTRY_NAME: &str = "default";
+const DEFAULT_PUBLIC_REGISTRY_URL: &str = "https://github.com/harnesslabs/joy-registry.git";
 
 /// Registry-backed version requirement used by resolver and CLI dependency commands.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -347,11 +348,7 @@ fn registry_remote_url(name: &str) -> Result<String, RegistryError> {
       reason: "only the default registry is currently supported".into(),
     });
   }
-  std::env::var("JOY_REGISTRY_DEFAULT").map_err(|_| RegistryError::RegistryNotConfigured {
-    registry: name.to_string(),
-    reason: "set JOY_REGISTRY_DEFAULT to a git URL or local git repo path for the registry index"
-      .into(),
-  })
+  Ok(std::env::var("JOY_REGISTRY_DEFAULT").unwrap_or_else(|_| DEFAULT_PUBLIC_REGISTRY_URL.into()))
 }
 
 fn ensure_registry_mirror(

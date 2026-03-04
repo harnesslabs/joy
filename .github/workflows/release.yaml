@@ -31,6 +31,14 @@ jobs:
             target: aarch64-apple-darwin
             archive_ext: tar.gz
             binary_name: joy
+          - os: macos-13
+            target: x86_64-apple-darwin
+            archive_ext: tar.gz
+            binary_name: joy
+          - os: windows-latest
+            target: x86_64-pc-windows-msvc
+            archive_ext: zip
+            binary_name: joy.exe
           - os: windows-latest
             target: x86_64-pc-windows-gnu
             archive_ext: zip
@@ -55,8 +63,12 @@ jobs:
         with:
           targets: ${{ matrix.target }}
 
+      - name: Setup MSVC developer environment (Windows MSVC)
+        if: runner.os == 'Windows' && endsWith(matrix.target, '-msvc')
+        uses: ilammy/msvc-dev-cmd@v1
+
       - name: Install MinGW (Windows GNU)
-        if: runner.os == 'Windows'
+        if: runner.os == 'Windows' && endsWith(matrix.target, '-gnu')
         run: |
           choco install mingw --version=12.2.0 -y
           Import-Module "$env:ChocolateyInstall\helpers\chocolateyProfile.psm1"
@@ -114,20 +126,259 @@ jobs:
             ${{ steps.meta.outputs.archive_base }}.sha256
           if-no-files-found: error
 
-  github-release:
-    name: github-release
+  smoke-test-artifacts:
+    name: smoke / ${{ matrix.target }}
     needs: build-artifacts
-    runs-on: ubuntu-latest
-    if: startsWith(github.ref, 'refs/tags/v')
-    permissions:
-      contents: write
+    runs-on: ${{ matrix.os }}
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - os: ubuntu-latest
+            target: x86_64-unknown-linux-gnu
+            archive_ext: tar.gz
+          - os: macos-latest
+            target: aarch64-apple-darwin
+            archive_ext: tar.gz
+          - os: macos-13
+            target: x86_64-apple-darwin
+            archive_ext: tar.gz
+          - os: windows-latest
+            target: x86_64-pc-windows-msvc
+            archive_ext: zip
+          - os: windows-latest
+            target: x86_64-pc-windows-gnu
+            archive_ext: zip
     steps:
-      - name: Download packaged artifacts
+      - name: Download packaged artifact
+        uses: actions/download-artifact@v4
+        with:
+          name: release-${{ matrix.target }}
+          path: dist
+
+      - name: Smoke test archive (Unix)
+        if: runner.os != 'Windows'
+        shell: bash
+        run: |
+          set -euo pipefail
+          ARCHIVE="$(ls dist/*.${{ matrix.archive_ext }} | head -n1)"
+          mkdir -p unpack
+          tar -C unpack -xzf "$ARCHIVE"
+          OUTPUT="$(./unpack/joy --json doctor)"
+          echo "$OUTPUT" > doctor.json
+          jq -e '.ok == true and .command == "doctor" and .schema_version == "1" and (.joy_version | type == "string")' doctor.json >/dev/null
+
+      - name: Smoke test archive (Windows)
+        if: runner.os == 'Windows'
+        shell: pwsh
+        run: |
+          $archive = Get-ChildItem -Path dist -Filter "*.${{ matrix.archive_ext }}" | Select-Object -First 1
+          Expand-Archive -Path $archive.FullName -DestinationPath unpack -Force
+          $raw = .\unpack\joy.exe --json doctor
+          $payload = $raw | ConvertFrom-Json
+          if (-not $payload.ok) { throw "doctor smoke failed" }
+          if ($payload.command -ne "doctor") { throw "unexpected command: $($payload.command)" }
+          if ($payload.schema_version -ne "1") { throw "unexpected schema_version: $($payload.schema_version)" }
+          if (-not $payload.joy_version) { throw "joy_version missing" }
+
+  sbom:
+    name: sbom
+    needs: smoke-test-artifacts
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Install Rust
+        uses: dtolnay/rust-toolchain@stable
+
+      - name: Install cargo-cyclonedx
+        run: cargo install cargo-cyclonedx --locked
+
+      - name: Generate CycloneDX SBOM
+        run: |
+          cargo cyclonedx --workspace --all-features --format json --override-filename joy-sbom
+          cp joy-sbom.cdx.json dist-joy-sbom.cdx.json
+
+      - name: Upload SBOM artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: release-sbom
+          path: dist-joy-sbom.cdx.json
+          if-no-files-found: error
+
+  sign-checksums:
+    name: sign-checksums
+    needs: smoke-test-artifacts
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+      id-token: write
+    steps:
+      - name: Download all packaged artifacts
         uses: actions/download-artifact@v4
         with:
           path: dist
           pattern: release-*
           merge-multiple: true
+
+      - name: Install cosign
+        uses: sigstore/cosign-installer@v3
+
+      - name: Sign checksum files (keyless)
+        shell: bash
+        run: |
+          set -euo pipefail
+          shopt -s nullglob
+          files=(dist/*.sha256)
+          if [ "${#files[@]}" -eq 0 ]; then
+            echo "no checksum files found" >&2
+            exit 1
+          fi
+          for file in "${files[@]}"; do
+            cosign sign-blob --yes --output-signature "${file}.sig" --output-certificate "${file}.pem" "$file"
+          done
+
+      - name: Upload checksum signatures
+        uses: actions/upload-artifact@v4
+        with:
+          name: release-signatures
+          path: |
+            dist/*.sha256.sig
+            dist/*.sha256.pem
+          if-no-files-found: error
+
+  generate-packaging-metadata:
+    name: packaging-metadata
+    needs: smoke-test-artifacts
+    runs-on: ubuntu-latest
+    steps:
+      - name: Download all packaged artifacts
+        uses: actions/download-artifact@v4
+        with:
+          path: dist
+          pattern: release-*
+          merge-multiple: true
+
+      - name: Generate Homebrew and Scoop metadata
+        shell: bash
+        run: |
+          set -euo pipefail
+          VERSION="${GITHUB_REF_NAME#v}"
+
+          linux_sha="$(cat "dist/joy-v${VERSION}-x86_64-unknown-linux-gnu.sha256")"
+          mac_arm_sha="$(cat "dist/joy-v${VERSION}-aarch64-apple-darwin.sha256")"
+          mac_x64_sha="$(cat "dist/joy-v${VERSION}-x86_64-apple-darwin.sha256")"
+          win_msvc_sha="$(cat "dist/joy-v${VERSION}-x86_64-pc-windows-msvc.sha256")"
+
+          mkdir -p dist/Formula dist/packaging/scoop
+
+          cat > dist/Formula/joy.rb <<FORMULA
+          class Joy < Formula
+            desc "Native C++ package and build manager with a cargo-like CLI"
+            homepage "https://github.com/harnesslabs/joy"
+            license "MIT"
+            version "${VERSION}"
+
+            on_macos do
+              if Hardware::CPU.arm?
+                url "https://github.com/harnesslabs/joy/releases/download/v#{version}/joy-v#{version}-aarch64-apple-darwin.tar.gz"
+                sha256 "${mac_arm_sha}"
+              elsif Hardware::CPU.intel?
+                url "https://github.com/harnesslabs/joy/releases/download/v#{version}/joy-v#{version}-x86_64-apple-darwin.tar.gz"
+                sha256 "${mac_x64_sha}"
+              else
+                odie "Unsupported macOS architecture for joy."
+              end
+            end
+
+            on_linux do
+              if Hardware::CPU.intel?
+                url "https://github.com/harnesslabs/joy/releases/download/v#{version}/joy-v#{version}-x86_64-unknown-linux-gnu.tar.gz"
+                sha256 "${linux_sha}"
+              else
+                odie "Only x86_64 Linux binaries are currently published for joy."
+              end
+            end
+
+            def install
+              bin.install "joy"
+            end
+
+            test do
+              output = shell_output("#{bin}/joy --json doctor")
+              assert_match '"command": "doctor"', output
+            end
+          end
+          FORMULA
+
+          cat > dist/packaging/scoop/joy.json <<SCOOP
+          {
+            "version": "${VERSION}",
+            "description": "Native C++ package and build manager with a cargo-like CLI.",
+            "homepage": "https://github.com/harnesslabs/joy",
+            "license": "MIT",
+            "url": "https://github.com/harnesslabs/joy/releases/download/v${VERSION}/joy-v${VERSION}-x86_64-pc-windows-msvc.zip",
+            "hash": "${win_msvc_sha}",
+            "bin": "joy.exe",
+            "checkver": {
+              "github": "https://github.com/harnesslabs/joy"
+            },
+            "autoupdate": {
+              "url": "https://github.com/harnesslabs/joy/releases/download/v$version/joy-v$version-x86_64-pc-windows-msvc.zip"
+            }
+          }
+          SCOOP
+
+      - name: Validate generated packaging metadata
+        run: |
+          ruby -c dist/Formula/joy.rb
+          jq empty dist/packaging/scoop/joy.json
+
+      - name: Upload generated packaging metadata
+        uses: actions/upload-artifact@v4
+        with:
+          name: release-packaging
+          path: |
+            dist/Formula/joy.rb
+            dist/packaging/scoop/joy.json
+          if-no-files-found: error
+
+  github-release:
+    name: github-release
+    needs:
+      [
+        build-artifacts,
+        smoke-test-artifacts,
+        sbom,
+        sign-checksums,
+        generate-packaging-metadata,
+      ]
+    runs-on: ubuntu-latest
+    if: startsWith(github.ref, 'refs/tags/v')
+    permissions:
+      contents: write
+    steps:
+      - name: Download release assets
+        uses: actions/download-artifact@v4
+        with:
+          path: dist
+          pattern: release-*
+          merge-multiple: true
+
+      - name: Normalize packaging metadata paths
+        shell: bash
+        run: |
+          set -euo pipefail
+          formula_path="$(find dist -type f -path '*/Formula/joy.rb' | head -n1 || true)"
+          scoop_path="$(find dist -type f -path '*/packaging/scoop/joy.json' | head -n1 || true)"
+          if [ -z "${formula_path}" ] || [ -z "${scoop_path}" ]; then
+            echo "Generated packaging metadata not found in downloaded artifacts." >&2
+            find dist -maxdepth 5 -type f
+            exit 1
+          fi
+          mkdir -p dist/Formula dist/packaging/scoop
+          cp "${formula_path}" dist/Formula/joy.rb
+          cp "${scoop_path}" dist/packaging/scoop/joy.json
 
       - name: Publish GitHub Release
         uses: softprops/action-gh-release@v2
@@ -137,3 +388,64 @@ jobs:
             dist/*.tar.gz
             dist/*.zip
             dist/*.sha256
+            dist/*.sha256.sig
+            dist/*.sha256.pem
+            dist/*sbom*.json
+            dist/Formula/joy.rb
+            dist/packaging/scoop/joy.json
+
+  update-repo-distribution-metadata:
+    name: update-repo-distribution-metadata
+    needs:
+      [
+        github-release,
+        generate-packaging-metadata,
+      ]
+    runs-on: ubuntu-latest
+    if: startsWith(github.ref, 'refs/tags/v')
+    permissions:
+      contents: write
+    steps:
+      - name: Checkout default branch
+        uses: actions/checkout@v4
+        with:
+          ref: ${{ github.event.repository.default_branch }}
+          fetch-depth: 0
+          token: ${{ secrets.JOY_RELEASE_PAT != '' && secrets.JOY_RELEASE_PAT || github.token }}
+
+      - name: Download generated packaging metadata
+        uses: actions/download-artifact@v4
+        with:
+          name: release-packaging
+          path: dist
+
+      - name: Update in-repo metadata files
+        shell: bash
+        run: |
+          set -euo pipefail
+          formula_path="$(find dist -type f -path '*/Formula/joy.rb' | head -n1 || true)"
+          scoop_path="$(find dist -type f -path '*/packaging/scoop/joy.json' | head -n1 || true)"
+          if [ -z "${formula_path}" ] || [ -z "${scoop_path}" ]; then
+            echo "Generated packaging metadata not found in release-packaging artifact." >&2
+            find dist -maxdepth 5 -type f
+            exit 1
+          fi
+          cp "${formula_path}" Formula/joy.rb
+          cp "${scoop_path}" packaging/scoop/joy.json
+
+      - name: Commit and push metadata updates
+        shell: bash
+        env:
+          VERSION: ${{ github.ref_name }}
+          DEFAULT_BRANCH: ${{ github.event.repository.default_branch }}
+        run: |
+          set -euo pipefail
+          git config user.name "joy-release-bot"
+          git config user.email "joy-release-bot@users.noreply.github.com"
+          if git diff --quiet -- Formula/joy.rb packaging/scoop/joy.json; then
+            echo "No metadata updates to commit."
+            exit 0
+          fi
+          git add Formula/joy.rb packaging/scoop/joy.json
+          git commit -m "release: update package metadata for ${VERSION}"
+          git push origin "HEAD:${DEFAULT_BRANCH}"

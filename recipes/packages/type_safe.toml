@@ -1,0 +1,10 @@
+id = "foonathan/type_safe"
+slug = "type_safe"
+source = "github"
+kind = "header_only"
+
+[headers]
+include_roots = ["include"]
+
+[deps]
+packages = []

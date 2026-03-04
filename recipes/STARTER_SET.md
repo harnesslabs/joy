@@ -24,6 +24,17 @@ Header-only:
 - `jarro2783/cxxopts`
 - `TartanLlama/expected`
 - `gabime/spdlog` (header-only usage path; declares transitive `fmtlib/fmt`)
+- `pybind/pybind11`
+- `ericniebler/range-v3`
+- `doctest/doctest`
+- `microsoft/GSL`
+- `Neargye/nameof`
+- `foonathan/type_safe`
+- `martinmoene/span-lite`
+- `martinmoene/optional-lite`
+- `martinmoene/string-view-lite`
+- `Tessil/robin-map`
+- `martinus/nanobench`
 
 ## Acceptance Rubric
 
