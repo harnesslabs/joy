@@ -37,7 +37,7 @@ jobs:
       - uses: actions/checkout@v4
 
       - name: Validate Homebrew formula syntax
-        run: ruby -c packaging/homebrew/joy.rb
+        run: ruby -c Formula/joy.rb
 
       - name: Validate Scoop manifest JSON
         run: jq empty packaging/scoop/joy.json

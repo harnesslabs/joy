@@ -1,0 +1,13 @@
+[workspace]
+changelog_update = true
+dependencies_update = true
+release_always = false
+git_release_enable = false
+
+[[package]]
+name = "joy"
+changelog_path = "CHANGELOG.md"
+publish = false
+git_only = true
+git_release_enable = false
+git_tag_name = "v{{ version }}"

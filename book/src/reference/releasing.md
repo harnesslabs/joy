@@ -20,9 +20,12 @@ The release workflow currently publishes:
 
 ## Release Workflow
 
-- Workflow file: `.github/workflows/release.yaml`
-- Trigger: tag push matching `v*`
-- Also supports manual dispatch (run on a tag ref)
+- Release PR + tag automation: `.github/workflows/release-plz.yaml`
+- Binary/release asset workflow: `.github/workflows/release.yaml`
+- Packaging config for release-plz: `release-plz.toml`
+
+`release-plz` handles version/changelog PRs and tag creation.
+Tag pushes (`v*`) trigger the binary release workflow.
 
 ## Pre-Release Checklist
 
@@ -31,25 +34,37 @@ The release workflow currently publishes:
 3. Run CI-parity commands (`just ci-local`; optionally compiled e2e checks).
 4. Validate distribution metadata templates (`just dist-metadata-check`).
 5. Confirm PR checks (`gh pr checks <pr-number>`).
-6. Bump version in `Cargo.toml`.
-7. Refresh release-facing docs (`README`, packaging metadata, docs).
+6. Ensure `RELEASE_PLZ_TOKEN` secret is configured with `contents` + `pull_requests` write permission.
+7. If default-branch protection blocks workflow pushes, set `JOY_RELEASE_PAT` so release metadata commits can update `Formula/joy.rb`.
 
-## Tag and Publish
+## Automated Flow (Recommended)
+
+1. Merge regular changes into `main`.
+2. `release-plz` opens/updates a release PR with version and changelog updates.
+3. Merge the release PR.
+4. `release-plz release` creates `vX.Y.Z` tag.
+5. `.github/workflows/release.yaml` builds artifacts, publishes GitHub Release assets, and updates package metadata.
+
+Monitor Actions and verify the GitHub Release contains archives/checksums/signatures/SBOM.
+
+## Manual Backstop (If Needed)
 
 ```bash
 git tag -a vX.Y.Z -m "joy vX.Y.Z"
 git push origin vX.Y.Z
 ```
 
-Then monitor the GitHub Actions workflow and verify the GitHub Release contains the expected archives and checksums.
+## Packaging Outputs
 
-The release workflow also publishes generated packaging metadata with concrete checksums:
+The release workflow generates and publishes concrete metadata with release checksums:
 
-- `packaging/homebrew/joy.rb`
+- `Formula/joy.rb` (single-repo Homebrew tap source of truth)
 - `packaging/scoop/joy.json`
 
-If channel publishing variables/secrets are configured, the workflow can also push updates directly to Homebrew tap and Scoop bucket repositories:
+Users can install via Homebrew tap:
 
-- `JOY_HOMEBREW_TAP_REPO` (repo slug)
-- `JOY_SCOOP_BUCKET_REPO` (repo slug)
-- `JOY_PACKAGING_PAT` (token secret with repo write access)
+```bash
+brew tap harnesslabs/joy
+brew install harnesslabs/joy/joy
+brew upgrade joy
+```

@@ -53,9 +53,19 @@ cargo install --path .
 
 ### Release binaries and packaging metadata
 
-`joy` publishes GitHub release artifacts and includes package metadata templates for:
+`joy` publishes GitHub release artifacts.
 
-- Homebrew (`packaging/homebrew/joy.rb`)
+Homebrew single-repo tap install:
+
+```bash
+brew tap harnesslabs/joy
+brew install harnesslabs/joy/joy
+brew upgrade joy
+```
+
+Package metadata in this repository:
+
+- Homebrew tap formula (`Formula/joy.rb`)
 - Scoop (`packaging/scoop/joy.json`)
 
 See the docs book for installation and release details.

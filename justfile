@@ -25,7 +25,7 @@ docs-lint:
   mdbook test book
 
 dist-metadata-check:
-  ruby -c packaging/homebrew/joy.rb
+  ruby -c Formula/joy.rb
   jq empty packaging/scoop/joy.json
 
 fmt-check:

@@ -270,9 +270,9 @@ jobs:
           mac_x64_sha="$(cat "dist/joy-v${VERSION}-x86_64-apple-darwin.sha256")"
           win_msvc_sha="$(cat "dist/joy-v${VERSION}-x86_64-pc-windows-msvc.sha256")"
 
-          mkdir -p dist/packaging/homebrew dist/packaging/scoop
+          mkdir -p dist/Formula dist/packaging/scoop
 
-          cat > dist/packaging/homebrew/joy.rb <<FORMULA
+          cat > dist/Formula/joy.rb <<FORMULA
           class Joy < Formula
             desc "Native C++ package and build manager with a cargo-like CLI"
             homepage "https://github.com/harnesslabs/joy"
@@ -331,7 +331,7 @@ jobs:
 
       - name: Validate generated packaging metadata
         run: |
-          ruby -c dist/packaging/homebrew/joy.rb
+          ruby -c dist/Formula/joy.rb
           jq empty dist/packaging/scoop/joy.json
 
       - name: Upload generated packaging metadata
@@ -339,54 +339,9 @@ jobs:
         with:
           name: release-packaging
           path: |
-            dist/packaging/homebrew/joy.rb
+            dist/Formula/joy.rb
             dist/packaging/scoop/joy.json
           if-no-files-found: error
-
-  publish-package-channels:
-    name: publish-package-channels
-    needs: generate-packaging-metadata
-    runs-on: ubuntu-latest
-    if: ${{ vars.JOY_HOMEBREW_TAP_REPO != '' && vars.JOY_SCOOP_BUCKET_REPO != '' && secrets.JOY_PACKAGING_PAT != '' }}
-    steps:
-      - name: Download generated packaging metadata
-        uses: actions/download-artifact@v4
-        with:
-          name: release-packaging
-          path: dist/packaging
-
-      - name: Publish Homebrew formula and Scoop manifest
-        env:
-          GH_PAT: ${{ secrets.JOY_PACKAGING_PAT }}
-          HOMEBREW_TAP: ${{ vars.JOY_HOMEBREW_TAP_REPO }}
-          SCOOP_BUCKET: ${{ vars.JOY_SCOOP_BUCKET_REPO }}
-          VERSION: ${{ github.ref_name }}
-        shell: bash
-        run: |
-          set -euo pipefail
-          rm -rf tap bucket
-
-          git clone "https://x-access-token:${GH_PAT}@github.com/${HOMEBREW_TAP}.git" tap
-          mkdir -p tap/Formula
-          cp dist/packaging/homebrew/joy.rb tap/Formula/joy.rb
-          git -C tap config user.name "joy-release-bot"
-          git -C tap config user.email "joy-release-bot@users.noreply.github.com"
-          if ! git -C tap diff --quiet -- Formula/joy.rb; then
-            git -C tap add Formula/joy.rb
-            git -C tap commit -m "joy ${VERSION} formula update"
-            git -C tap push origin HEAD
-          fi
-
-          git clone "https://x-access-token:${GH_PAT}@github.com/${SCOOP_BUCKET}.git" bucket
-          mkdir -p bucket/bucket
-          cp dist/packaging/scoop/joy.json bucket/bucket/joy.json
-          git -C bucket config user.name "joy-release-bot"
-          git -C bucket config user.email "joy-release-bot@users.noreply.github.com"
-          if ! git -C bucket diff --quiet -- bucket/joy.json; then
-            git -C bucket add bucket/joy.json
-            git -C bucket commit -m "joy ${VERSION} scoop manifest update"
-            git -C bucket push origin HEAD
-          fi
 
   github-release:
     name: github-release
@@ -410,6 +365,21 @@ jobs:
           pattern: release-*
           merge-multiple: true
 
+      - name: Normalize packaging metadata paths
+        shell: bash
+        run: |
+          set -euo pipefail
+          formula_path="$(find dist -type f -path '*/Formula/joy.rb' | head -n1 || true)"
+          scoop_path="$(find dist -type f -path '*/packaging/scoop/joy.json' | head -n1 || true)"
+          if [ -z "${formula_path}" ] || [ -z "${scoop_path}" ]; then
+            echo "Generated packaging metadata not found in downloaded artifacts." >&2
+            find dist -maxdepth 5 -type f
+            exit 1
+          fi
+          mkdir -p dist/Formula dist/packaging/scoop
+          cp "${formula_path}" dist/Formula/joy.rb
+          cp "${scoop_path}" dist/packaging/scoop/joy.json
+
       - name: Publish GitHub Release
         uses: softprops/action-gh-release@v2
         with:
@@ -421,5 +391,61 @@ jobs:
             dist/*.sha256.sig
             dist/*.sha256.pem
             dist/*sbom*.json
-            dist/packaging/homebrew/joy.rb
+            dist/Formula/joy.rb
             dist/packaging/scoop/joy.json
+
+  update-repo-distribution-metadata:
+    name: update-repo-distribution-metadata
+    needs:
+      [
+        github-release,
+        generate-packaging-metadata,
+      ]
+    runs-on: ubuntu-latest
+    if: startsWith(github.ref, 'refs/tags/v')
+    permissions:
+      contents: write
+    steps:
+      - name: Checkout default branch
+        uses: actions/checkout@v4
+        with:
+          ref: ${{ github.event.repository.default_branch }}
+          fetch-depth: 0
+          token: ${{ secrets.JOY_RELEASE_PAT != '' && secrets.JOY_RELEASE_PAT || github.token }}
+
+      - name: Download generated packaging metadata
+        uses: actions/download-artifact@v4
+        with:
+          name: release-packaging
+          path: dist
+
+      - name: Update in-repo metadata files
+        shell: bash
+        run: |
+          set -euo pipefail
+          formula_path="$(find dist -type f -path '*/Formula/joy.rb' | head -n1 || true)"
+          scoop_path="$(find dist -type f -path '*/packaging/scoop/joy.json' | head -n1 || true)"
+          if [ -z "${formula_path}" ] || [ -z "${scoop_path}" ]; then
+            echo "Generated packaging metadata not found in release-packaging artifact." >&2
+            find dist -maxdepth 5 -type f
+            exit 1
+          fi
+          cp "${formula_path}" Formula/joy.rb
+          cp "${scoop_path}" packaging/scoop/joy.json
+
+      - name: Commit and push metadata updates
+        shell: bash
+        env:
+          VERSION: ${{ github.ref_name }}
+          DEFAULT_BRANCH: ${{ github.event.repository.default_branch }}
+        run: |
+          set -euo pipefail
+          git config user.name "joy-release-bot"
+          git config user.email "joy-release-bot@users.noreply.github.com"
+          if git diff --quiet -- Formula/joy.rb packaging/scoop/joy.json; then
+            echo "No metadata updates to commit."
+            exit 0
+          fi
+          git add Formula/joy.rb packaging/scoop/joy.json
+          git commit -m "release: update package metadata for ${VERSION}"
+          git push origin "HEAD:${DEFAULT_BRANCH}"

@@ -97,5 +97,7 @@ Release/versioning policy and the tagged GitHub release workflow are documented 
 
 - `book/src/reference/releasing.md` (canonical)
 - `/Users/autoparallel/Code/joy/docs/releasing.md` (legacy stub / redirect entrypoint)
+- `/Users/autoparallel/Code/joy/.github/workflows/release-plz.yaml` (release PR + tag automation)
 - `/Users/autoparallel/Code/joy/.github/workflows/release.yaml`
+- `/Users/autoparallel/Code/joy/release-plz.toml`
 - `/Users/autoparallel/Code/joy/packaging/README.md`

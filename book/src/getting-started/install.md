@@ -19,11 +19,22 @@ Current artifact set (subject to release workflow updates):
 - `joy-vX.Y.Z-x86_64-pc-windows-msvc.zip`
 - `joy-vX.Y.Z-x86_64-pc-windows-gnu.zip` (compatibility artifact)
 
-## Homebrew / Scoop Metadata
+## Homebrew (Single-Repo Tap)
 
-This repository includes release-managed package metadata templates:
+`joy` publishes and maintains `Formula/joy.rb` in this repository.
 
-- `packaging/homebrew/joy.rb`
+Install and upgrade:
+
+```bash
+brew tap harnesslabs/joy
+brew install harnesslabs/joy/joy
+brew upgrade joy
+```
+
+## Scoop Metadata
+
+Scoop metadata is maintained at:
+
 - `packaging/scoop/joy.json`
 
 Release workflows publish generated package-manager metadata with concrete checksums as release artifacts.

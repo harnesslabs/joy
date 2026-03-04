@@ -4,7 +4,7 @@ class Joy < Formula
   license "MIT"
   version "0.1.0"
   # Checksum values here are bootstrap defaults for local syntax validation.
-  # Release automation publishes a generated formula with release-specific checksums.
+  # Release automation updates this file with release-specific checksums.
 
   on_macos do
     if Hardware::CPU.arm?

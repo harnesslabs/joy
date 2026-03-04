@@ -2,17 +2,19 @@
 
 This directory contains packaging metadata templates for package managers.
 
-Current templates:
+Current metadata files:
 
-- Homebrew formula: `/Users/autoparallel/Code/joy/packaging/homebrew/joy.rb`
-- Scoop manifest: `/Users/autoparallel/Code/joy/packaging/scoop/joy.json`
+- Homebrew formula (tap source of truth): `/Users/autoparallel/Code/joy/Formula/joy.rb`
+- Scoop manifest template: `/Users/autoparallel/Code/joy/packaging/scoop/joy.json`
 
-The release workflow now generates release-specific metadata with exact checksums and uploads those files as release artifacts:
+The release workflow generates release-specific metadata with exact checksums and uploads those files as release artifacts:
 
-- `dist/packaging/homebrew/joy.rb`
+- `dist/Formula/joy.rb`
 - `dist/packaging/scoop/joy.json`
 
-Repository copies are kept as syntax-valid templates. Generated release artifacts should be treated as the source of truth for publishing.
+For Homebrew single-repo tap mode, the workflow also writes generated metadata back to `Formula/joy.rb` on the default branch after each tag release (using `GITHUB_TOKEN` or optional `JOY_RELEASE_PAT`).
+
+Repository copies are syntax-valid bootstraps between releases.
 
 Per-release generated metadata includes:
 
