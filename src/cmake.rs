@@ -34,6 +34,8 @@ pub struct CmakeBuildResult {
   pub cache_hit: bool,
   pub lib_files: Vec<PathBuf>,
   pub bin_files: Vec<PathBuf>,
+  pub include_paths: Vec<PathBuf>,
+  pub manifest_file: PathBuf,
 }
 
 /// Build a CMake project into the provided ABI cache layout.
@@ -74,7 +76,13 @@ pub fn build_into_cache(request: &CmakeBuildRequest) -> Result<CmakeBuildResult,
     &include_paths,
   )?;
 
-  Ok(CmakeBuildResult { cache_hit: false, lib_files, bin_files })
+  Ok(CmakeBuildResult {
+    cache_hit: false,
+    lib_files,
+    bin_files,
+    include_paths,
+    manifest_file: request.build_layout.manifest_file.clone(),
+  })
 }
 
 fn ensure_tools() -> Result<(), CmakeError> {
@@ -372,7 +380,14 @@ fn write_manifest(
 fn index_cached_artifacts(layout: &BuildCacheLayout) -> Result<CmakeBuildResult, CmakeError> {
   let lib_files = list_files(&layout.lib_dir)?;
   let bin_files = list_files(&layout.bin_dir)?;
-  Ok(CmakeBuildResult { cache_hit: true, lib_files, bin_files })
+  let include_paths = list_dirs(&layout.include_dir)?;
+  Ok(CmakeBuildResult {
+    cache_hit: true,
+    lib_files,
+    bin_files,
+    include_paths,
+    manifest_file: layout.manifest_file.clone(),
+  })
 }
 
 fn list_files(dir: &Path) -> Result<Vec<PathBuf>, CmakeError> {
@@ -392,6 +407,30 @@ fn list_files(dir: &Path) -> Result<Vec<PathBuf>, CmakeError> {
     })?;
     let path = entry.path();
     if path.is_file() {
+      out.push(path);
+    }
+  }
+  out.sort();
+  Ok(out)
+}
+
+fn list_dirs(dir: &Path) -> Result<Vec<PathBuf>, CmakeError> {
+  if !dir.is_dir() {
+    return Ok(Vec::new());
+  }
+  let mut out = Vec::new();
+  for entry in fs::read_dir(dir).map_err(|source| CmakeError::Io {
+    action: "listing cached include dirs".into(),
+    path: dir.to_path_buf(),
+    source,
+  })? {
+    let entry = entry.map_err(|source| CmakeError::Io {
+      action: "iterating cached include dirs".into(),
+      path: dir.to_path_buf(),
+      source,
+    })?;
+    let path = entry.path();
+    if path.is_dir() {
       out.push(path);
     }
   }

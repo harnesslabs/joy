@@ -179,6 +179,23 @@ pub fn fetch_github_semver_with_cache(
   })
 }
 
+/// Download and extract a `.tar.gz` archive into `dest_dir`.
+///
+/// This API remains for backwards compatibility with older library consumers, but archive
+/// transport is no longer used by the CLI dependency pipeline.
+pub fn download_and_extract_tar_gz(url: &str, _dest_dir: &Path) -> Result<(), FetchError> {
+  if runtime_offline_enabled() {
+    return Err(FetchError::OfflineNetworkDisabled {
+      action: "downloading archive".to_string(),
+      url: url.to_string(),
+    });
+  }
+  Err(FetchError::Runtime(std::io::Error::new(
+    std::io::ErrorKind::Unsupported,
+    "archive transport is not supported in this joy build",
+  )))
+}
+
 /// Prefetch multiple GitHub packages in parallel while preserving the original request ordering.
 pub fn prefetch_github_packages(
   requests: Vec<(PackageId, String)>,
@@ -506,6 +523,8 @@ fn map_git_error(err: GitCommandError) -> FetchError {
 pub enum FetchError {
   #[error(transparent)]
   GlobalCache(#[from] GlobalCacheError),
+  #[error("http error while downloading archive: {0}")]
+  Http(#[from] reqwest::Error),
   #[error("failed to run git while {action}: {source}")]
   SpawnGit {
     action: String,
@@ -521,6 +540,8 @@ pub enum FetchError {
     #[source]
     source: std::io::Error,
   },
+  #[error("failed to create tokio runtime for parallel fetch: {0}")]
+  Runtime(std::io::Error),
   #[error("{0}")]
   TaskJoin(String),
   #[error("invalid semver requirement `{requirement}`: {source}")]
@@ -549,6 +570,8 @@ pub enum FetchError {
     #[source]
     source: Box<FetchError>,
   },
+  #[error("offline mode blocks {action} from `{url}`")]
+  OfflineNetworkDisabled { action: String, url: String },
   #[error("transient network failures while {action} after {attempts} attempts: {source}")]
   TransientRetriesExhausted {
     action: String,
@@ -564,7 +587,7 @@ impl FetchError {
   }
 
   pub fn is_offline_network_disabled(&self) -> bool {
-    false
+    matches!(self, Self::OfflineNetworkDisabled { .. })
   }
 
   pub fn is_invalid_version_requirement(&self) -> bool {
@@ -577,6 +600,7 @@ impl FetchError {
 
   pub fn is_transient_network(&self) -> bool {
     match self {
+      Self::Http(err) => err.is_timeout() || err.is_connect() || err.is_request(),
       Self::SpawnGit { source, .. } => matches!(
         source.kind(),
         std::io::ErrorKind::TimedOut
@@ -608,10 +632,12 @@ impl FetchError {
       Self::TransientRetriesExhausted { .. } => false,
       Self::OfflineCacheMiss { .. }
       | Self::OfflineRevisionUnavailable { .. }
+      | Self::OfflineNetworkDisabled { .. }
       | Self::InvalidVersionReq { .. }
       | Self::VersionNotFound { .. }
       | Self::GlobalCache(_)
       | Self::Io { .. }
+      | Self::Runtime(_)
       | Self::TaskJoin(_) => false,
     }
   }

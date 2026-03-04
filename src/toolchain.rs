@@ -33,6 +33,7 @@ pub struct Compiler {
 /// Discovered Ninja executable.
 #[derive(Debug, Clone)]
 pub struct Ninja {
+  pub executable_name: String,
   pub path: PathBuf,
 }
 
@@ -54,7 +55,7 @@ pub fn discover() -> Result<Toolchain, ToolchainError> {
 pub fn discover_ninja() -> Result<Ninja, ToolchainError> {
   for candidate in ["ninja", "ninja-build"] {
     if let Ok(path) = which::which(candidate) {
-      return Ok(Ninja { path });
+      return Ok(Ninja { executable_name: candidate.to_string(), path });
     }
   }
   Err(ToolchainError::NinjaNotFound)

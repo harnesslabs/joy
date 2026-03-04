@@ -4,6 +4,7 @@ use thiserror::Error;
 
 #[derive(Debug, Clone)]
 pub struct ProjectEnvLayout {
+  pub root: PathBuf,
   pub include_dir: PathBuf,
   pub lib_dir: PathBuf,
   pub build_dir: PathBuf,
@@ -29,7 +30,15 @@ pub fn ensure_layout(project_root: &Path) -> Result<ProjectEnvLayout, ProjectEnv
     }
   }
 
-  Ok(ProjectEnvLayout { include_dir, lib_dir, build_dir, bin_dir, state_dir, created_paths })
+  Ok(ProjectEnvLayout {
+    root: joy_root,
+    include_dir,
+    lib_dir,
+    build_dir,
+    bin_dir,
+    state_dir,
+    created_paths,
+  })
 }
 
 #[derive(Debug, Error)]
@@ -53,7 +62,7 @@ mod tests {
     let temp = TempDir::new().expect("tempdir");
     let layout = ensure_layout(temp.path()).expect("create layout");
 
-    assert!(temp.path().join(".joy").is_dir());
+    assert!(layout.root.is_dir());
     assert!(layout.include_dir.is_dir());
     assert!(layout.lib_dir.is_dir());
     assert!(layout.build_dir.is_dir());

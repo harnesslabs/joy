@@ -49,6 +49,14 @@ pub enum RegistrySourceKind {
   Github,
 }
 
+impl RegistrySourceKind {
+  pub fn as_str(self) -> &'static str {
+    match self {
+      Self::Github => "github",
+    }
+  }
+}
+
 /// Optional embedded package-manifest summary from registry index v2 releases.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct RegistryManifestSummary {
@@ -71,6 +79,7 @@ pub struct RegistryManifestDependency {
 #[derive(Debug, Clone)]
 pub struct RegistryStore {
   name: String,
+  checkout_dir: PathBuf,
   packages_by_id: BTreeMap<String, RegistryPackage>,
 }
 
@@ -86,6 +95,16 @@ impl RegistryStore {
   pub fn load_named(name: &str) -> Result<Self, RegistryError> {
     let cache = GlobalCache::resolve()?;
     load_registry_from_git_cache(name, &cache)
+  }
+
+  /// Registry name (for example `default`).
+  pub fn name(&self) -> &str {
+    &self.name
+  }
+
+  /// Local checkout path containing the loaded `index.toml`.
+  pub fn checkout_dir(&self) -> &Path {
+    &self.checkout_dir
   }
 
   /// Resolve a package requirement to a concrete release entry.
@@ -315,7 +334,11 @@ fn load_registry_from_checkout(
     packages_by_id.insert(pkg.id, RegistryPackage { releases });
   }
 
-  Ok(RegistryStore { name: name.to_string(), packages_by_id })
+  Ok(RegistryStore {
+    name: name.to_string(),
+    checkout_dir: checkout_dir.to_path_buf(),
+    packages_by_id,
+  })
 }
 
 fn registry_remote_url(name: &str) -> Result<String, RegistryError> {

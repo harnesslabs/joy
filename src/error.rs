@@ -21,6 +21,11 @@ impl JoyError {
     Self { command, code, message: message.into(), exit_code }
   }
 
+  /// Helper for stubbed commands and planned-but-unimplemented features.
+  pub fn not_implemented(command: &'static str) -> Self {
+    Self::new(command, "not_implemented", format!("`joy {command}` is not implemented yet"), 2)
+  }
+
   /// Helper for contextual filesystem errors.
   pub fn io(
     command: &'static str,
