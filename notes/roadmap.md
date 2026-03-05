@@ -13,7 +13,7 @@ Phase 38-76 is archived and complete. The active roadmap wave is Phase 77-86: Ca
 - Phase 78 Multi-source add/update/remove UX: in progress (CLI + manifest integration implemented; resolver support remains limited to github/registry)
 - Phase 79 Named registries + discovery commands: in progress (`joy registry`, `joy search`, `joy info` implemented)
 - Phase 80 Universal resolver + lock provenance: in progress (additive lockfile fields + unsupported-source diagnostics; full provider backend support pending)
-- Phase 81 Generic compiled dependency support (CMake-first): pending
+- Phase 81 Generic compiled dependency support (CMake-first): completed (`1dab34d`)
 - Phase 82 Offline-first operations: in progress (`joy fetch`, `joy vendor`, `joy cache gc` implemented)
 - Phase 83 Workspace/profile parity: pending
 - Phase 84 Supply-chain hardening (`joy verify`, SBOM, signatures): pending

@@ -3,7 +3,9 @@
 Immediate queue for the Cargo/uv-style usability wave:
 
 1. Complete resolver/fetch provider abstraction for non-github sources (`git`, `path`, `archive`) and graduate from staged-only manifest updates to real sync/build flows.
-2. Implement generic recipe-less CMake fallback pipeline (Phase 81) with cross-platform fixtures for GNU + MSVC.
+2. Implement Phase 83 workspace-wide lock/profile parity:
+   - workspace lockfile determinism across members
+   - profile defaults propagated through `sync/build/run`
 3. Tighten lock provenance and supply-chain policy:
    - source provenance for each backend
    - strict checksum validation for vendored/archive inputs
