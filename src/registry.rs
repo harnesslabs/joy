@@ -19,6 +19,7 @@ use crate::global_cache::{GlobalCache, GlobalCacheError};
 use crate::manifest::DependencySource;
 use crate::output::progress_detail_tty;
 use crate::package_id::PackageId;
+use crate::registry_config;
 
 const DEFAULT_REGISTRY_NAME: &str = "default";
 const DEFAULT_PUBLIC_REGISTRY_URL: &str = "https://github.com/harnesslabs/joy-registry.git";
@@ -88,13 +89,29 @@ impl RegistryStore {
   ///
   /// The default registry remote is configured through `JOY_REGISTRY_DEFAULT`.
   pub fn load_default() -> Result<Self, RegistryError> {
-    Self::load_named(DEFAULT_REGISTRY_NAME)
+    Self::load_default_for_project(None)
+  }
+
+  /// Load the default registry using project-aware config lookup.
+  pub fn load_default_for_project(project_root: Option<&Path>) -> Result<Self, RegistryError> {
+    let effective = registry_config::load_effective(project_root)
+      .map_err(|source| RegistryError::Config { source })?;
+    let name = effective.default.as_deref().unwrap_or(DEFAULT_REGISTRY_NAME);
+    Self::load_named_for_project(name, project_root)
   }
 
   /// Load a named registry from a git-backed cache mirror.
   pub fn load_named(name: &str) -> Result<Self, RegistryError> {
+    Self::load_named_for_project(name, None)
+  }
+
+  /// Load a named registry using project-aware config lookup.
+  pub fn load_named_for_project(
+    name: &str,
+    project_root: Option<&Path>,
+  ) -> Result<Self, RegistryError> {
     let cache = GlobalCache::resolve()?;
-    load_registry_from_git_cache(name, &cache)
+    load_registry_from_git_cache(name, &cache, project_root)
   }
 
   /// Registry name (for example `default`).
@@ -105,6 +122,20 @@ impl RegistryStore {
   /// Local checkout path containing the loaded `index.toml`.
   pub fn checkout_dir(&self) -> &Path {
     &self.checkout_dir
+  }
+
+  /// Iterate package IDs present in this registry index.
+  pub fn package_ids(&self) -> impl Iterator<Item = &str> {
+    self.packages_by_id.keys().map(String::as_str)
+  }
+
+  /// Return all known versions for a package (descending semver order).
+  pub fn package_versions(&self, package_id: &str) -> Option<Vec<String>> {
+    let pkg = self.packages_by_id.get(package_id)?;
+    let mut versions = pkg.releases.iter().map(|r| r.version.to_string()).collect::<Vec<_>>();
+    versions.sort();
+    versions.reverse();
+    Some(versions)
   }
 
   /// Resolve a package requirement to a concrete release entry.
@@ -184,9 +215,10 @@ struct RegistryRelease {
 fn load_registry_from_git_cache(
   name: &str,
   cache: &GlobalCache,
+  project_root: Option<&Path>,
 ) -> Result<RegistryStore, RegistryError> {
   cache.ensure_layout()?;
-  let remote_url = registry_remote_url(name)?;
+  let remote_url = registry_remote_url(name, project_root)?;
   let mirror_dir = cache.git_root.join("registry").join(format!("{name}.git"));
   let checkout_parent = cache.src_root.join("registry-index").join(name);
 
@@ -341,14 +373,21 @@ fn load_registry_from_checkout(
   })
 }
 
-fn registry_remote_url(name: &str) -> Result<String, RegistryError> {
-  if name != DEFAULT_REGISTRY_NAME {
-    return Err(RegistryError::RegistryNotConfigured {
-      registry: name.to_string(),
-      reason: "only the default registry is currently supported".into(),
-    });
+fn registry_remote_url(name: &str, project_root: Option<&Path>) -> Result<String, RegistryError> {
+  let effective = registry_config::load_effective(project_root)
+    .map_err(|source| RegistryError::Config { source })?;
+  if let Some(url) = effective.resolve_url(name) {
+    return Ok(url.to_string());
   }
-  Ok(std::env::var("JOY_REGISTRY_DEFAULT").unwrap_or_else(|_| DEFAULT_PUBLIC_REGISTRY_URL.into()))
+  if name == DEFAULT_REGISTRY_NAME {
+    return Ok(
+      std::env::var("JOY_REGISTRY_DEFAULT").unwrap_or_else(|_| DEFAULT_PUBLIC_REGISTRY_URL.into()),
+    );
+  }
+  Err(RegistryError::RegistryNotConfigured {
+    registry: name.to_string(),
+    reason: "no registry URL/path configured for this name".into(),
+  })
 }
 
 fn ensure_registry_mirror(
@@ -584,6 +623,11 @@ fn map_git_error(err: GitCommandError) -> RegistryError {
 pub enum RegistryError {
   #[error(transparent)]
   GlobalCache(#[from] GlobalCacheError),
+  #[error("failed to load registry configuration: {source}")]
+  Config {
+    #[source]
+    source: crate::registry_config::RegistryConfigError,
+  },
   #[error("registry `{registry}` is not configured: {reason}")]
   RegistryNotConfigured { registry: String, reason: String },
   #[error("filesystem error while {action} at `{path}`: {source}")]

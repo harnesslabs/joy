@@ -25,6 +25,7 @@ pub mod project_env;
 mod project_probe;
 pub mod recipes;
 pub mod registry;
+pub mod registry_config;
 pub mod resolver;
 pub mod templates;
 pub mod toolchain;
