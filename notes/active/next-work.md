@@ -1,12 +1,12 @@
-# Next Work (Phase 77-86 Active Wave)
+# Next Work (Post Phase 77-86 Implementation Wave)
 
-Immediate queue for the Cargo/uv-style usability wave:
+Follow-up queue after delivering Phase 81-86 implementation milestones:
 
-1. Complete resolver/fetch provider abstraction for non-github sources (`git`, `path`, `archive`) and graduate from staged-only manifest updates to real sync/build flows.
-2. Expand offline CI matrix for warm-cache and vendored-only builds with deterministic failure codes.
-3. Finish Phase 85 protocol hardening:
-   - auth token handling/policy for publish workflows
-   - registry transport expansion beyond local-path indexes.
-4. Phase 86 usability closeout:
-   - polish `doctor`/`metadata` troubleshooting
-   - define objective editor-extension gate criteria and default defer behavior.
+1. Complete universal provider backend support in resolver/fetch for non-github sources (`git`, `path`, `archive`) beyond staged-manifest recording.
+2. Expand offline CI coverage for cold/warm/vendored matrices and enforce deterministic error-code expectations.
+3. Harden publishing protocol for production self-hosted usage:
+   - registry auth token handling/policy
+   - non-local registry transport support for publish/owner/yank workflows.
+4. Close remaining phase-77-80 parity gaps:
+   - named-registry selection in core resolver path
+   - full source-provenance parity for all backend types.

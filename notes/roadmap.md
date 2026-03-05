@@ -18,7 +18,7 @@ Phase 38-76 is archived and complete. The active roadmap wave is Phase 77-86: Ca
 - Phase 83 Workspace/profile parity: completed (`98de2b1`)
 - Phase 84 Supply-chain hardening (`joy verify`, SBOM, signatures): completed (`a6d8661`)
 - Phase 85 Self-hosted publishing workflow: completed (`88c8c9e`)
-- Phase 86 Usability closeout + editor gate: pending
+- Phase 86 Usability closeout + editor gate: completed (`bb9790b`)
 
 ## Validation Snapshot
 
