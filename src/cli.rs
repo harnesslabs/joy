@@ -1,6 +1,7 @@
 use clap::{Args, Parser, Subcommand, ValueEnum};
 use std::env;
 use std::io::IsTerminal;
+use std::path::PathBuf;
 
 use crate::output::{
   ColorPreference, GlyphMode, GlyphPreference, HumanUiConfig, OutputMode, ProgressPreference,
@@ -90,6 +91,8 @@ impl Cli {
       progress: progress_enabled,
       ui,
       workspace_package: self.workspace_package.clone(),
+      workspace_root: None,
+      workspace_member: None,
     }
   }
 
@@ -139,6 +142,8 @@ pub struct RuntimeFlags {
   pub progress: bool,
   pub ui: HumanUiConfig,
   pub workspace_package: Option<String>,
+  pub workspace_root: Option<PathBuf>,
+  pub workspace_member: Option<String>,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, ValueEnum)]

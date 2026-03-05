@@ -15,7 +15,7 @@ use crate::commands::CommandOutput;
 use crate::error::JoyError;
 use crate::install_index::InstallIndex;
 use crate::lockfile;
-use crate::manifest::{Manifest, ManifestDocument, SelectedTarget};
+use crate::manifest::{Manifest, ManifestDocument, SelectedTarget, WorkspaceManifest};
 use crate::ninja::{BuildProfile, NinjaBuildSpec};
 use crate::output::{HumanMessageBuilder, progress_detail, progress_stage};
 use crate::recipes::{Linkage as RecipeLinkage, RecipeStore};
@@ -136,6 +136,8 @@ pub(crate) struct BuildOptions {
   pub update_lock: bool,
   pub offline: bool,
   pub progress: bool,
+  pub workspace_root: Option<PathBuf>,
+  pub workspace_member: Option<String>,
 }
 
 #[derive(Debug, Clone)]
@@ -148,6 +150,15 @@ struct PipelineContext {
   env_layout: project_env::ProjectEnvLayout,
   lock_plan: LockfilePlan,
   profile: BuildProfile,
+  workspace_lock_scope: Option<WorkspaceLockScope>,
+}
+
+#[derive(Debug, Clone)]
+struct WorkspaceLockScope {
+  root: PathBuf,
+  member: String,
+  members: Vec<String>,
+  profile: Option<String>,
 }
 
 fn prepare_pipeline_context(
@@ -169,13 +180,25 @@ fn prepare_pipeline_context(
 
   let manifest = Manifest::load(&manifest_path)
     .map_err(|err| JoyError::new(command, "manifest_parse_error", err.to_string(), 1))?;
-  let manifest_hash = lockfile::compute_manifest_hash(&manifest_path)
-    .map_err(|err| JoyError::new(command, "lockfile_hash_failed", err.to_string(), 1))?;
-  let lockfile_path = project_root.join("joy.lock");
+  let workspace_lock_scope = if let Some(root) = options.workspace_root.as_ref() {
+    Some(load_workspace_lock_scope(command, root, options.workspace_member.as_deref())?)
+  } else {
+    None
+  };
+  let manifest_hash = if let Some(scope) = workspace_lock_scope.as_ref() {
+    compute_workspace_manifest_hash(command, scope)?
+  } else {
+    lockfile::compute_manifest_hash(&manifest_path)
+      .map_err(|err| JoyError::new(command, "lockfile_hash_failed", err.to_string(), 1))?
+  };
+  let lockfile_path = workspace_lock_scope
+    .as_ref()
+    .map(|scope| scope.root.join("joy.lock"))
+    .unwrap_or_else(|| project_root.join("joy.lock"));
   let env_layout = project_env::ensure_layout(&project_root)
     .map_err(|err| JoyError::new(command, "env_setup_failed", err.to_string(), 1))?;
   let lock_plan = evaluate_lockfile_plan(command, &lockfile_path, &manifest_hash, options)?;
-  let profile = BuildProfile::from_release_flag(options.release);
+  let profile = select_profile(options.release, workspace_lock_scope.as_ref());
 
   Ok(PipelineContext {
     project_root,
@@ -186,7 +209,87 @@ fn prepare_pipeline_context(
     env_layout,
     lock_plan,
     profile,
+    workspace_lock_scope,
   })
+}
+
+fn load_workspace_lock_scope(
+  command: &'static str,
+  workspace_root: &Path,
+  selected_member: Option<&str>,
+) -> Result<WorkspaceLockScope, JoyError> {
+  let manifest_path = workspace_root.join("joy.toml");
+  let ws = WorkspaceManifest::load(&manifest_path)
+    .map_err(|err| JoyError::new(command, "manifest_parse_error", err.to_string(), 1))?;
+  let member = selected_member.ok_or_else(|| {
+    JoyError::new(
+      command,
+      "workspace_member_required",
+      "workspace lockfile mode requires a selected workspace member",
+      1,
+    )
+  })?;
+  if !ws.workspace.members.iter().any(|m| m == member) {
+    return Err(JoyError::new(
+      command,
+      "workspace_member_not_found",
+      format!(
+        "workspace member `{member}` is not listed in `workspace.members`; available members: {}",
+        ws.workspace.members.join(", ")
+      ),
+      1,
+    ));
+  }
+  let mut members = ws.workspace.members.clone();
+  members.sort();
+  Ok(WorkspaceLockScope {
+    root: workspace_root.to_path_buf(),
+    member: member.to_string(),
+    members,
+    profile: ws.workspace.profile.clone(),
+  })
+}
+
+fn compute_workspace_manifest_hash(
+  command: &'static str,
+  scope: &WorkspaceLockScope,
+) -> Result<String, JoyError> {
+  let mut hasher = Sha256::new();
+  hash_manifest_bytes(command, &mut hasher, &scope.root, "joy.toml")?;
+  for member in &scope.members {
+    hash_manifest_bytes(command, &mut hasher, &scope.root, &format!("{member}/joy.toml"))?;
+  }
+  Ok(format!("{:x}", hasher.finalize()))
+}
+
+fn hash_manifest_bytes(
+  command: &'static str,
+  hasher: &mut Sha256,
+  workspace_root: &Path,
+  relative_path: &str,
+) -> Result<(), JoyError> {
+  let path = workspace_root.join(relative_path);
+  let bytes = fs::read(&path)
+    .map_err(|err| JoyError::io(command, "reading workspace manifest", &path, &err))?;
+  hasher.update(relative_path.as_bytes());
+  hasher.update([0u8]);
+  hasher.update(&bytes);
+  hasher.update([0u8]);
+  Ok(())
+}
+
+fn select_profile(
+  release_flag: bool,
+  workspace_lock_scope: Option<&WorkspaceLockScope>,
+) -> BuildProfile {
+  if release_flag {
+    return BuildProfile::Release;
+  }
+  let workspace_profile = workspace_lock_scope.and_then(|scope| scope.profile.as_deref());
+  match workspace_profile.map(|raw| raw.trim().to_ascii_lowercase()) {
+    Some(profile) if profile == "release" => BuildProfile::Release,
+    _ => BuildProfile::Debug,
+  }
 }
 
 /// Handle `joy build` by executing the local build pipeline and returning a CLI output payload.
@@ -201,6 +304,8 @@ pub fn handle(args: BuildArgs, runtime: RuntimeFlags) -> Result<CommandOutput, J
     update_lock: args.update_lock,
     offline: runtime.offline,
     progress: runtime.progress,
+    workspace_root: runtime.workspace_root.clone(),
+    workspace_member: runtime.workspace_member.clone(),
   })?;
 
   Ok(CommandOutput::new(
@@ -270,6 +375,11 @@ pub(crate) fn build_project(options: BuildOptions) -> Result<BuildExecution, Joy
     ctx.profile,
     Some(&toolchain),
   )?;
+  let lockfile_packages = if let Some(scope) = ctx.workspace_lock_scope.as_ref() {
+    collect_workspace_lockfile_packages("build", scope, &native_link.lockfile_packages)?
+  } else {
+    native_link.lockfile_packages.clone()
+  };
   let mut include_dirs = collect_include_dirs(&ctx.env_layout.include_dir).map_err(|err| {
     JoyError::io("build", "reading include directories", &ctx.env_layout.include_dir, &err)
   })?;
@@ -279,11 +389,7 @@ pub(crate) fn build_project(options: BuildOptions) -> Result<BuildExecution, Joy
   include_dirs.extend(target_include_dirs);
   include_dirs.sort();
   include_dirs.dedup();
-  validate_locked_package_metadata_if_needed(
-    "build",
-    &ctx.lock_plan,
-    &native_link.lockfile_packages,
-  )?;
+  validate_locked_package_metadata_if_needed("build", &ctx.lock_plan, &lockfile_packages)?;
   write_dependency_graph_artifact(
     "build",
     &ctx.env_layout.state_dir,
@@ -336,7 +442,7 @@ pub(crate) fn build_project(options: BuildOptions) -> Result<BuildExecution, Joy
     ctx.lock_plan.clone(),
     &ctx.lockfile_path,
     &ctx.manifest_hash,
-    &native_link.lockfile_packages,
+    &lockfile_packages,
   )?;
 
   Ok(BuildExecution {
@@ -378,12 +484,13 @@ pub(crate) fn sync_project(options: BuildOptions) -> Result<SyncExecution, JoyEr
     ctx.profile,
     None,
   )?;
+  let lockfile_packages = if let Some(scope) = ctx.workspace_lock_scope.as_ref() {
+    collect_workspace_lockfile_packages("sync", scope, &native_link.lockfile_packages)?
+  } else {
+    native_link.lockfile_packages.clone()
+  };
 
-  validate_locked_package_metadata_if_needed(
-    "sync",
-    &ctx.lock_plan,
-    &native_link.lockfile_packages,
-  )?;
+  validate_locked_package_metadata_if_needed("sync", &ctx.lock_plan, &lockfile_packages)?;
   write_dependency_graph_artifact(
     "sync",
     &ctx.env_layout.state_dir,
@@ -409,7 +516,7 @@ pub(crate) fn sync_project(options: BuildOptions) -> Result<SyncExecution, JoyEr
     ctx.lock_plan.clone(),
     &ctx.lockfile_path,
     &ctx.manifest_hash,
-    &native_link.lockfile_packages,
+    &lockfile_packages,
   )?;
 
   Ok(SyncExecution {
@@ -1137,6 +1244,45 @@ fn assemble_lockfile_packages(
   }
 
   packages.sort_by(|a, b| a.id.cmp(&b.id));
+  Ok(packages)
+}
+
+fn collect_workspace_lockfile_packages(
+  command: &'static str,
+  scope: &WorkspaceLockScope,
+  selected_member_packages: &[lockfile::LockedPackage],
+) -> Result<Vec<lockfile::LockedPackage>, JoyError> {
+  let mut merged = BTreeMap::<(String, String), lockfile::LockedPackage>::new();
+  for pkg in selected_member_packages {
+    merged.insert((pkg.id.clone(), pkg.requested_rev.clone()), pkg.clone());
+  }
+
+  for member in &scope.members {
+    if member == &scope.member {
+      continue;
+    }
+    let manifest_path = scope.root.join(member).join("joy.toml");
+    let member_manifest = Manifest::load(&manifest_path)
+      .map_err(|err| JoyError::new(command, "manifest_parse_error", err.to_string(), 1))?;
+    if member_manifest.dependencies.is_empty() {
+      continue;
+    }
+    let resolved_stage = resolve_dependency_stage(command, &member_manifest)?;
+    let prefetched_stage = prefetch_dependency_stage(command, &resolved_stage)?;
+    let member_packages = assemble_lockfile_packages(
+      command,
+      &resolved_stage.resolved,
+      &resolved_stage.recipes,
+      &prefetched_stage.all_by_key,
+      &BTreeMap::new(),
+    )?;
+    for pkg in member_packages {
+      merged.entry((pkg.id.clone(), pkg.requested_rev.clone())).or_insert(pkg);
+    }
+  }
+
+  let mut packages = merged.into_values().collect::<Vec<_>>();
+  sort_locked_packages(&mut packages);
   Ok(packages)
 }
 

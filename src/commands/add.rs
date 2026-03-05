@@ -309,6 +309,8 @@ pub fn handle(args: AddArgs, runtime: RuntimeFlags) -> Result<CommandOutput, Joy
       update_lock: true,
       offline: runtime.offline,
       progress: runtime.progress,
+      workspace_root: runtime.workspace_root.clone(),
+      workspace_member: runtime.workspace_member.clone(),
     });
     if let Err(err) = sync_result {
       return Err(JoyError::new(
@@ -327,7 +329,12 @@ pub fn handle(args: AddArgs, runtime: RuntimeFlags) -> Result<CommandOutput, Joy
     warnings.push("sync-lite was skipped for this dependency source backend".to_string());
   }
 
-  if args.no_sync && cwd.join("joy.lock").is_file() {
+  let lockfile_path = runtime
+    .workspace_root
+    .as_ref()
+    .map(|root| root.join("joy.lock"))
+    .unwrap_or_else(|| cwd.join("joy.lock"));
+  if args.no_sync && lockfile_path.is_file() {
     warnings.push(
       "joy.lock exists and may be stale; refresh it with `joy sync --update-lock`".to_string(),
     );

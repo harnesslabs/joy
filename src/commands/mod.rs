@@ -132,10 +132,13 @@ where
   F: FnOnce(RuntimeFlags) -> Result<CommandOutput, JoyError>,
 {
   let ctx = resolve_workspace_context(command, runtime.workspace_package.as_deref())?;
+  let mut scoped_runtime = runtime.clone();
+  scoped_runtime.workspace_root = ctx.workspace_root.clone();
+  scoped_runtime.workspace_member = ctx.workspace_member.clone();
   let mut result = if let Some(project_root) = &ctx.project_root_override {
-    with_current_dir(project_root, || f(runtime.clone()))?
+    with_current_dir(project_root, || f(scoped_runtime.clone()))?
   } else {
-    f(runtime.clone())?
+    f(scoped_runtime.clone())?
   };
   attach_workspace_metadata(&mut result, &ctx);
   Ok(result)

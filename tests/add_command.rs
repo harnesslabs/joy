@@ -2991,3 +2991,142 @@ members = ["apps/app"]
   let member_manifest = fs::read_to_string(member.join("joy.toml")).expect("read member manifest");
   assert!(member_manifest.contains("\"nlohmann/json\""));
 }
+
+#[test]
+fn workspace_root_add_writes_lockfile_once_at_workspace_root() {
+  let temp = TempDir::new().expect("tempdir");
+  let member_a = temp.path().join("apps").join("a");
+  let member_b = temp.path().join("apps").join("b");
+  fs::create_dir_all(&member_a).expect("member a dir");
+  fs::create_dir_all(&member_b).expect("member b dir");
+  init_project_at(&member_a);
+  init_project_at(&member_b);
+  fs::write(
+    temp.path().join("joy.toml"),
+    r#"[workspace]
+members = ["apps/a", "apps/b"]
+"#,
+  )
+  .expect("write workspace manifest");
+
+  let Some((remote_base, _bare_repo, _commit)) = setup_local_github_remote("nlohmann/json") else {
+    return;
+  };
+  let joy_home = temp.path().join("joy-home");
+
+  let mut add = cargo_bin_cmd!("joy");
+  add
+    .current_dir(temp.path())
+    .env("JOY_GITHUB_BASE", remote_base.path())
+    .env("JOY_HOME", &joy_home)
+    .args(["-p", "apps/a", "add", "nlohmann/json"])
+    .assert()
+    .success();
+
+  assert!(
+    temp.path().join("joy.lock").is_file(),
+    "workspace lockfile should be rooted at workspace"
+  );
+  assert!(
+    !member_a.join("joy.lock").exists(),
+    "member lockfile should not be written when command is routed from workspace root"
+  );
+  assert!(!member_b.join("joy.lock").exists(), "other member lockfile should remain absent");
+
+  let mut sync_a_locked = cargo_bin_cmd!("joy");
+  sync_a_locked
+    .current_dir(temp.path())
+    .env("JOY_GITHUB_BASE", remote_base.path())
+    .env("JOY_HOME", &joy_home)
+    .args(["--json", "-p", "apps/a", "sync", "--locked"])
+    .assert()
+    .success();
+
+  let mut sync_b_locked = cargo_bin_cmd!("joy");
+  sync_b_locked
+    .current_dir(temp.path())
+    .env("JOY_GITHUB_BASE", remote_base.path())
+    .env("JOY_HOME", &joy_home)
+    .args(["--json", "-p", "apps/b", "sync", "--locked"])
+    .assert()
+    .success();
+}
+
+#[test]
+fn workspace_locked_sync_detects_other_member_manifest_drift() {
+  let temp = TempDir::new().expect("tempdir");
+  let member_a = temp.path().join("apps").join("a");
+  let member_b = temp.path().join("apps").join("b");
+  fs::create_dir_all(&member_a).expect("member a dir");
+  fs::create_dir_all(&member_b).expect("member b dir");
+  init_project_at(&member_a);
+  init_project_at(&member_b);
+  fs::write(
+    temp.path().join("joy.toml"),
+    r#"[workspace]
+members = ["apps/a", "apps/b"]
+"#,
+  )
+  .expect("write workspace manifest");
+
+  let Some((remote_base, _bare_repo, _commit)) = setup_local_github_remote("nlohmann/json") else {
+    return;
+  };
+  let joy_home = temp.path().join("joy-home");
+
+  let mut add = cargo_bin_cmd!("joy");
+  add
+    .current_dir(temp.path())
+    .env("JOY_GITHUB_BASE", remote_base.path())
+    .env("JOY_HOME", &joy_home)
+    .args(["-p", "apps/a", "add", "nlohmann/json"])
+    .assert()
+    .success();
+  assert!(temp.path().join("joy.lock").is_file(), "workspace lockfile should exist");
+
+  let member_b_manifest = member_b.join("joy.toml");
+  let mut member_b_raw = fs::read_to_string(&member_b_manifest).expect("read member b manifest");
+  member_b_raw.push_str("\"fmtlib/fmt\" = { source = \"github\", rev = \"HEAD\" }\n");
+  fs::write(&member_b_manifest, member_b_raw).expect("write member b manifest");
+
+  let mut locked_sync = cargo_bin_cmd!("joy");
+  let assert = locked_sync
+    .current_dir(temp.path())
+    .env("JOY_GITHUB_BASE", remote_base.path())
+    .env("JOY_HOME", &joy_home)
+    .args(["--json", "-p", "apps/a", "sync", "--locked"])
+    .assert()
+    .failure();
+  let payload = json_stdout(&assert.get_output().stdout);
+  assert_eq!(payload["error"]["code"], "lockfile_stale");
+}
+
+#[test]
+fn workspace_profile_release_defaults_sync_profile_without_release_flag() {
+  let temp = TempDir::new().expect("tempdir");
+  let member = temp.path().join("apps").join("app");
+  fs::create_dir_all(&member).expect("member dir");
+  init_project_at(&member);
+  fs::write(
+    temp.path().join("joy.toml"),
+    r#"[workspace]
+members = ["apps/app"]
+default_member = "apps/app"
+profile = "release"
+"#,
+  )
+  .expect("write workspace manifest");
+
+  let joy_home = temp.path().join("joy-home");
+  let mut sync = cargo_bin_cmd!("joy");
+  let assert = sync
+    .current_dir(temp.path())
+    .env("JOY_HOME", &joy_home)
+    .args(["--json", "sync"])
+    .assert()
+    .success();
+  let payload = json_stdout(&assert.get_output().stdout);
+  assert_eq!(payload["command"], "sync");
+  assert_eq!(payload["data"]["workspace_member"], "apps/app");
+  assert_eq!(payload["data"]["profile"], "release");
+}

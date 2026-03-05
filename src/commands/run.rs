@@ -16,6 +16,8 @@ pub fn handle(args: RunArgs, runtime: RuntimeFlags) -> Result<CommandOutput, Joy
     update_lock: args.update_lock,
     offline: runtime.offline,
     progress: runtime.progress,
+    workspace_root: runtime.workspace_root.clone(),
+    workspace_member: runtime.workspace_member.clone(),
   })
   .map_err(remap_build_error_for_run)?;
 

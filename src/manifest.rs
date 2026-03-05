@@ -40,6 +40,8 @@ pub struct WorkspaceSection {
   pub members: Vec<String>,
   #[serde(default)]
   pub default_member: Option<String>,
+  #[serde(default, skip_serializing_if = "Option::is_none")]
+  pub profile: Option<String>,
 }
 
 /// Package metadata for reusable libraries.
@@ -318,6 +320,7 @@ impl WorkspaceManifest {
         "workspace.default_member `{default}` must be listed in workspace.members"
       )));
     }
+    validate_profile_name("workspace.profile", self.workspace.profile.as_deref())?;
     Ok(())
   }
 }
@@ -610,6 +613,17 @@ fn validate_dependency_spec(id: &str, spec: &DependencySpec) -> Result<(), Manif
   Ok(())
 }
 
+fn validate_profile_name(field: &str, profile: Option<&str>) -> Result<(), ManifestError> {
+  let Some(raw) = profile else {
+    return Ok(());
+  };
+  let normalized = raw.trim().to_ascii_lowercase();
+  if normalized == "dev" || normalized == "release" {
+    return Ok(());
+  }
+  Err(ManifestError::Validation(format!("{field} must be one of `dev` or `release` (got `{raw}`)")))
+}
+
 /// Borrowed dependency requirement view used by resolver/commands.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum DependencyRequirementRef<'a> {
@@ -729,6 +743,7 @@ entry = "src/main.cpp"
 [workspace]
 members = ["apps/a", "apps/b"]
 default_member = "apps/a"
+profile = "release"
 "#,
     )
     .expect("write manifest");
@@ -738,9 +753,27 @@ default_member = "apps/a"
       ManifestDocument::Workspace(WorkspaceManifest { workspace }) => {
         assert_eq!(workspace.members.len(), 2);
         assert_eq!(workspace.default_member.as_deref(), Some("apps/a"));
+        assert_eq!(workspace.profile.as_deref(), Some("release"));
       },
       other => panic!("expected workspace doc, got {other:?}"),
     }
+  }
+
+  #[test]
+  fn rejects_invalid_workspace_profile_name() {
+    let temp = TempDir::new().expect("tempdir");
+    let path = temp.path().join("joy.toml");
+    std::fs::write(
+      &path,
+      r#"
+[workspace]
+members = ["apps/a"]
+profile = "optimized"
+"#,
+    )
+    .expect("write manifest");
+    let err = ManifestDocument::load(&path).expect_err("invalid workspace profile");
+    assert!(err.to_string().contains("workspace.profile"));
   }
 
   #[test]
