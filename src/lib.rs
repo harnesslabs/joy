@@ -4,15 +4,14 @@
 //! around [`run`], while command dispatch, manifest parsing, dependency fetching, resolution, and
 //! local build orchestration live in modules here.
 //!
-//! TODO(phase7): Narrow the public module surface to a stable, intentional library API (or mark
-//! `joy` as CLI-only) once downstream usage expectations are finalized.
-
 pub mod abi;
 pub mod cli;
 pub mod cmake;
 pub mod commands;
 pub mod error;
 pub mod fetch;
+mod fs_ops;
+mod git_ops;
 pub mod global_cache;
 pub mod install_index;
 pub mod linking;
@@ -22,6 +21,7 @@ pub mod ninja;
 pub mod output;
 pub mod package_id;
 pub mod project_env;
+mod project_probe;
 pub mod recipes;
 pub mod registry;
 pub mod resolver;

@@ -7,6 +7,7 @@ use std::fs;
 use std::path::{Path, PathBuf};
 use thiserror::Error;
 
+use crate::fs_ops;
 use crate::package_id::PackageId;
 
 /// Result of installing a header-only package into `.joy/include/deps/<slug>`.
@@ -70,7 +71,7 @@ pub fn install_header_root_to_path(
     })?;
   }
 
-  remove_existing_path(dest_path).map_err(|source| LinkingError::Io {
+  fs_ops::remove_path_if_exists(dest_path).map_err(|source| LinkingError::Io {
     action: "removing existing header install path".into(),
     path: dest_path.to_path_buf(),
     source,
@@ -166,7 +167,7 @@ fn install_headers_inner(
   })?;
 
   let link_path = deps_dir.join(package.slug());
-  remove_existing_path(&link_path).map_err(|source| LinkingError::Io {
+  fs_ops::remove_path_if_exists(&link_path).map_err(|source| LinkingError::Io {
     action: "removing existing header link".into(),
     path: link_path.clone(),
     source,
@@ -174,35 +175,6 @@ fn install_headers_inner(
 
   let link_kind = link_or_copy_dir(&header_root, &link_path, link_mode)?;
   Ok(HeaderInstall { header_root, link_path, link_kind })
-}
-
-fn remove_existing_path(path: &Path) -> std::io::Result<()> {
-  match fs::symlink_metadata(path) {
-    Ok(metadata) => {
-      if metadata.file_type().is_symlink() {
-        match fs::remove_file(path) {
-          Ok(()) => Ok(()),
-          Err(err)
-            if matches!(
-              err.kind(),
-              std::io::ErrorKind::PermissionDenied | std::io::ErrorKind::IsADirectory
-            ) =>
-          {
-            fs::remove_dir(path)
-          },
-          Err(err) => Err(err),
-        }
-      } else if metadata.is_file() {
-        fs::remove_file(path)
-      } else if metadata.is_dir() {
-        fs::remove_dir_all(path)
-      } else {
-        fs::remove_file(path)
-      }
-    },
-    Err(err) if err.kind() == std::io::ErrorKind::NotFound => Ok(()),
-    Err(err) => Err(err),
-  }
 }
 
 fn find_library_artifacts(cache_lib_dir: &Path, lib: &str) -> std::io::Result<Vec<PathBuf>> {

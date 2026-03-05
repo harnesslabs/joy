@@ -1,12 +1,11 @@
 use serde_json::json;
 use std::env;
-use std::fs;
-use std::path::Path;
 
 use crate::cli::{AddArgs, RuntimeFlags};
 use crate::commands::CommandOutput;
 use crate::error::JoyError;
 use crate::fetch;
+use crate::fs_ops;
 use crate::global_cache::GlobalCache;
 use crate::install_index::InstallIndex;
 use crate::linking;
@@ -14,9 +13,10 @@ use crate::manifest::{DependencySource, DependencySpec, Manifest};
 use crate::output::{HumanMessageBuilder, progress_detail, progress_stage};
 use crate::package_id::PackageId;
 use crate::project_env;
-use crate::registry::{RegistryError, RegistryRequirement, RegistryStore};
+use crate::registry::{RegistryRequirement, RegistryStore};
 
 use super::build;
+use super::dependency_common::{map_fetch_error, map_registry_error, parse_dependency_input};
 
 pub fn handle(args: AddArgs, runtime: RuntimeFlags) -> Result<CommandOutput, JoyError> {
   if runtime.frozen {
@@ -135,7 +135,7 @@ pub fn handle(args: AddArgs, runtime: RuntimeFlags) -> Result<CommandOutput, Joy
 
   let changed = manifest.add_dependency(parsed_input.package_id.clone(), manifest_spec.clone());
   if changed && let Err(err) = manifest.save(&manifest_path) {
-    let rollback_err = remove_installed_header_path(&installed.link_path);
+    let rollback_err = fs_ops::remove_path_if_exists(&installed.link_path).map(|_| ());
     let mut message = err.to_string();
     if let Err(clean_err) = rollback_err {
       message.push_str(&format!(
@@ -244,102 +244,4 @@ pub fn handle(args: AddArgs, runtime: RuntimeFlags) -> Result<CommandOutput, Joy
       "warnings": lockfile_warning.map(|w| vec![w]).unwrap_or_default(),
     }),
   ))
-}
-
-fn map_fetch_error(command: &'static str, err: fetch::FetchError) -> JoyError {
-  let code = if err.is_offline_cache_miss() {
-    "offline_cache_miss"
-  } else if err.is_offline_network_disabled() {
-    "offline_network_disabled"
-  } else if err.is_invalid_version_requirement() {
-    "invalid_version_requirement"
-  } else if err.is_version_not_found() {
-    "version_not_found"
-  } else {
-    "fetch_failed"
-  };
-  JoyError::new(command, code, err.to_string(), 1)
-}
-
-fn map_registry_error(command: &'static str, err: RegistryError) -> JoyError {
-  let code = if err.is_offline_cache_miss() {
-    "offline_cache_miss"
-  } else if err.is_not_configured() {
-    "registry_not_configured"
-  } else if err.is_package_not_found() {
-    "registry_package_not_found"
-  } else if err.is_invalid_version_requirement() {
-    "invalid_version_requirement"
-  } else if err.is_version_not_found() {
-    "version_not_found"
-  } else {
-    "registry_load_failed"
-  };
-  JoyError::new(command, code, err.to_string(), 1)
-}
-
-#[derive(Debug, Clone)]
-struct ParsedDependencyInput {
-  package_id: String,
-  source: DependencySource,
-}
-
-fn parse_dependency_input(
-  command: &'static str,
-  raw: &str,
-) -> Result<ParsedDependencyInput, JoyError> {
-  if let Some(id) = raw.strip_prefix("registry:") {
-    if id.trim().is_empty() {
-      return Err(JoyError::new(
-        command,
-        "invalid_package_id",
-        "invalid package `registry:`; expected `registry:owner/repo`",
-        1,
-      ));
-    }
-    return Ok(ParsedDependencyInput {
-      package_id: id.to_string(),
-      source: DependencySource::Registry,
-    });
-  }
-  if let Some(id) = raw.strip_prefix("github:") {
-    if id.trim().is_empty() {
-      return Err(JoyError::new(
-        command,
-        "invalid_package_id",
-        "invalid package `github:`; expected `github:owner/repo`",
-        1,
-      ));
-    }
-    return Ok(ParsedDependencyInput {
-      package_id: id.to_string(),
-      source: DependencySource::Github,
-    });
-  }
-  Ok(ParsedDependencyInput { package_id: raw.to_string(), source: DependencySource::Github })
-}
-
-fn remove_installed_header_path(path: &Path) -> std::io::Result<()> {
-  match fs::symlink_metadata(path) {
-    Ok(metadata) => {
-      if metadata.file_type().is_symlink() || metadata.is_file() {
-        fs::remove_file(path).or_else(|err| {
-          if matches!(
-            err.kind(),
-            std::io::ErrorKind::PermissionDenied | std::io::ErrorKind::IsADirectory
-          ) {
-            fs::remove_dir(path)
-          } else {
-            Err(err)
-          }
-        })
-      } else if metadata.is_dir() {
-        fs::remove_dir_all(path)
-      } else {
-        fs::remove_file(path)
-      }
-    },
-    Err(err) if err.kind() == std::io::ErrorKind::NotFound => Ok(()),
-    Err(err) => Err(err),
-  }
 }

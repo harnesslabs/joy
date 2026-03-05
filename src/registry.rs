@@ -7,14 +7,14 @@
 use semver::{Version, VersionReq};
 use serde::Deserialize;
 use std::collections::BTreeMap;
-use std::ffi::OsString;
 use std::fs;
 use std::path::{Path, PathBuf};
-use std::process::Command;
 use std::time::{SystemTime, UNIX_EPOCH};
 use thiserror::Error;
 
 use crate::fetch;
+use crate::fs_ops;
+use crate::git_ops::{self, GitCommandError};
 use crate::global_cache::{GlobalCache, GlobalCacheError};
 use crate::manifest::DependencySource;
 use crate::output::progress_detail_tty;
@@ -371,7 +371,12 @@ fn ensure_registry_mirror(
         mirror_dir.display()
       ));
     }
-    run_git(Some(mirror_dir), ["fetch", "--all", "--tags", "--prune"], "fetching registry mirror")?;
+    git_ops::run(
+      Some(mirror_dir),
+      ["fetch", "--all", "--tags", "--prune"],
+      "fetching registry mirror",
+    )
+    .map_err(map_git_error)?;
     return Ok(());
   }
 
@@ -381,7 +386,7 @@ fn ensure_registry_mirror(
       mirror_dir.display()
     ));
   }
-  run_git_dynamic(
+  git_ops::run_dynamic(
     None,
     vec![
       "clone".into(),
@@ -391,10 +396,13 @@ fn ensure_registry_mirror(
     ],
     "cloning registry mirror",
   )
+  .map_err(map_git_error)
 }
 
 fn resolve_registry_head_commit(mirror_dir: &Path, offline: bool) -> Result<String, RegistryError> {
-  match run_git_capture(Some(mirror_dir), ["rev-parse", "HEAD"], "resolving registry HEAD") {
+  match git_ops::run_capture(Some(mirror_dir), ["rev-parse", "HEAD"], "resolving registry HEAD")
+    .map_err(map_git_error)
+  {
     Ok(out) => Ok(out.trim().to_string()),
     Err(err) if offline => Err(RegistryError::OfflineIndexHeadUnavailable {
       mirror_dir: mirror_dir.to_path_buf(),
@@ -432,7 +440,7 @@ fn materialize_registry_checkout(
     dest_dir.file_name().and_then(|n| n.to_str()).unwrap_or("checkout")
   ));
   if tmp_dir.exists() {
-    remove_any(&tmp_dir).map_err(|source| RegistryError::Io {
+    fs_ops::remove_path_if_exists(&tmp_dir).map_err(|source| RegistryError::Io {
       action: "cleaning temp registry checkout".into(),
       path: tmp_dir.clone(),
       source,
@@ -446,7 +454,7 @@ fn materialize_registry_checkout(
         dest_dir.display()
       ));
     }
-    run_git_dynamic(
+    git_ops::run_dynamic(
       None,
       vec![
         "clone".into(),
@@ -455,14 +463,16 @@ fn materialize_registry_checkout(
         tmp_dir.as_os_str().to_os_string(),
       ],
       "cloning registry checkout",
-    )?;
-    run_git(
+    )
+    .map_err(map_git_error)?;
+    git_ops::run(
       Some(&tmp_dir),
       ["checkout", "--detach", commit],
       "checking out registry index commit",
-    )?;
+    )
+    .map_err(map_git_error)?;
     if dest_dir.exists() {
-      remove_any(dest_dir).map_err(|source| RegistryError::Io {
+      fs_ops::remove_path_if_exists(dest_dir).map_err(|source| RegistryError::Io {
         action: "removing stale registry checkout".into(),
         path: dest_dir.to_path_buf(),
         source,
@@ -477,78 +487,9 @@ fn materialize_registry_checkout(
   })();
 
   if result.is_err() && tmp_dir.exists() {
-    let _ = remove_any(&tmp_dir);
+    let _ = fs_ops::remove_path_if_exists(&tmp_dir);
   }
   result
-}
-
-fn remove_any(path: &Path) -> std::io::Result<()> {
-  match fs::symlink_metadata(path) {
-    Ok(metadata) => {
-      if metadata.file_type().is_symlink() || metadata.is_file() {
-        fs::remove_file(path)
-      } else if metadata.is_dir() {
-        fs::remove_dir_all(path)
-      } else {
-        fs::remove_file(path)
-      }
-    },
-    Err(err) if err.kind() == std::io::ErrorKind::NotFound => Ok(()),
-    Err(err) => Err(err),
-  }
-}
-
-fn run_git<const N: usize>(
-  cwd: Option<&Path>,
-  args: [&str; N],
-  action: &str,
-) -> Result<(), RegistryError> {
-  let output = git_output(cwd, args.into_iter().map(OsString::from).collect(), action)?;
-  if output.status.success() { Ok(()) } else { Err(git_failed_error(action, &output)) }
-}
-
-fn run_git_dynamic(
-  cwd: Option<&Path>,
-  args: Vec<OsString>,
-  action: &str,
-) -> Result<(), RegistryError> {
-  let output = git_output(cwd, args, action)?;
-  if output.status.success() { Ok(()) } else { Err(git_failed_error(action, &output)) }
-}
-
-fn run_git_capture<const N: usize>(
-  cwd: Option<&Path>,
-  args: [&str; N],
-  action: &str,
-) -> Result<String, RegistryError> {
-  let output = git_output(cwd, args.into_iter().map(OsString::from).collect(), action)?;
-  if output.status.success() {
-    Ok(String::from_utf8_lossy(&output.stdout).to_string())
-  } else {
-    Err(git_failed_error(action, &output))
-  }
-}
-
-fn git_output(
-  cwd: Option<&Path>,
-  args: Vec<OsString>,
-  action: &str,
-) -> Result<std::process::Output, RegistryError> {
-  let mut cmd = Command::new("git");
-  if let Some(dir) = cwd {
-    cmd.arg("-C").arg(dir);
-  }
-  cmd.args(args);
-  cmd.output().map_err(|source| RegistryError::SpawnGit { action: action.into(), source })
-}
-
-fn git_failed_error(action: &str, output: &std::process::Output) -> RegistryError {
-  RegistryError::GitFailed {
-    action: action.into(),
-    status: output.status.code(),
-    stdout: String::from_utf8_lossy(&output.stdout).trim().to_string(),
-    stderr: String::from_utf8_lossy(&output.stderr).trim().to_string(),
-  }
 }
 
 #[derive(Debug, Clone, Deserialize)]
@@ -626,6 +567,15 @@ impl<'de> Deserialize<'de> for RegistrySourceKind {
         "unsupported registry source `{other}` (expected `github`)"
       ))),
     }
+  }
+}
+
+fn map_git_error(err: GitCommandError) -> RegistryError {
+  match err {
+    GitCommandError::Spawn { action, source } => RegistryError::SpawnGit { action, source },
+    GitCommandError::Failed { action, status, stdout, stderr } => {
+      RegistryError::GitFailed { action, status, stdout, stderr }
+    },
   }
 }
 
@@ -716,7 +666,7 @@ mod tests {
 
   use tempfile::TempDir;
 
-  use super::{RegistryRequirement, RegistryStore};
+  use super::{RegistryRequirement, RegistrySourceKind, RegistryStore};
 
   #[test]
   fn resolves_highest_matching_semver_release_from_registry_index() {
@@ -755,7 +705,7 @@ rev = "v11.1.2"
     assert_eq!(resolved.package_id, "fmtlib/fmt");
     assert_eq!(resolved.requested_requirement.as_deref(), Some("^11"));
     assert_eq!(resolved.resolved_version, "11.1.2");
-    assert_eq!(resolved.source_kind.as_str(), "github");
+    assert_eq!(resolved.source_kind, RegistrySourceKind::Github);
     assert_eq!(resolved.source_package, "fmtlib/fmt");
     assert_eq!(resolved.source_rev, "v11.1.2");
     assert!(resolved.manifest.is_none());

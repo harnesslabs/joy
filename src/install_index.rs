@@ -4,6 +4,8 @@ use std::fs;
 use std::path::{Path, PathBuf};
 use thiserror::Error;
 
+use crate::fs_ops;
+
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
 pub struct InstallIndex {
   pub version: u32,
@@ -86,7 +88,9 @@ pub fn cleanup_tracked_orphans(
       continue;
     }
     let path = PathBuf::from(tracked);
-    if remove_path_if_exists(&path)? {
+    if fs_ops::remove_path_if_exists(&path)
+      .map_err(|source| InstallIndexError::Io { path: path.clone(), source })?
+    {
       report.removed_header_links.push(path);
     }
   }
@@ -96,7 +100,9 @@ pub fn cleanup_tracked_orphans(
       continue;
     }
     let path = PathBuf::from(tracked);
-    if remove_path_if_exists(&path)? {
+    if fs_ops::remove_path_if_exists(&path)
+      .map_err(|source| InstallIndexError::Io { path: path.clone(), source })?
+    {
       report.removed_library_files.push(path);
     }
   }
@@ -109,26 +115,6 @@ pub fn cleanup_tracked_orphans(
 fn path_key(path: impl AsRef<Path>) -> String {
   let path = path.as_ref();
   path.to_string_lossy().to_string()
-}
-
-fn remove_path_if_exists(path: &Path) -> Result<bool, InstallIndexError> {
-  match fs::symlink_metadata(path) {
-    Ok(metadata) => {
-      if metadata.file_type().is_symlink() || metadata.is_file() {
-        fs::remove_file(path)
-          .map_err(|source| InstallIndexError::Io { path: path.to_path_buf(), source })?;
-      } else if metadata.is_dir() {
-        fs::remove_dir_all(path)
-          .map_err(|source| InstallIndexError::Io { path: path.to_path_buf(), source })?;
-      } else {
-        fs::remove_file(path)
-          .map_err(|source| InstallIndexError::Io { path: path.to_path_buf(), source })?;
-      }
-      Ok(true)
-    },
-    Err(err) if err.kind() == std::io::ErrorKind::NotFound => Ok(false),
-    Err(source) => Err(InstallIndexError::Io { path: path.to_path_buf(), source }),
-  }
 }
 
 #[derive(Debug, Error)]

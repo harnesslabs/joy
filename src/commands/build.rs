@@ -8,6 +8,8 @@ use std::fs;
 use std::path::{Path, PathBuf};
 use std::process::Command;
 
+use super::dependency_common::map_fetch_error;
+use super::graph_common::map_resolver_error;
 use crate::cli::{BuildArgs, RuntimeFlags};
 use crate::commands::CommandOutput;
 use crate::error::JoyError;
@@ -136,6 +138,57 @@ pub(crate) struct BuildOptions {
   pub progress: bool,
 }
 
+#[derive(Debug, Clone)]
+struct PipelineContext {
+  project_root: PathBuf,
+  manifest_path: PathBuf,
+  manifest: Manifest,
+  manifest_hash: String,
+  lockfile_path: PathBuf,
+  env_layout: project_env::ProjectEnvLayout,
+  lock_plan: LockfilePlan,
+  profile: BuildProfile,
+}
+
+fn prepare_pipeline_context(
+  command: &'static str,
+  options: &BuildOptions,
+) -> Result<PipelineContext, JoyError> {
+  let project_root = env::current_dir().map_err(|err| {
+    JoyError::new(command, "cwd_unavailable", format!("failed to get cwd: {err}"), 1)
+  })?;
+  let manifest_path = project_root.join("joy.toml");
+  if !manifest_path.is_file() {
+    return Err(JoyError::new(
+      command,
+      "manifest_not_found",
+      format!("no `joy.toml` found at {}", manifest_path.display()),
+      1,
+    ));
+  }
+
+  let manifest = Manifest::load(&manifest_path)
+    .map_err(|err| JoyError::new(command, "manifest_parse_error", err.to_string(), 1))?;
+  let manifest_hash = lockfile::compute_manifest_hash(&manifest_path)
+    .map_err(|err| JoyError::new(command, "lockfile_hash_failed", err.to_string(), 1))?;
+  let lockfile_path = project_root.join("joy.lock");
+  let env_layout = project_env::ensure_layout(&project_root)
+    .map_err(|err| JoyError::new(command, "env_setup_failed", err.to_string(), 1))?;
+  let lock_plan = evaluate_lockfile_plan(command, &lockfile_path, &manifest_hash, options)?;
+  let profile = BuildProfile::from_release_flag(options.release);
+
+  Ok(PipelineContext {
+    project_root,
+    manifest_path,
+    manifest,
+    manifest_hash,
+    lockfile_path,
+    env_layout,
+    lock_plan,
+    profile,
+  })
+}
+
 /// Handle `joy build` by executing the local build pipeline and returning a CLI output payload.
 pub fn handle(args: BuildArgs, runtime: RuntimeFlags) -> Result<CommandOutput, JoyError> {
   if runtime.progress {
@@ -177,82 +230,69 @@ pub(crate) fn build_project(options: BuildOptions) -> Result<BuildExecution, Joy
     offline: options.offline,
     progress: options.progress,
   });
-  let project_root = env::current_dir().map_err(|err| {
-    JoyError::new("build", "cwd_unavailable", format!("failed to get cwd: {err}"), 1)
-  })?;
-  let manifest_path = project_root.join("joy.toml");
-  if !manifest_path.is_file() {
-    return Err(JoyError::new(
-      "build",
-      "manifest_not_found",
-      format!("no `joy.toml` found at {}", manifest_path.display()),
-      1,
-    ));
-  }
-
-  let manifest = Manifest::load(&manifest_path)
-    .map_err(|err| JoyError::new("build", "manifest_parse_error", err.to_string(), 1))?;
-  let selected_target = manifest
+  let ctx = prepare_pipeline_context("build", &options)?;
+  let selected_target = ctx
+    .manifest
     .select_target(options.target.as_deref())
     .map_err(|err| JoyError::new("build", "invalid_target", err.to_string(), 1))?;
-  let manifest_hash = lockfile::compute_manifest_hash(&manifest_path)
-    .map_err(|err| JoyError::new("build", "lockfile_hash_failed", err.to_string(), 1))?;
-  let lockfile_path = project_root.join("joy.lock");
-  let env_layout = project_env::ensure_layout(&project_root)
-    .map_err(|err| JoyError::new("build", "env_setup_failed", err.to_string(), 1))?;
-  let lock_plan = evaluate_lockfile_plan("build", &lockfile_path, &manifest_hash, &options)?;
 
   let toolchain = toolchain::discover().map_err(|err| map_toolchain_error("build", err))?;
-  let profile = BuildProfile::from_release_flag(options.release);
-  let source_file = project_root.join(&selected_target.entry);
-  let source_files = collect_project_source_files(&project_root, &selected_target)?;
+  let source_file = ctx.project_root.join(&selected_target.entry);
+  let source_files = collect_project_source_files(&ctx.project_root, &selected_target)?;
 
-  let obj_dir = env_layout.build_dir.join("obj");
+  let obj_dir = ctx.env_layout.build_dir.join("obj");
   fs::create_dir_all(&obj_dir)
     .map_err(|err| JoyError::io("build", "creating object directory", &obj_dir, &err))?;
   let compile_units = source_files
     .iter()
     .map(|src| ninja::NinjaCompileUnit {
-      source_file: relative_or_absolute(&project_root, src),
+      source_file: relative_or_absolute(&ctx.project_root, src),
       object_file: relative_or_absolute(
-        &project_root,
-        &obj_dir.join(object_file_name_for_source(&project_root, &selected_target.name, src)),
+        &ctx.project_root,
+        &obj_dir.join(object_file_name_for_source(&ctx.project_root, &selected_target.name, src)),
       ),
     })
     .collect::<Vec<_>>();
-  let binary_path = env_layout.bin_dir.join(binary_name(&selected_target.name));
+  let binary_path = ctx.env_layout.bin_dir.join(binary_name(&selected_target.name));
   let build_file = if selected_target.is_default {
-    env_layout.build_dir.join("build.ninja")
+    ctx.env_layout.build_dir.join("build.ninja")
   } else {
-    env_layout
+    ctx
+      .env_layout
       .build_dir
       .join(format!("build-{}.ninja", sanitize_target_name(&selected_target.name)))
   };
-  let native_link = prepare_compiled_dependencies(
-    &manifest,
-    &env_layout.include_dir,
-    &env_layout.lib_dir,
-    &toolchain,
-    profile,
+  let (native_link, _) = materialize_dependencies(
+    "build",
+    &ctx.manifest,
+    &ctx.env_layout.include_dir,
+    &ctx.env_layout.lib_dir,
+    ctx.profile,
+    Some(&toolchain),
   )?;
-  let mut include_dirs = collect_include_dirs(&env_layout.include_dir).map_err(|err| {
-    JoyError::io("build", "reading include directories", &env_layout.include_dir, &err)
+  let mut include_dirs = collect_include_dirs(&ctx.env_layout.include_dir).map_err(|err| {
+    JoyError::io("build", "reading include directories", &ctx.env_layout.include_dir, &err)
   })?;
-  let user_include_dirs = collect_user_include_dirs(&project_root, &manifest)?;
-  let target_include_dirs = collect_target_include_dirs(&project_root, &selected_target)?;
+  let user_include_dirs = collect_user_include_dirs(&ctx.project_root, &ctx.manifest)?;
+  let target_include_dirs = collect_target_include_dirs(&ctx.project_root, &selected_target)?;
   include_dirs.extend(user_include_dirs);
   include_dirs.extend(target_include_dirs);
   include_dirs.sort();
   include_dirs.dedup();
-  validate_locked_package_metadata_if_needed("build", &lock_plan, &native_link.lockfile_packages)?;
-  write_dependency_graph_artifact(
-    &env_layout.state_dir,
-    &project_root,
-    &manifest_path,
-    &manifest,
+  validate_locked_package_metadata_if_needed(
+    "build",
+    &ctx.lock_plan,
     &native_link.lockfile_packages,
   )?;
-  refresh_install_index(&env_layout, &native_link)?;
+  write_dependency_graph_artifact(
+    "build",
+    &ctx.env_layout.state_dir,
+    &ctx.project_root,
+    &ctx.manifest_path,
+    &ctx.manifest,
+    &native_link.lockfile_packages,
+  )?;
+  refresh_install_index("build", &ctx.env_layout, &native_link)?;
 
   if options.progress {
     progress_detail("Generating build graph");
@@ -261,44 +301,47 @@ pub(crate) fn build_project(options: BuildOptions) -> Result<BuildExecution, Joy
   let spec = NinjaBuildSpec {
     compiler_kind: toolchain.compiler.kind,
     compiler_executable: toolchain.compiler.executable_name.clone(),
-    cpp_standard: manifest.project.cpp_standard.clone(),
+    cpp_standard: ctx.manifest.project.cpp_standard.clone(),
     compile_units,
-    binary_file: relative_or_absolute(&project_root, &binary_path),
-    include_dirs: include_dirs.iter().map(|dir| relative_or_absolute(&project_root, dir)).collect(),
+    binary_file: relative_or_absolute(&ctx.project_root, &binary_path),
+    include_dirs: include_dirs
+      .iter()
+      .map(|dir| relative_or_absolute(&ctx.project_root, dir))
+      .collect(),
     link_dirs: native_link
       .link_dirs
       .iter()
-      .map(|dir| relative_or_absolute(&project_root, dir))
+      .map(|dir| relative_or_absolute(&ctx.project_root, dir))
       .collect(),
     link_libs: native_link.link_libs.clone(),
-    profile,
+    profile: ctx.profile,
   };
   ninja::write_build_ninja(&build_file, &spec)
     .map_err(|err| JoyError::new("build", "ninja_file_write_failed", err.to_string(), 1))?;
   let _ = refresh_compile_commands_best_effort(
-    &project_root,
-    &manifest,
+    &ctx.project_root,
+    &ctx.manifest,
     Some(selected_target.name.as_str()),
-    &env_layout,
-    profile,
+    &ctx.env_layout,
+    ctx.profile,
   );
 
   if options.progress {
     progress_detail("Compiling and linking");
   }
-  let ninja_output = run_ninja_build(&toolchain, &project_root, &build_file)?;
+  let ninja_output = run_ninja_build(&toolchain, &ctx.project_root, &build_file)?;
 
   let lockfile_updated = write_lockfile_if_needed(
     "build",
-    lock_plan,
-    &lockfile_path,
-    &manifest_hash,
+    ctx.lock_plan.clone(),
+    &ctx.lockfile_path,
+    &ctx.manifest_hash,
     &native_link.lockfile_packages,
   )?;
 
   Ok(BuildExecution {
-    project_root,
-    manifest_path,
+    project_root: ctx.project_root,
+    manifest_path: ctx.manifest_path,
     build_file,
     binary_path,
     source_file,
@@ -309,12 +352,12 @@ pub(crate) fn build_project(options: BuildOptions) -> Result<BuildExecution, Joy
     link_dirs: native_link.link_dirs,
     link_libs: native_link.link_libs,
     toolchain,
-    profile,
+    profile: ctx.profile,
     ninja_status: ninja_output.status_code,
     ninja_stdout: ninja_output.stdout,
     ninja_stderr: ninja_output.stderr,
     compiled_dependencies_built: native_link.built_packages,
-    lockfile_path,
+    lockfile_path: ctx.lockfile_path,
     lockfile_updated,
   })
 }
@@ -325,119 +368,60 @@ pub(crate) fn sync_project(options: BuildOptions) -> Result<SyncExecution, JoyEr
     offline: options.offline,
     progress: options.progress,
   });
-  let project_root = env::current_dir().map_err(|err| {
-    JoyError::new("sync", "cwd_unavailable", format!("failed to get cwd: {err}"), 1)
-  })?;
-  let manifest_path = project_root.join("joy.toml");
-  if !manifest_path.is_file() {
-    return Err(JoyError::new(
-      "sync",
-      "manifest_not_found",
-      format!("no `joy.toml` found at {}", manifest_path.display()),
-      1,
-    ));
-  }
+  let ctx = prepare_pipeline_context("sync", &options)?;
 
-  let manifest = Manifest::load(&manifest_path)
-    .map_err(|err| JoyError::new("sync", "manifest_parse_error", err.to_string(), 1))?;
-  let manifest_hash = lockfile::compute_manifest_hash(&manifest_path)
-    .map_err(|err| JoyError::new("sync", "lockfile_hash_failed", err.to_string(), 1))?;
-  let lockfile_path = project_root.join("joy.lock");
-  let env_layout = project_env::ensure_layout(&project_root)
-    .map_err(|err| JoyError::new("sync", "env_setup_failed", err.to_string(), 1))?;
-  let lock_plan = evaluate_lockfile_plan("sync", &lockfile_path, &manifest_hash, &options)
-    .map_err(|err| JoyError::new("sync", err.code, err.message, err.exit_code))?;
-  let profile = BuildProfile::from_release_flag(options.release);
+  let (native_link, toolchain) = materialize_dependencies(
+    "sync",
+    &ctx.manifest,
+    &ctx.env_layout.include_dir,
+    &ctx.env_layout.lib_dir,
+    ctx.profile,
+    None,
+  )?;
 
-  let mut toolchain = None;
-  let native_link = if manifest.dependencies.is_empty() {
-    NativeLinkInputs::default()
-  } else {
-    let resolved_stage = resolve_dependency_stage(&manifest)
-      .map_err(|err| JoyError::new("sync", err.code, err.message, err.exit_code))?;
-    let PrefetchedDependencyStage { all_by_key, build_by_key } =
-      prefetch_dependency_stage(&resolved_stage)
-        .map_err(|err| JoyError::new("sync", err.code, err.message, err.exit_code))?;
-
-    let has_compiled = resolved_stage
-      .build_order_ids
-      .iter()
-      .any(|id| resolved_stage.resolved.package(id).is_some_and(|pkg| !pkg.header_only));
-
-    let compiled_stage = if has_compiled {
-      let discovered = toolchain::discover().map_err(|err| map_toolchain_error("sync", err))?;
-      toolchain = Some(discovered.clone());
-      build_compiled_dependency_stage(
-        &manifest,
-        &env_layout.lib_dir,
-        &discovered,
-        profile,
-        &resolved_stage,
-        build_by_key,
-      )
-      .map_err(|err| JoyError::new("sync", err.code, err.message, err.exit_code))?
-    } else {
-      CompiledDependencyBuildStage::default()
-    };
-
-    let lockfile_packages = assemble_lockfile_packages(
-      &resolved_stage.resolved,
-      &resolved_stage.recipes,
-      &all_by_key,
-      &compiled_stage.compiled_lock_metadata,
-    )
-    .map_err(|err| JoyError::new("sync", err.code, err.message, err.exit_code))?;
-    let installed_header_paths =
-      materialize_dependency_headers(&env_layout.include_dir, &lockfile_packages, &all_by_key)
-        .map_err(|err| JoyError::new("sync", err.code, err.message, err.exit_code))?;
-
-    NativeLinkInputs {
-      link_dirs: compiled_stage.link_dirs,
-      link_libs: compiled_stage.link_libs,
-      built_packages: compiled_stage.built_packages,
-      installed_lib_files: compiled_stage.installed_lib_files,
-      installed_header_paths,
-      lockfile_packages,
-    }
-  };
-
-  validate_locked_package_metadata_if_needed("sync", &lock_plan, &native_link.lockfile_packages)
-    .map_err(|err| JoyError::new("sync", err.code, err.message, err.exit_code))?;
-  write_dependency_graph_artifact(
-    &env_layout.state_dir,
-    &project_root,
-    &manifest_path,
-    &manifest,
+  validate_locked_package_metadata_if_needed(
+    "sync",
+    &ctx.lock_plan,
     &native_link.lockfile_packages,
-  )
-  .map_err(|err| JoyError::new("sync", err.code, err.message, err.exit_code))?;
-  refresh_install_index(&env_layout, &native_link)
-    .map_err(|err| JoyError::new("sync", err.code, err.message, err.exit_code))?;
+  )?;
+  write_dependency_graph_artifact(
+    "sync",
+    &ctx.env_layout.state_dir,
+    &ctx.project_root,
+    &ctx.manifest_path,
+    &ctx.manifest,
+    &native_link.lockfile_packages,
+  )?;
+  refresh_install_index("sync", &ctx.env_layout, &native_link)?;
 
-  let include_dirs = collect_include_dirs(&env_layout.include_dir).map_err(|err| {
-    JoyError::io("sync", "reading include directories", &env_layout.include_dir, &err)
+  let include_dirs = collect_include_dirs(&ctx.env_layout.include_dir).map_err(|err| {
+    JoyError::io("sync", "reading include directories", &ctx.env_layout.include_dir, &err)
   })?;
-  let _ =
-    refresh_compile_commands_best_effort(&project_root, &manifest, None, &env_layout, profile);
+  let _ = refresh_compile_commands_best_effort(
+    &ctx.project_root,
+    &ctx.manifest,
+    None,
+    &ctx.env_layout,
+    ctx.profile,
+  );
   let lockfile_updated = write_lockfile_if_needed(
     "sync",
-    lock_plan,
-    &lockfile_path,
-    &manifest_hash,
+    ctx.lock_plan.clone(),
+    &ctx.lockfile_path,
+    &ctx.manifest_hash,
     &native_link.lockfile_packages,
-  )
-  .map_err(|err| JoyError::new("sync", err.code, err.message, err.exit_code))?;
+  )?;
 
   Ok(SyncExecution {
-    project_root,
-    manifest_path,
+    project_root: ctx.project_root,
+    manifest_path: ctx.manifest_path,
     include_dirs,
     link_dirs: native_link.link_dirs,
     link_libs: native_link.link_libs,
     toolchain,
-    profile,
+    profile: ctx.profile,
     compiled_dependencies_built: native_link.built_packages,
-    lockfile_path,
+    lockfile_path: ctx.lockfile_path,
     lockfile_updated,
   })
 }
@@ -488,59 +472,82 @@ struct CompiledDependencyBuildStage {
   compiled_lock_metadata: BTreeMap<String, CompiledLockMetadata>,
 }
 
-fn prepare_compiled_dependencies(
+fn materialize_dependencies(
+  command: &'static str,
   manifest: &Manifest,
   project_include_dir: &Path,
   project_lib_dir: &Path,
-  toolchain: &toolchain::Toolchain,
   profile: BuildProfile,
-) -> Result<NativeLinkInputs, JoyError> {
+  toolchain: Option<&toolchain::Toolchain>,
+) -> Result<(NativeLinkInputs, Option<toolchain::Toolchain>), JoyError> {
   if manifest.dependencies.is_empty() {
-    return Ok(NativeLinkInputs::default());
+    return Ok((NativeLinkInputs::default(), None));
   }
 
-  let resolved_stage = resolve_dependency_stage(manifest)?;
+  let resolved_stage = resolve_dependency_stage(command, manifest)?;
   let PrefetchedDependencyStage { all_by_key, build_by_key } =
-    prefetch_dependency_stage(&resolved_stage)?;
-  let compiled_stage = build_compiled_dependency_stage(
-    manifest,
-    project_lib_dir,
-    toolchain,
-    profile,
-    &resolved_stage,
-    build_by_key,
-  )?;
+    prefetch_dependency_stage(command, &resolved_stage)?;
+  let has_compiled = resolved_stage
+    .build_order_ids
+    .iter()
+    .any(|id| resolved_stage.resolved.package(id).is_some_and(|pkg| !pkg.header_only));
+  let (compiled_stage, discovered_toolchain) = if has_compiled {
+    let discovered = match toolchain {
+      Some(existing) => existing.clone(),
+      None => toolchain::discover().map_err(|err| map_toolchain_error(command, err))?,
+    };
+    let stage = build_compiled_dependency_stage(
+      command,
+      manifest,
+      project_lib_dir,
+      &discovered,
+      profile,
+      &resolved_stage,
+      build_by_key,
+    )?;
+    (stage, Some(discovered))
+  } else {
+    (CompiledDependencyBuildStage::default(), None)
+  };
   let lockfile_packages = assemble_lockfile_packages(
+    command,
     &resolved_stage.resolved,
     &resolved_stage.recipes,
     &all_by_key,
     &compiled_stage.compiled_lock_metadata,
   )?;
   let installed_header_paths =
-    materialize_dependency_headers(project_include_dir, &lockfile_packages, &all_by_key)?;
+    materialize_dependency_headers(command, project_include_dir, &lockfile_packages, &all_by_key)?;
 
-  Ok(NativeLinkInputs {
-    link_dirs: compiled_stage.link_dirs,
-    link_libs: compiled_stage.link_libs,
-    built_packages: compiled_stage.built_packages,
-    installed_lib_files: compiled_stage.installed_lib_files,
-    installed_header_paths,
-    lockfile_packages,
-  })
+  Ok((
+    NativeLinkInputs {
+      link_dirs: compiled_stage.link_dirs,
+      link_libs: compiled_stage.link_libs,
+      built_packages: compiled_stage.built_packages,
+      installed_lib_files: compiled_stage.installed_lib_files,
+      installed_header_paths,
+      lockfile_packages,
+    },
+    discovered_toolchain,
+  ))
 }
 
-fn resolve_dependency_stage(manifest: &Manifest) -> Result<ResolvedDependencyStage, JoyError> {
+fn resolve_dependency_stage(
+  command: &'static str,
+  manifest: &Manifest,
+) -> Result<ResolvedDependencyStage, JoyError> {
   let recipes = RecipeStore::load_default()
-    .map_err(|err| JoyError::new("build", "recipe_load_failed", err.to_string(), 1))?;
-  let resolved =
-    resolver::resolve_manifest(manifest, &recipes).map_err(map_dependency_resolve_error)?;
+    .map_err(|err| JoyError::new(command, "recipe_load_failed", err.to_string(), 1))?;
+  let resolved = resolver::resolve_manifest(manifest, &recipes)
+    .map_err(|err| map_resolver_error(command, err))?;
   let build_order_ids = resolved
     .build_order_ids()
-    .map_err(|err| JoyError::new("build", "dependency_graph_invalid", err.to_string(), 1))?;
+    .map_err(|err| JoyError::new(command, "dependency_graph_invalid", err.to_string(), 1))?;
   Ok(ResolvedDependencyStage { recipes, resolved, build_order_ids })
 }
 
 fn prefetch_dependency_stage(
+  command: &'static str,
   resolved_stage: &ResolvedDependencyStage,
 ) -> Result<PrefetchedDependencyStage, JoyError> {
   let requests = resolved_stage
@@ -555,7 +562,7 @@ fn prefetch_dependency_stage(
     })
     .collect::<Vec<_>>();
   let prefetched =
-    fetch::prefetch_github_packages(requests).map_err(|err| map_fetch_error("build", err))?;
+    fetch::prefetch_github_packages(requests).map_err(|err| map_fetch_error(command, err))?;
   let all_by_key = prefetched
     .into_iter()
     .map(|f| ((f.package.to_string(), f.requested_rev.clone()), f))
@@ -565,6 +572,7 @@ fn prefetch_dependency_stage(
 }
 
 fn build_compiled_dependency_stage(
+  command: &'static str,
   manifest: &Manifest,
   project_lib_dir: &Path,
   toolchain: &toolchain::Toolchain,
@@ -573,10 +581,10 @@ fn build_compiled_dependency_stage(
   mut prefetched_for_build: BTreeMap<(String, String), fetch::FetchResult>,
 ) -> Result<CompiledDependencyBuildStage, JoyError> {
   let cache = global_cache::GlobalCache::resolve()
-    .map_err(|err| JoyError::new("build", "cache_setup_failed", err.to_string(), 1))?;
+    .map_err(|err| JoyError::new(command, "cache_setup_failed", err.to_string(), 1))?;
   cache
     .ensure_layout()
-    .map_err(|err| JoyError::new("build", "cache_setup_failed", err.to_string(), 1))?;
+    .map_err(|err| JoyError::new(command, "cache_setup_failed", err.to_string(), 1))?;
 
   let mut stage = CompiledDependencyBuildStage::default();
 
@@ -591,7 +599,7 @@ fn build_compiled_dependency_stage(
 
     let Some(recipe) = resolved_stage.recipes.get(&pkg.id) else {
       return Err(JoyError::new(
-        "build",
+        command,
         "missing_recipe",
         format!("compiled dependency `{}` requires a curated recipe", pkg.id),
         1,
@@ -599,7 +607,7 @@ fn build_compiled_dependency_stage(
     };
     let Some(cmake_recipe) = recipe.cmake.as_ref() else {
       return Err(JoyError::new(
-        "build",
+        command,
         "missing_cmake_metadata",
         format!("recipe `{}` is missing `[cmake]` metadata", recipe.id),
         1,
@@ -607,7 +615,7 @@ fn build_compiled_dependency_stage(
     };
     let Some(link_recipe) = recipe.link.as_ref() else {
       return Err(JoyError::new(
-        "build",
+        command,
         "missing_link_metadata",
         format!("recipe `{}` is missing `[link]` metadata", recipe.id),
         1,
@@ -621,7 +629,7 @@ fn build_compiled_dependency_stage(
       .remove(&(pkg.id.to_string(), pkg.requested_rev.clone()))
       .ok_or_else(|| {
         JoyError::new(
-          "build",
+          command,
           "fetch_failed",
           format!("missing prefetched source checkout for `{}` at `{}`", pkg.id, pkg.requested_rev),
           1,
@@ -631,7 +639,7 @@ fn build_compiled_dependency_stage(
     let recipe_file =
       resolved_stage.recipes.root_dir().join("packages").join(format!("{}.toml", recipe.slug));
     let recipe_contents = fs::read_to_string(&recipe_file)
-      .map_err(|err| JoyError::io("build", "reading recipe file", &recipe_file, &err))?;
+      .map_err(|err| JoyError::io(command, "reading recipe file", &recipe_file, &err))?;
     let preferred_linkage = link_recipe.preferred_linkage.unwrap_or(RecipeLinkage::Static);
     let abi_hash = abi::compute_abi_hash(&abi::AbiHashInput {
       package_id: pkg.id.to_string(),
@@ -667,7 +675,7 @@ fn build_compiled_dependency_stage(
 
     let layout = cache
       .ensure_compiled_build_layout(&abi_hash)
-      .map_err(|err| JoyError::new("build", "cache_setup_failed", err.to_string(), 1))?;
+      .map_err(|err| JoyError::new(command, "cache_setup_failed", err.to_string(), 1))?;
     let source_dir = if let Some(fetch) = recipe.fetch.as_ref() {
       if fetch.subdir.trim().is_empty() {
         fetched.source_dir.clone()
@@ -688,10 +696,10 @@ fn build_compiled_dependency_stage(
       build_targets: cmake_recipe.build_targets.clone(),
       header_roots: recipe.include_roots().to_vec(),
     })
-    .map_err(|err| JoyError::new("build", "cmake_build_failed", err.to_string(), 1))?;
+    .map_err(|err| JoyError::new(command, "cmake_build_failed", err.to_string(), 1))?;
     let lib_install =
       linking::install_compiled_libraries(project_lib_dir, &layout.lib_dir, &link_recipe.libs)
-        .map_err(|err| JoyError::new("build", "library_install_failed", err.to_string(), 1))?;
+        .map_err(|err| JoyError::new(command, "library_install_failed", err.to_string(), 1))?;
 
     if !cmake_result.cache_hit {
       stage.built_packages.push(pkg.id.to_string());
@@ -751,6 +759,7 @@ fn collect_include_dirs(project_include_dir: &Path) -> std::io::Result<Vec<PathB
 }
 
 fn materialize_dependency_headers(
+  command: &'static str,
   project_include_dir: &Path,
   lockfile_packages: &[lockfile::LockedPackage],
   prefetched_by_key: &BTreeMap<(String, String), fetch::FetchResult>,
@@ -763,7 +772,7 @@ fn materialize_dependency_headers(
     }
     let package = crate::package_id::PackageId::parse(&pkg.id).map_err(|err| {
       JoyError::new(
-        "build",
+        command,
         "invalid_package_id",
         format!("invalid package id `{}` while materializing headers: {err}", pkg.id),
         1,
@@ -773,7 +782,7 @@ fn materialize_dependency_headers(
       .get(&(pkg.id.clone(), pkg.requested_rev.clone()))
       .ok_or_else(|| {
         JoyError::new(
-          "build",
+          command,
           "header_install_failed",
           format!(
             "missing prefetched source checkout metadata for `{}` at `{}` while materializing headers",
@@ -793,7 +802,7 @@ fn materialize_dependency_headers(
       }
       let dest = canonical_pkg_dir.join(sanitize_header_root_key(header_root));
       linking::install_header_root_to_path(&source_header_root, &dest)
-        .map_err(|err| JoyError::new("build", "header_install_failed", err.to_string(), 1))?;
+        .map_err(|err| JoyError::new(command, "header_install_failed", err.to_string(), 1))?;
       if first_source_root.is_none() {
         first_source_root = Some(source_header_root);
       }
@@ -810,7 +819,7 @@ fn materialize_dependency_headers(
         .replace('\\', "/");
       let dest = canonical_pkg_dir.join(sanitize_header_root_key(&relative));
       linking::install_header_root_to_path(&fallback_root, &dest)
-        .map_err(|err| JoyError::new("build", "header_install_failed", err.to_string(), 1))?;
+        .map_err(|err| JoyError::new(command, "header_install_failed", err.to_string(), 1))?;
       first_source_root = Some(fallback_root);
       installed_paths.push(dest);
       installed_any = true;
@@ -818,7 +827,7 @@ fn materialize_dependency_headers(
 
     if !installed_any {
       return Err(JoyError::new(
-        "build",
+        command,
         "header_install_failed",
         format!(
           "package `{}` declares header roots {:?}, but none were found in `{}`",
@@ -833,7 +842,7 @@ fn materialize_dependency_headers(
     if let Some(first_root) = first_source_root {
       let compat_dest = project_include_dir.join("deps").join(package.slug());
       linking::install_header_root_to_path(&first_root, &compat_dest)
-        .map_err(|err| JoyError::new("build", "header_install_failed", err.to_string(), 1))?;
+        .map_err(|err| JoyError::new(command, "header_install_failed", err.to_string(), 1))?;
       installed_paths.push(compat_dest);
     }
   }
@@ -1007,6 +1016,7 @@ fn binary_name(project_name: &str) -> String {
 }
 
 fn assemble_lockfile_packages(
+  command: &'static str,
   resolved: &resolver::ResolvedGraph,
   recipes: &RecipeStore,
   prefetched_by_key: &BTreeMap<(String, String), fetch::FetchResult>,
@@ -1018,7 +1028,7 @@ fn assemble_lockfile_packages(
     let key = (pkg.id.to_string(), pkg.requested_rev.clone());
     let fetched = prefetched_by_key.get(&key).ok_or_else(|| {
       JoyError::new(
-        "build",
+        command,
         "lockfile_package_assembly_failed",
         format!(
           "missing prefetched source checkout metadata for `{}` at `{}` while assembling lockfile",
@@ -1153,6 +1163,7 @@ fn target_triple_guess(compiler_kind: toolchain::CompilerKind) -> String {
 }
 
 fn write_dependency_graph_artifact(
+  command: &'static str,
   state_dir: &Path,
   project_root: &Path,
   manifest_path: &Path,
@@ -1162,7 +1173,7 @@ fn write_dependency_graph_artifact(
   let graph_path = state_dir.join("dependency-graph.json");
   if let Some(parent) = graph_path.parent() {
     fs::create_dir_all(parent)
-      .map_err(|err| JoyError::io("build", "creating graph state directory", parent, &err))?;
+      .map_err(|err| JoyError::io(command, "creating graph state directory", parent, &err))?;
   }
 
   let mut roots = manifest.dependencies.keys().cloned().collect::<Vec<_>>();
@@ -1179,14 +1190,14 @@ fn write_dependency_graph_artifact(
   }))
   .map_err(|err| {
     JoyError::new(
-      "build",
+      command,
       "state_graph_error",
       format!("failed to serialize dependency graph state: {err}"),
       1,
     )
   })?;
   fs::write(&graph_path, raw)
-    .map_err(|err| JoyError::io("build", "writing dependency graph state", &graph_path, &err))
+    .map_err(|err| JoyError::io(command, "writing dependency graph state", &graph_path, &err))
 }
 
 pub(crate) fn refresh_compile_commands_best_effort(
@@ -1324,12 +1335,13 @@ fn compile_db_arguments(
 }
 
 fn refresh_install_index(
+  command: &'static str,
   env_layout: &project_env::ProjectEnvLayout,
   native_link: &NativeLinkInputs,
 ) -> Result<(), JoyError> {
   let index_path = env_layout.state_dir.join("install-index.json");
   let mut index = InstallIndex::load_or_default(&index_path)
-    .map_err(|err| JoyError::new("build", "state_index_error", err.to_string(), 1))?;
+    .map_err(|err| JoyError::new(command, "state_index_error", err.to_string(), 1))?;
 
   let desired_header_links =
     native_link.installed_header_paths.iter().cloned().collect::<BTreeSet<_>>();
@@ -1341,13 +1353,13 @@ fn refresh_install_index(
     &desired_header_links,
     &desired_library_files,
   )
-  .map_err(|err| JoyError::new("build", "state_cleanup_failed", err.to_string(), 1))?;
+  .map_err(|err| JoyError::new(command, "state_cleanup_failed", err.to_string(), 1))?;
 
   index.set_header_links(desired_header_links);
   index.set_library_files(desired_library_files);
   index
     .save(&index_path)
-    .map_err(|err| JoyError::new("build", "state_index_error", err.to_string(), 1))
+    .map_err(|err| JoyError::new(command, "state_index_error", err.to_string(), 1))
 }
 
 #[derive(Debug, Clone)]
@@ -1517,57 +1529,4 @@ fn map_toolchain_error(command: &'static str, err: toolchain::ToolchainError) ->
     },
   };
   JoyError::new(command, code, message, 1)
-}
-
-fn map_fetch_error(command: &'static str, err: fetch::FetchError) -> JoyError {
-  let code = if err.is_offline_cache_miss() {
-    "offline_cache_miss"
-  } else if err.is_offline_network_disabled() {
-    "offline_network_disabled"
-  } else if err.is_invalid_version_requirement() {
-    "invalid_version_requirement"
-  } else if err.is_version_not_found() {
-    "version_not_found"
-  } else {
-    "fetch_failed"
-  };
-  JoyError::new(command, code, err.to_string(), 1)
-}
-
-fn map_dependency_resolve_error(err: resolver::ResolverError) -> JoyError {
-  let code = match &err {
-    resolver::ResolverError::Fetch { source, .. } if source.is_offline_cache_miss() => {
-      "offline_cache_miss"
-    },
-    resolver::ResolverError::Fetch { source, .. } if source.is_offline_network_disabled() => {
-      "offline_network_disabled"
-    },
-    resolver::ResolverError::Fetch { source, .. } if source.is_invalid_version_requirement() => {
-      "invalid_version_requirement"
-    },
-    resolver::ResolverError::Fetch { source, .. } if source.is_version_not_found() => {
-      "version_not_found"
-    },
-    resolver::ResolverError::RegistryLoad { source }
-      if source.is_offline_cache_miss() || source.is_not_configured() =>
-    {
-      if source.is_offline_cache_miss() { "offline_cache_miss" } else { "registry_not_configured" }
-    },
-    resolver::ResolverError::RegistryResolve { source, .. }
-      if source.is_package_not_found() || source.is_version_not_found() =>
-    {
-      if source.is_package_not_found() { "registry_package_not_found" } else { "version_not_found" }
-    },
-    resolver::ResolverError::RegistryResolve { source, .. }
-      if source.is_invalid_version_requirement() =>
-    {
-      "invalid_version_requirement"
-    },
-    resolver::ResolverError::RegistryLoad { .. }
-    | resolver::ResolverError::RegistryResolve { .. } => "registry_load_failed",
-    resolver::ResolverError::RegistryAliasUnsupported { .. } => "registry_alias_unsupported",
-    resolver::ResolverError::PackageMetadataMismatch { .. } => "package_metadata_mismatch",
-    _ => "dependency_resolve_failed",
-  };
-  JoyError::new("build", code, err.to_string(), 1)
 }

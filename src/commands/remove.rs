@@ -1,11 +1,11 @@
 use serde_json::json;
 use std::env;
-use std::fs;
-use std::path::Path;
 
+use super::dependency_common::normalize_dependency_arg;
 use crate::cli::{RemoveArgs, RuntimeFlags};
 use crate::commands::CommandOutput;
 use crate::error::JoyError;
+use crate::fs_ops;
 use crate::install_index::InstallIndex;
 use crate::manifest::Manifest;
 use crate::output::HumanMessageBuilder;
@@ -57,7 +57,7 @@ pub fn handle(args: RemoveArgs, runtime: RuntimeFlags) -> Result<CommandOutput, 
   let env_layout = project_env::ensure_layout(&cwd)
     .map_err(|err| JoyError::new("remove", "env_setup_failed", err.to_string(), 1))?;
   let header_link_path = env_layout.include_dir.join("deps").join(package.slug());
-  let header_link_removed = remove_installed_path_if_exists(&header_link_path)
+  let header_link_removed = fs_ops::remove_path_if_exists(&header_link_path)
     .map_err(|err| JoyError::io("remove", "removing installed headers", &header_link_path, &err))?;
 
   let install_index_path = env_layout.state_dir.join("install-index.json");
@@ -104,36 +104,4 @@ pub fn handle(args: RemoveArgs, runtime: RuntimeFlags) -> Result<CommandOutput, 
       "warnings": lockfile_warning.map(|w| vec![w]).unwrap_or_default(),
     }),
   ))
-}
-
-fn normalize_dependency_arg(raw: &str) -> String {
-  raw.strip_prefix("registry:").or_else(|| raw.strip_prefix("github:")).unwrap_or(raw).to_string()
-}
-
-fn remove_installed_path_if_exists(path: &Path) -> std::io::Result<bool> {
-  match fs::symlink_metadata(path) {
-    Ok(metadata) => {
-      if metadata.file_type().is_symlink() || metadata.is_file() {
-        match fs::remove_file(path) {
-          Ok(()) => {},
-          Err(err)
-            if matches!(
-              err.kind(),
-              std::io::ErrorKind::PermissionDenied | std::io::ErrorKind::IsADirectory
-            ) =>
-          {
-            fs::remove_dir(path)?;
-          },
-          Err(err) => return Err(err),
-        };
-      } else if metadata.is_dir() {
-        fs::remove_dir_all(path)?;
-      } else {
-        fs::remove_file(path)?;
-      }
-      Ok(true)
-    },
-    Err(err) if err.kind() == std::io::ErrorKind::NotFound => Ok(false),
-    Err(err) => Err(err),
-  }
 }

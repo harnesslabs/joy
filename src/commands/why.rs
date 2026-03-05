@@ -2,11 +2,13 @@ use serde_json::json;
 use std::collections::{BTreeMap, BTreeSet};
 use std::env;
 
+use super::graph_common::{
+  load_fresh_lockfile_provenance_overlay, map_resolver_error, validate_locked_graph_lockfile,
+};
 use crate::cli::{RuntimeFlags, WhyArgs};
 use crate::commands::CommandOutput;
 use crate::error::JoyError;
 use crate::fetch;
-use crate::lockfile;
 use crate::manifest::Manifest;
 use crate::recipes::RecipeStore;
 use crate::resolver;
@@ -40,7 +42,8 @@ pub fn handle(args: WhyArgs, runtime: RuntimeFlags) -> Result<CommandOutput, Joy
 
   let recipes = RecipeStore::load_default()
     .map_err(|err| JoyError::new("why", "recipe_load_failed", err.to_string(), 1))?;
-  let resolved = resolver::resolve_manifest(&manifest, &recipes).map_err(map_resolver_error)?;
+  let resolved = resolver::resolve_manifest(&manifest, &recipes)
+    .map_err(|err| map_resolver_error("why", err))?;
   if resolved.package(&args.package).is_none() {
     return Err(JoyError::new(
       "why",
@@ -104,34 +107,12 @@ pub fn handle(args: WhyArgs, runtime: RuntimeFlags) -> Result<CommandOutput, Joy
 fn handle_locked(
   cwd: &std::path::Path,
   manifest_path: &std::path::Path,
-  _manifest: &Manifest,
+  manifest: &Manifest,
   target: &str,
   roots: &[String],
 ) -> Result<CommandOutput, JoyError> {
   let lockfile_path = cwd.join("joy.lock");
-  if !lockfile_path.is_file() {
-    return Err(JoyError::new(
-      "why",
-      "lockfile_missing",
-      format!(
-        "`--locked` requires `{}` to exist; create or refresh it with `joy sync --update-lock`",
-        lockfile_path.display()
-      ),
-      1,
-    ));
-  }
-  let lock = lockfile::Lockfile::load(&lockfile_path)
-    .map_err(|err| JoyError::new("why", "lockfile_parse_error", err.to_string(), 1))?;
-  let manifest_hash = lockfile::compute_manifest_hash(manifest_path)
-    .map_err(|err| JoyError::new("why", "lockfile_hash_failed", err.to_string(), 1))?;
-  if lock.manifest_hash != manifest_hash {
-    return Err(JoyError::new(
-      "why",
-      "lockfile_stale",
-      "joy.lock manifest hash does not match joy.toml; rerun `joy sync --update-lock`".to_string(),
-      1,
-    ));
-  }
+  let lock = validate_locked_graph_lockfile("why", manifest, manifest_path, &lockfile_path)?;
 
   let by_id = lock.packages.iter().map(|pkg| (pkg.id.clone(), pkg)).collect::<BTreeMap<_, _>>();
   let Some(pkg) = by_id.get(target).copied() else {
@@ -234,78 +215,4 @@ fn dfs_collect_paths<F>(
     stack.pop();
   }
   visiting.remove(current);
-}
-
-fn map_resolver_error(err: resolver::ResolverError) -> JoyError {
-  let code = match &err {
-    resolver::ResolverError::Fetch { source, .. } if source.is_offline_cache_miss() => {
-      "offline_cache_miss"
-    },
-    resolver::ResolverError::Fetch { source, .. } if source.is_offline_network_disabled() => {
-      "offline_network_disabled"
-    },
-    resolver::ResolverError::Fetch { source, .. } if source.is_invalid_version_requirement() => {
-      "invalid_version_requirement"
-    },
-    resolver::ResolverError::Fetch { source, .. } if source.is_version_not_found() => {
-      "version_not_found"
-    },
-    resolver::ResolverError::RegistryLoad { source }
-      if source.is_offline_cache_miss() || source.is_not_configured() =>
-    {
-      if source.is_offline_cache_miss() { "offline_cache_miss" } else { "registry_not_configured" }
-    },
-    resolver::ResolverError::RegistryResolve { source, .. }
-      if source.is_package_not_found() || source.is_version_not_found() =>
-    {
-      if source.is_package_not_found() { "registry_package_not_found" } else { "version_not_found" }
-    },
-    resolver::ResolverError::RegistryResolve { source, .. }
-      if source.is_invalid_version_requirement() =>
-    {
-      "invalid_version_requirement"
-    },
-    resolver::ResolverError::RegistryLoad { .. }
-    | resolver::ResolverError::RegistryResolve { .. } => "registry_load_failed",
-    resolver::ResolverError::RegistryAliasUnsupported { .. } => "registry_alias_unsupported",
-    resolver::ResolverError::PackageMetadataMismatch { .. } => "package_metadata_mismatch",
-    _ => "dependency_resolve_failed",
-  };
-  JoyError::new("why", code, err.to_string(), 1)
-}
-
-#[derive(Debug, Clone)]
-struct ProvenanceOverlay {
-  metadata_source: Option<String>,
-  package_manifest_digest: Option<String>,
-  declared_deps_source: Option<String>,
-}
-
-fn load_fresh_lockfile_provenance_overlay(
-  cwd: &std::path::Path,
-  manifest_path: &std::path::Path,
-) -> Option<BTreeMap<String, ProvenanceOverlay>> {
-  let lockfile_path = cwd.join("joy.lock");
-  let lock = lockfile::Lockfile::load(&lockfile_path).ok()?;
-  let manifest_hash = lockfile::compute_manifest_hash(manifest_path).ok()?;
-  if lock.manifest_hash != manifest_hash {
-    return None;
-  }
-
-  Some(
-    lock
-      .packages
-      .into_iter()
-      .map(|pkg| {
-        (
-          pkg.id,
-          ProvenanceOverlay {
-            metadata_source: pkg.metadata_source,
-            package_manifest_digest: pkg.package_manifest_digest,
-            declared_deps_source: pkg.declared_deps_source,
-          },
-        )
-      })
-      .collect(),
-  )
 }

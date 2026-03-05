@@ -1,6 +1,7 @@
 use serde_json::json;
 use std::env;
 
+use super::dependency_common::{map_fetch_error, map_registry_error, parse_dependency_input};
 use crate::cli::{RuntimeFlags, UpdateArgs};
 use crate::commands::CommandOutput;
 use crate::error::JoyError;
@@ -12,7 +13,7 @@ use crate::manifest::{DependencySource, DependencySpec, Manifest};
 use crate::output::{HumanMessageBuilder, progress_detail};
 use crate::package_id::PackageId;
 use crate::project_env;
-use crate::registry::{RegistryError, RegistryRequirement, RegistryStore};
+use crate::registry::{RegistryRequirement, RegistryStore};
 
 #[derive(Debug)]
 struct UpdatedDependency {
@@ -324,78 +325,4 @@ pub fn handle(args: UpdateArgs, runtime: RuntimeFlags) -> Result<CommandOutput, 
       "warnings": lockfile_warning.map(|w| vec![w]).unwrap_or_default(),
     }),
   ))
-}
-
-fn map_fetch_error(command: &'static str, err: fetch::FetchError) -> JoyError {
-  let code = if err.is_offline_cache_miss() {
-    "offline_cache_miss"
-  } else if err.is_offline_network_disabled() {
-    "offline_network_disabled"
-  } else if err.is_invalid_version_requirement() {
-    "invalid_version_requirement"
-  } else if err.is_version_not_found() {
-    "version_not_found"
-  } else {
-    "fetch_failed"
-  };
-  JoyError::new(command, code, err.to_string(), 1)
-}
-
-fn map_registry_error(command: &'static str, err: RegistryError) -> JoyError {
-  let code = if err.is_offline_cache_miss() {
-    "offline_cache_miss"
-  } else if err.is_not_configured() {
-    "registry_not_configured"
-  } else if err.is_package_not_found() {
-    "registry_package_not_found"
-  } else if err.is_invalid_version_requirement() {
-    "invalid_version_requirement"
-  } else if err.is_version_not_found() {
-    "version_not_found"
-  } else {
-    "registry_load_failed"
-  };
-  JoyError::new(command, code, err.to_string(), 1)
-}
-
-#[derive(Debug, Clone)]
-struct ParsedDependencyInput {
-  package_id: String,
-  #[allow(dead_code)]
-  source: DependencySource,
-}
-
-fn parse_dependency_input(
-  command: &'static str,
-  raw: &str,
-) -> Result<ParsedDependencyInput, JoyError> {
-  if let Some(id) = raw.strip_prefix("registry:") {
-    if id.trim().is_empty() {
-      return Err(JoyError::new(
-        command,
-        "invalid_package_id",
-        "invalid package `registry:`; expected `registry:owner/repo`",
-        1,
-      ));
-    }
-    return Ok(ParsedDependencyInput {
-      package_id: id.to_string(),
-      source: DependencySource::Registry,
-    });
-  }
-  if let Some(id) = raw.strip_prefix("github:") {
-    if id.trim().is_empty() {
-      return Err(JoyError::new(
-        command,
-        "invalid_package_id",
-        "invalid package `github:`; expected `github:owner/repo`",
-        1,
-      ));
-    }
-    return Ok(ParsedDependencyInput {
-      package_id: id.to_string(),
-      source: DependencySource::Github,
-    });
-  }
-  Ok(ParsedDependencyInput { package_id: raw.to_string(), source: DependencySource::Github })
 }

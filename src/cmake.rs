@@ -10,6 +10,7 @@ use std::path::{Path, PathBuf};
 use std::process::Command;
 use thiserror::Error;
 
+use crate::fs_ops;
 use crate::global_cache::BuildCacheLayout;
 use crate::ninja::BuildProfile;
 use crate::toolchain::CompilerKind;
@@ -125,7 +126,11 @@ fn remove_dir_contents(dir: &Path) -> Result<(), CmakeError> {
       source,
     })?;
     let path = entry.path();
-    remove_any(&path)?;
+    fs_ops::remove_path_if_exists(&path).map_err(|source| CmakeError::Io {
+      action: "removing stale cached path".into(),
+      path,
+      source,
+    })?;
   }
   Ok(())
 }
@@ -269,7 +274,11 @@ fn copy_header_roots_if_present(
     let leaf = sanitized_header_root_name(root);
     let dst = cache_include_dir.join(leaf);
     if dst.exists() {
-      remove_any(&dst)?;
+      fs_ops::remove_path_if_exists(&dst).map_err(|source| CmakeError::Io {
+        action: "removing stale cached path".into(),
+        path: dst.clone(),
+        source,
+      })?;
     }
     if src.is_dir() {
       copy_dir_recursive(&src, &dst)?;
@@ -332,38 +341,6 @@ fn copy_dir_recursive(src: &Path, dst: &Path) -> Result<(), CmakeError> {
     }
   }
   Ok(())
-}
-
-fn remove_any(path: &Path) -> Result<(), CmakeError> {
-  match fs::symlink_metadata(path) {
-    Ok(metadata) => {
-      if metadata.file_type().is_symlink() || metadata.is_file() {
-        fs::remove_file(path).map_err(|source| CmakeError::Io {
-          action: "removing stale cached path".into(),
-          path: path.to_path_buf(),
-          source,
-        })
-      } else if metadata.is_dir() {
-        fs::remove_dir_all(path).map_err(|source| CmakeError::Io {
-          action: "removing stale cached directory".into(),
-          path: path.to_path_buf(),
-          source,
-        })
-      } else {
-        fs::remove_file(path).map_err(|source| CmakeError::Io {
-          action: "removing stale cached path".into(),
-          path: path.to_path_buf(),
-          source,
-        })
-      }
-    },
-    Err(err) if err.kind() == std::io::ErrorKind::NotFound => Ok(()),
-    Err(source) => Err(CmakeError::Io {
-      action: "reading stale cached path metadata".into(),
-      path: path.to_path_buf(),
-      source,
-    }),
-  }
 }
 
 fn write_manifest(
@@ -573,13 +550,13 @@ target_include_directories(demo PUBLIC ${CMAKE_CURRENT_SOURCE_DIR}/include)
 
     let first = build_into_cache(&request).expect("first build");
     assert!(!first.cache_hit);
-    assert!(first.manifest_file.is_file());
+    assert!(layout.manifest_file.is_file());
     assert!(
       !first.lib_files.is_empty(),
       "expected library artifacts copied into cache, got {:?}",
       first.lib_files
     );
-    assert!(first.include_paths.iter().any(|p| p.ends_with("include")));
+    assert!(layout.include_dir.join("include").is_dir());
 
     let second = build_into_cache(&request).expect("second build");
     assert!(second.cache_hit);

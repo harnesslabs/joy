@@ -2,6 +2,10 @@ use serde_json::json;
 use std::collections::{BTreeMap, BTreeSet};
 use std::env;
 
+use super::graph_common::{
+  ProvenanceOverlay, load_fresh_lockfile_provenance_overlay, map_resolver_error,
+  validate_locked_graph_lockfile,
+};
 use crate::cli::{RuntimeFlags, TreeArgs};
 use crate::commands::CommandOutput;
 use crate::error::JoyError;
@@ -38,7 +42,8 @@ pub fn handle(args: TreeArgs, runtime: RuntimeFlags) -> Result<CommandOutput, Jo
   let provenance_overlay = load_fresh_lockfile_provenance_overlay(&cwd, &manifest_path);
   let recipes = RecipeStore::load_default()
     .map_err(|err| JoyError::new("tree", "recipe_load_failed", err.to_string(), 1))?;
-  let resolved = resolver::resolve_manifest(&manifest, &recipes).map_err(map_resolver_error)?;
+  let resolved = resolver::resolve_manifest(&manifest, &recipes)
+    .map_err(|err| map_resolver_error("tree", err))?;
 
   let mut roots = manifest.dependencies.keys().cloned().collect::<Vec<_>>();
   roots.sort();
@@ -105,38 +110,7 @@ fn handle_locked_tree(
   manifest: &Manifest,
 ) -> Result<CommandOutput, JoyError> {
   let lockfile_path = cwd.join("joy.lock");
-  if !lockfile_path.is_file() {
-    return Err(JoyError::new(
-      "tree",
-      "lockfile_missing",
-      format!(
-        "`--locked` requires `{}` to exist; create or refresh it with `joy sync --update-lock`",
-        lockfile_path.display()
-      ),
-      1,
-    ));
-  }
-  let lock = lockfile::Lockfile::load(&lockfile_path)
-    .map_err(|err| JoyError::new("tree", "lockfile_parse_error", err.to_string(), 1))?;
-  let manifest_hash = lockfile::compute_manifest_hash(manifest_path)
-    .map_err(|err| JoyError::new("tree", "lockfile_hash_failed", err.to_string(), 1))?;
-  if lock.manifest_hash != manifest_hash {
-    return Err(JoyError::new(
-      "tree",
-      "lockfile_stale",
-      "joy.lock manifest hash does not match joy.toml; rerun `joy sync --update-lock`".to_string(),
-      1,
-    ));
-  }
-  if !manifest.dependencies.is_empty() && lock.packages.is_empty() {
-    return Err(JoyError::new(
-      "tree",
-      "lockfile_incomplete",
-      "joy.lock package metadata is missing for current dependencies; rerun `joy sync --update-lock`"
-        .to_string(),
-      1,
-    ));
-  }
+  let lock = validate_locked_graph_lockfile("tree", manifest, manifest_path, &lockfile_path)?;
 
   let mut roots = manifest.dependencies.keys().cloned().collect::<Vec<_>>();
   roots.sort();
@@ -325,78 +299,4 @@ fn render_locked_tree_node(
     render_locked_tree_node(by_id, &dep, depth + 1, stack_guard, lines);
   }
   stack_guard.remove(id);
-}
-
-#[derive(Debug, Clone)]
-struct ProvenanceOverlay {
-  metadata_source: Option<String>,
-  package_manifest_digest: Option<String>,
-  declared_deps_source: Option<String>,
-}
-
-fn load_fresh_lockfile_provenance_overlay(
-  cwd: &std::path::Path,
-  manifest_path: &std::path::Path,
-) -> Option<BTreeMap<String, ProvenanceOverlay>> {
-  let lockfile_path = cwd.join("joy.lock");
-  let lock = lockfile::Lockfile::load(&lockfile_path).ok()?;
-  let manifest_hash = lockfile::compute_manifest_hash(manifest_path).ok()?;
-  if lock.manifest_hash != manifest_hash {
-    return None;
-  }
-
-  Some(
-    lock
-      .packages
-      .into_iter()
-      .map(|pkg| {
-        (
-          pkg.id,
-          ProvenanceOverlay {
-            metadata_source: pkg.metadata_source,
-            package_manifest_digest: pkg.package_manifest_digest,
-            declared_deps_source: pkg.declared_deps_source,
-          },
-        )
-      })
-      .collect(),
-  )
-}
-
-fn map_resolver_error(err: resolver::ResolverError) -> JoyError {
-  let code = match &err {
-    resolver::ResolverError::Fetch { source, .. } if source.is_offline_cache_miss() => {
-      "offline_cache_miss"
-    },
-    resolver::ResolverError::Fetch { source, .. } if source.is_offline_network_disabled() => {
-      "offline_network_disabled"
-    },
-    resolver::ResolverError::Fetch { source, .. } if source.is_invalid_version_requirement() => {
-      "invalid_version_requirement"
-    },
-    resolver::ResolverError::Fetch { source, .. } if source.is_version_not_found() => {
-      "version_not_found"
-    },
-    resolver::ResolverError::RegistryLoad { source }
-      if source.is_offline_cache_miss() || source.is_not_configured() =>
-    {
-      if source.is_offline_cache_miss() { "offline_cache_miss" } else { "registry_not_configured" }
-    },
-    resolver::ResolverError::RegistryResolve { source, .. }
-      if source.is_package_not_found() || source.is_version_not_found() =>
-    {
-      if source.is_package_not_found() { "registry_package_not_found" } else { "version_not_found" }
-    },
-    resolver::ResolverError::RegistryResolve { source, .. }
-      if source.is_invalid_version_requirement() =>
-    {
-      "invalid_version_requirement"
-    },
-    resolver::ResolverError::RegistryLoad { .. }
-    | resolver::ResolverError::RegistryResolve { .. } => "registry_load_failed",
-    resolver::ResolverError::RegistryAliasUnsupported { .. } => "registry_alias_unsupported",
-    resolver::ResolverError::PackageMetadataMismatch { .. } => "package_metadata_mismatch",
-    _ => "dependency_resolve_failed",
-  };
-  JoyError::new("tree", code, err.to_string(), 1)
 }
