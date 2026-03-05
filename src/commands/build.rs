@@ -451,6 +451,12 @@ struct CompiledLockMetadata {
 }
 
 #[derive(Debug, Clone)]
+struct GenericLinkInference {
+  libs: Vec<String>,
+  linkage: Option<String>,
+}
+
+#[derive(Debug, Clone)]
 struct ResolvedDependencyStage {
   recipes: RecipeStore,
   resolved: resolver::ResolvedGraph,
@@ -487,10 +493,20 @@ fn materialize_dependencies(
   let resolved_stage = resolve_dependency_stage(command, manifest)?;
   let PrefetchedDependencyStage { all_by_key, build_by_key } =
     prefetch_dependency_stage(command, &resolved_stage)?;
-  let has_compiled = resolved_stage
-    .build_order_ids
-    .iter()
-    .any(|id| resolved_stage.resolved.package(id).is_some_and(|pkg| !pkg.header_only));
+  let has_compiled = resolved_stage.build_order_ids.iter().any(|id| {
+    let Some(pkg) = resolved_stage.resolved.package(id) else {
+      return false;
+    };
+    if !pkg.header_only {
+      return true;
+    }
+    if resolved_stage.recipes.get(&pkg.id).is_some() {
+      return false;
+    }
+    build_by_key
+      .get(&(pkg.id.to_string(), pkg.requested_rev.clone()))
+      .is_some_and(|fetched| is_generic_cmake_candidate(&fetched.source_dir))
+  });
   let (compiled_stage, discovered_toolchain) = if has_compiled {
     let discovered = match toolchain {
       Some(existing) => existing.clone(),
@@ -593,38 +609,6 @@ fn build_compiled_dependency_stage(
       .resolved
       .package(id)
       .expect("build_order_ids must correspond to resolved packages");
-    if pkg.header_only {
-      continue;
-    }
-
-    let Some(recipe) = resolved_stage.recipes.get(&pkg.id) else {
-      return Err(JoyError::new(
-        command,
-        "missing_recipe",
-        format!("compiled dependency `{}` requires a curated recipe", pkg.id),
-        1,
-      ));
-    };
-    let Some(cmake_recipe) = recipe.cmake.as_ref() else {
-      return Err(JoyError::new(
-        command,
-        "missing_cmake_metadata",
-        format!("recipe `{}` is missing `[cmake]` metadata", recipe.id),
-        1,
-      ));
-    };
-    let Some(link_recipe) = recipe.link.as_ref() else {
-      return Err(JoyError::new(
-        command,
-        "missing_link_metadata",
-        format!("recipe `{}` is missing `[link]` metadata", recipe.id),
-        1,
-      ));
-    };
-    if link_recipe.libs.is_empty() {
-      continue;
-    }
-
     let fetched = prefetched_for_build
       .remove(&(pkg.id.to_string(), pkg.requested_rev.clone()))
       .ok_or_else(|| {
@@ -635,16 +619,82 @@ fn build_compiled_dependency_stage(
           1,
         )
       })?;
+    let recipe = resolved_stage.recipes.get(&pkg.id);
+    let generic_cmake = recipe.is_none() && is_generic_cmake_candidate(&fetched.source_dir);
+    if pkg.header_only && !generic_cmake {
+      continue;
+    }
 
-    let recipe_file =
-      resolved_stage.recipes.root_dir().join("packages").join(format!("{}.toml", recipe.slug));
-    let recipe_contents = fs::read_to_string(&recipe_file)
-      .map_err(|err| JoyError::io(command, "reading recipe file", &recipe_file, &err))?;
-    let preferred_linkage = link_recipe.preferred_linkage.unwrap_or(RecipeLinkage::Static);
+    let (source_dir, configure_args, build_targets, header_roots, recipe_content_hash, link_libs) =
+      if let Some(recipe) = recipe {
+        let Some(cmake_recipe) = recipe.cmake.as_ref() else {
+          return Err(JoyError::new(
+            command,
+            "missing_cmake_metadata",
+            format!("recipe `{}` is missing `[cmake]` metadata", recipe.id),
+            1,
+          ));
+        };
+        let Some(link_recipe) = recipe.link.as_ref() else {
+          return Err(JoyError::new(
+            command,
+            "missing_link_metadata",
+            format!("recipe `{}` is missing `[link]` metadata", recipe.id),
+            1,
+          ));
+        };
+        if link_recipe.libs.is_empty() {
+          continue;
+        }
+
+        let recipe_file =
+          resolved_stage.recipes.root_dir().join("packages").join(format!("{}.toml", recipe.slug));
+        let recipe_contents = fs::read_to_string(&recipe_file)
+          .map_err(|err| JoyError::io(command, "reading recipe file", &recipe_file, &err))?;
+        let source_dir = if let Some(fetch) = recipe.fetch.as_ref() {
+          if fetch.subdir.trim().is_empty() {
+            fetched.source_dir.clone()
+          } else {
+            fetched.source_dir.join(&fetch.subdir)
+          }
+        } else {
+          fetched.source_dir.clone()
+        };
+        (
+          source_dir,
+          cmake_recipe.configure_args.clone(),
+          cmake_recipe.build_targets.clone(),
+          recipe.include_roots().to_vec(),
+          abi::hash_recipe_contents(&recipe_contents),
+          link_recipe.libs.clone(),
+        )
+      } else {
+        if !generic_cmake {
+          return Err(JoyError::new(
+            command,
+            "missing_recipe",
+            format!(
+              "compiled dependency `{}` requires a curated recipe or a top-level CMakeLists.txt",
+              pkg.id
+            ),
+            1,
+          ));
+        }
+        (
+          fetched.source_dir.clone(),
+          Vec::new(),
+          Vec::new(),
+          infer_header_roots_from_source_dir(&fetched.source_dir),
+          abi::hash_recipe_contents("generic-cmake-v1"),
+          Vec::new(),
+        )
+      };
+
+    let preferred_linkage = RecipeLinkage::Static;
     let abi_hash = abi::compute_abi_hash(&abi::AbiHashInput {
       package_id: pkg.id.to_string(),
       resolved_commit: pkg.resolved_commit.clone(),
-      recipe_content_hash: abi::hash_recipe_contents(&recipe_contents),
+      recipe_content_hash,
       compiler_kind: toolchain.compiler.kind.as_str().to_string(),
       compiler_version: toolchain.compiler.version.clone(),
       target_triple: target_triple_guess(toolchain.compiler.kind),
@@ -661,30 +711,13 @@ fn build_compiled_dependency_stage(
       },
       cxxflags: Vec::new(),
       ldflags: Vec::new(),
-      recipe_configure_args: cmake_recipe.configure_args.clone(),
+      recipe_configure_args: configure_args.clone(),
       env: Default::default(),
     });
-    stage.compiled_lock_metadata.insert(
-      pkg.id.to_string(),
-      CompiledLockMetadata {
-        abi_hash: abi_hash.clone(),
-        libs: link_recipe.libs.clone(),
-        linkage: Some(linkage_name(preferred_linkage)),
-      },
-    );
 
     let layout = cache
       .ensure_compiled_build_layout(&abi_hash)
       .map_err(|err| JoyError::new(command, "cache_setup_failed", err.to_string(), 1))?;
-    let source_dir = if let Some(fetch) = recipe.fetch.as_ref() {
-      if fetch.subdir.trim().is_empty() {
-        fetched.source_dir.clone()
-      } else {
-        fetched.source_dir.join(&fetch.subdir)
-      }
-    } else {
-      fetched.source_dir.clone()
-    };
 
     let cmake_result = cmake::build_into_cache(&cmake::CmakeBuildRequest {
       source_dir,
@@ -692,14 +725,28 @@ fn build_compiled_dependency_stage(
       profile,
       compiler_kind: toolchain.compiler.kind,
       compiler_path: toolchain.compiler.path.clone(),
-      configure_args: cmake_recipe.configure_args.clone(),
-      build_targets: cmake_recipe.build_targets.clone(),
-      header_roots: recipe.include_roots().to_vec(),
+      configure_args,
+      build_targets,
+      header_roots,
     })
     .map_err(|err| JoyError::new(command, "cmake_build_failed", err.to_string(), 1))?;
+    let inferred = if link_libs.is_empty() {
+      infer_generic_link_libraries(command, &layout.lib_dir, pkg.id.as_str())?
+    } else {
+      GenericLinkInference { libs: link_libs, linkage: Some(linkage_name(preferred_linkage)) }
+    };
     let lib_install =
-      linking::install_compiled_libraries(project_lib_dir, &layout.lib_dir, &link_recipe.libs)
+      linking::install_compiled_libraries(project_lib_dir, &layout.lib_dir, &inferred.libs)
         .map_err(|err| JoyError::new(command, "library_install_failed", err.to_string(), 1))?;
+
+    stage.compiled_lock_metadata.insert(
+      pkg.id.to_string(),
+      CompiledLockMetadata {
+        abi_hash: abi_hash.clone(),
+        libs: inferred.libs.clone(),
+        linkage: inferred.linkage,
+      },
+    );
 
     if !cmake_result.cache_hit {
       stage.built_packages.push(pkg.id.to_string());
@@ -1080,7 +1127,7 @@ fn assemble_lockfile_packages(
       metadata_source,
       package_manifest_digest,
       declared_deps_source,
-      header_only: pkg.header_only,
+      header_only: pkg.header_only && !compiled_lock_metadata.contains_key(pkg.id.as_str()),
       header_roots,
       deps: resolved.dependency_ids(pkg.id.as_str()).unwrap_or_default(),
       abi_hash,
@@ -1110,6 +1157,88 @@ fn infer_header_roots_from_source_dir(source_dir: &Path) -> Vec<String> {
   }
 
   roots
+}
+
+fn is_generic_cmake_candidate(source_dir: &Path) -> bool {
+  source_dir.join("CMakeLists.txt").is_file()
+}
+
+fn infer_generic_link_libraries(
+  command: &'static str,
+  cache_lib_dir: &Path,
+  package_id: &str,
+) -> Result<GenericLinkInference, JoyError> {
+  let mut libs = BTreeSet::<String>::new();
+  let mut saw_static = false;
+  let mut saw_shared = false;
+  let entries = fs::read_dir(cache_lib_dir).map_err(|err| {
+    JoyError::io(command, "reading cached library directory", cache_lib_dir, &err)
+  })?;
+  for entry in entries {
+    let entry =
+      entry.map_err(|err| JoyError::new(command, "library_install_failed", err.to_string(), 1))?;
+    let path = entry.path();
+    if !path.is_file() {
+      continue;
+    }
+    let Some(name) = path.file_name().and_then(|v| v.to_str()) else {
+      continue;
+    };
+    let Some((lib, shared)) = parse_generic_library_name(name) else {
+      continue;
+    };
+    libs.insert(lib);
+    if shared {
+      saw_shared = true;
+    } else {
+      saw_static = true;
+    }
+  }
+
+  if libs.is_empty() {
+    return Err(JoyError::new(
+      command,
+      "generic_cmake_no_libraries",
+      format!(
+        "generic CMake fallback built `{package_id}`, but no linkable libraries were discovered in `{}`",
+        cache_lib_dir.display()
+      ),
+      1,
+    ));
+  }
+
+  let linkage = match (saw_static, saw_shared) {
+    (true, false) => Some("static".to_string()),
+    (false, true) => Some("shared".to_string()),
+    _ => None,
+  };
+  Ok(GenericLinkInference { libs: libs.into_iter().collect(), linkage })
+}
+
+fn parse_generic_library_name(file_name: &str) -> Option<(String, bool)> {
+  if let Some(stem) = file_name.strip_prefix("lib").and_then(|s| s.strip_suffix(".a")) {
+    return (!stem.is_empty()).then(|| (stem.to_string(), false));
+  }
+  if let Some(stem) = file_name.strip_prefix("lib").and_then(|s| s.strip_suffix(".so")) {
+    return (!stem.is_empty()).then(|| (stem.to_string(), true));
+  }
+  if let Some(prefix) = file_name.strip_prefix("lib")
+    && let Some((stem, _rest)) = prefix.split_once(".so.")
+  {
+    return (!stem.is_empty()).then(|| (stem.to_string(), true));
+  }
+  if let Some(stem) = file_name.strip_prefix("lib").and_then(|s| s.strip_suffix(".dylib")) {
+    return (!stem.is_empty()).then(|| (stem.to_string(), true));
+  }
+  if let Some(stem) = file_name.strip_suffix(".dll") {
+    let normalized = stem.strip_prefix("lib").unwrap_or(stem);
+    return (!normalized.is_empty()).then(|| (normalized.to_string(), true));
+  }
+  if let Some(stem) = file_name.strip_suffix(".lib") {
+    let normalized = stem.strip_prefix("lib").unwrap_or(stem);
+    return (!normalized.is_empty()).then(|| (normalized.to_string(), false));
+  }
+  None
 }
 
 fn lockfile_metadata_provenance(
@@ -1536,4 +1665,35 @@ fn map_toolchain_error(command: &'static str, err: toolchain::ToolchainError) ->
     },
   };
   JoyError::new(command, code, message, 1)
+}
+
+#[cfg(test)]
+mod tests {
+  use std::fs;
+
+  use tempfile::TempDir;
+
+  use super::{infer_generic_link_libraries, parse_generic_library_name};
+
+  #[test]
+  fn parses_generic_library_names_from_common_artifacts() {
+    assert_eq!(parse_generic_library_name("libfmt.a"), Some(("fmt".to_string(), false)));
+    assert_eq!(parse_generic_library_name("libfmt.so"), Some(("fmt".to_string(), true)));
+    assert_eq!(parse_generic_library_name("libfmt.so.11"), Some(("fmt".to_string(), true)));
+    assert_eq!(parse_generic_library_name("libfmt.dylib"), Some(("fmt".to_string(), true)));
+    assert_eq!(parse_generic_library_name("fmt.lib"), Some(("fmt".to_string(), false)));
+    assert_eq!(parse_generic_library_name("fmt.dll"), Some(("fmt".to_string(), true)));
+    assert_eq!(parse_generic_library_name("README.md"), None);
+  }
+
+  #[test]
+  fn infers_generic_link_libraries_and_linkage() {
+    let temp = TempDir::new().expect("tempdir");
+    fs::write(temp.path().join("libfmt.a"), []).expect("libfmt");
+    fs::write(temp.path().join("libz.a"), []).expect("libz");
+    let inferred =
+      infer_generic_link_libraries("build", temp.path(), "acme/generic").expect("infer libraries");
+    assert_eq!(inferred.libs, vec!["fmt".to_string(), "z".to_string()]);
+    assert_eq!(inferred.linkage.as_deref(), Some("static"));
+  }
 }

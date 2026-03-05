@@ -345,6 +345,39 @@ target_include_directories(fmt PUBLIC ${CMAKE_CURRENT_SOURCE_DIR}/include)
   Some((remote_base, bare_repo, commit))
 }
 
+fn setup_local_github_remote_generic_cmake_fixture() -> Option<(TempDir, PathBuf, String)> {
+  if !git_is_available() {
+    eprintln!("skipping test: git is not available");
+    return None;
+  }
+
+  let remote_base = TempDir::new().expect("remote base");
+  let files = [
+    (
+      "include/gencmake/gencmake.h",
+      r#"#pragma once
+const char* joy_generic_message();
+"#,
+    ),
+    (
+      "gencmake.cpp",
+      r#"const char* joy_generic_message() { return "hello-from-generic-cmake"; }
+"#,
+    ),
+    (
+      "CMakeLists.txt",
+      r#"cmake_minimum_required(VERSION 3.16)
+project(gencmake LANGUAGES CXX)
+add_library(gencmake STATIC gencmake.cpp)
+target_include_directories(gencmake PUBLIC ${CMAKE_CURRENT_SOURCE_DIR}/include)
+"#,
+    ),
+  ];
+  let (bare_repo, commit) =
+    setup_local_github_remote_in_base(remote_base.path(), "acme/gencmake", &files)?;
+  Some((remote_base, bare_repo, commit))
+}
+
 fn run_git<const N: usize>(cwd: Option<&Path>, args: [&str; N]) -> std::io::Result<()> {
   let mut cmd = ProcessCommand::new("git");
   if let Some(dir) = cwd {
@@ -818,6 +851,93 @@ int main() {
   assert_eq!(run_payload["ok"], true);
   let stdout = run_payload["data"]["stdout"].as_str().expect("stdout string");
   assert_eq!(stdout.replace("\r\n", "\n"), "hello-from-fmt-fixture\n");
+}
+
+#[test]
+fn build_and_run_with_local_compiled_generic_cmake_dependency() {
+  if !compiled_build_tools_available_for_test() {
+    eprintln!("skipping test: compiler/ninja/cmake not available");
+    return;
+  }
+
+  let temp = TempDir::new().expect("tempdir");
+  init_project(&temp);
+  let Some((remote_base, _bare_repo, generic_commit)) =
+    setup_local_github_remote_generic_cmake_fixture()
+  else {
+    return;
+  };
+  let joy_home = temp.path().join("joy-home");
+
+  let mut add = cargo_bin_cmd!("joy");
+  add
+    .current_dir(temp.path())
+    .env("JOY_GITHUB_BASE", remote_base.path())
+    .env("JOY_HOME", &joy_home)
+    .args(["--json", "add", "acme/gencmake"])
+    .assert()
+    .success();
+
+  fs::write(
+    temp.path().join("src/main.cpp"),
+    r#"#include <gencmake/gencmake.h>
+#include <iostream>
+
+int main() {
+  std::cout << joy_generic_message() << std::endl;
+  return 0;
+}
+"#,
+  )
+  .expect("write main.cpp");
+
+  let mut build = cargo_bin_cmd!("joy");
+  let build_assert = build
+    .current_dir(temp.path())
+    .env("JOY_GITHUB_BASE", remote_base.path())
+    .env("JOY_HOME", &joy_home)
+    .args(["--json", "build"])
+    .assert()
+    .success();
+  let build_payload = json_stdout(&build_assert.get_output().stdout);
+  assert_eq!(build_payload["ok"], true);
+  assert!(
+    build_payload["data"]["link_libs"]
+      .as_array()
+      .expect("link_libs")
+      .iter()
+      .any(|v| v.as_str() == Some("gencmake"))
+  );
+  let lock = read_lockfile_toml(&temp);
+  let packages = lock["packages"].as_array().expect("packages array");
+  let generic_pkg = packages
+    .iter()
+    .find(|pkg| pkg.get("id").and_then(|v| v.as_str()) == Some("acme/gencmake"))
+    .expect("generic package in lockfile");
+  assert_eq!(generic_pkg["source"].as_str(), Some("github"));
+  assert_eq!(generic_pkg["resolved_commit"].as_str(), Some(generic_commit.as_str()));
+  assert!(generic_pkg.get("recipe").is_none());
+  assert_eq!(generic_pkg["header_only"].as_bool(), Some(false));
+  assert!(
+    generic_pkg["libs"]
+      .as_array()
+      .expect("libs array")
+      .iter()
+      .any(|v| v.as_str() == Some("gencmake"))
+  );
+
+  let mut run = cargo_bin_cmd!("joy");
+  let run_assert = run
+    .current_dir(temp.path())
+    .env("JOY_GITHUB_BASE", remote_base.path())
+    .env("JOY_HOME", &joy_home)
+    .args(["--json", "run"])
+    .assert()
+    .success();
+  let run_payload = json_stdout(&run_assert.get_output().stdout);
+  assert_eq!(run_payload["ok"], true);
+  let stdout = run_payload["data"]["stdout"].as_str().expect("stdout string");
+  assert_eq!(stdout.replace("\r\n", "\n"), "hello-from-generic-cmake\n");
 }
 
 #[test]
@@ -2318,11 +2438,13 @@ fn outdated_source_filter_can_exclude_github_without_registry_config() {
   else {
     return;
   };
+  let joy_home = temp.path().join("joy-home");
 
   let mut add = cargo_bin_cmd!("joy");
   add
     .current_dir(temp.path())
     .env("JOY_GITHUB_BASE", remote_base.path())
+    .env("JOY_HOME", &joy_home)
     .args(["add", "harnesslabs/igneous"])
     .assert()
     .success();
@@ -2331,6 +2453,7 @@ fn outdated_source_filter_can_exclude_github_without_registry_config() {
   let assert = outdated
     .current_dir(temp.path())
     .env("JOY_GITHUB_BASE", remote_base.path())
+    .env("JOY_HOME", &joy_home)
     .args(["--json", "outdated", "--sources", "registry"])
     .assert()
     .success();
