@@ -1065,6 +1065,10 @@ fn assemble_lockfile_packages(
     packages.push(lockfile::LockedPackage {
       id: pkg.id.to_string(),
       source: dependency_source_name(&pkg.source).to_string(),
+      source_git: None,
+      source_path: None,
+      source_url: None,
+      source_checksum_sha256: None,
       registry: pkg.registry.clone(),
       source_package: pkg.source_package.clone(),
       requested_rev: pkg.requested_rev.clone(),
@@ -1136,6 +1140,9 @@ fn dependency_source_name(source: &crate::manifest::DependencySource) -> &'stati
   match source {
     crate::manifest::DependencySource::Github => "github",
     crate::manifest::DependencySource::Registry => "registry",
+    crate::manifest::DependencySource::Git => "git",
+    crate::manifest::DependencySource::Path => "path",
+    crate::manifest::DependencySource::Archive => "archive",
   }
 }
 

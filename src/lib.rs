@@ -19,6 +19,7 @@ pub mod lockfile;
 pub mod manifest;
 pub mod ninja;
 pub mod output;
+pub mod package_coordinate;
 pub mod package_id;
 pub mod project_env;
 mod project_probe;

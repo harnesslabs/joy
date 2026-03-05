@@ -127,7 +127,12 @@ libs = ["leaf"]
   let mut deps = BTreeMap::new();
   deps.insert(
     "demo/root".to_string(),
-    DependencySpec { source: DependencySource::Github, rev: "HEAD".to_string(), version: None },
+    DependencySpec {
+      source: DependencySource::Github,
+      rev: "HEAD".to_string(),
+      version: None,
+      ..DependencySpec::default()
+    },
   );
   let manifest = Manifest {
     project: ProjectSection {

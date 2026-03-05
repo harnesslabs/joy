@@ -75,6 +75,7 @@ pub(crate) fn map_resolver_error(command: &'static str, err: resolver::ResolverE
     | resolver::ResolverError::RegistryResolve { .. } => "registry_load_failed",
     resolver::ResolverError::RegistryAliasUnsupported { .. } => "registry_alias_unsupported",
     resolver::ResolverError::PackageMetadataMismatch { .. } => "package_metadata_mismatch",
+    resolver::ResolverError::UnsupportedSource { .. } => "source_backend_unsupported",
     _ => "dependency_resolve_failed",
   };
   JoyError::new(command, code, err.to_string(), 1)
@@ -201,6 +202,10 @@ entry = "src/main.cpp"
       packages: vec![LockedPackage {
         id: "nlohmann/json".into(),
         source: "github".into(),
+        source_git: None,
+        source_path: None,
+        source_url: None,
+        source_checksum_sha256: None,
         registry: None,
         source_package: None,
         requested_rev: "HEAD".into(),

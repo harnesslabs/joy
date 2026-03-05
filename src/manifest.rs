@@ -104,10 +104,22 @@ pub struct ProjectTarget {
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
 pub struct DependencySpec {
   pub source: DependencySource,
+  #[serde(default, skip_serializing_if = "Option::is_none")]
+  pub package: Option<String>,
   #[serde(default, skip_serializing_if = "String::is_empty")]
   pub rev: String,
   #[serde(default, skip_serializing_if = "Option::is_none")]
   pub version: Option<String>,
+  #[serde(default, skip_serializing_if = "Option::is_none")]
+  pub registry: Option<String>,
+  #[serde(default, skip_serializing_if = "Option::is_none")]
+  pub git: Option<String>,
+  #[serde(default, skip_serializing_if = "Option::is_none")]
+  pub path: Option<String>,
+  #[serde(default, skip_serializing_if = "Option::is_none")]
+  pub url: Option<String>,
+  #[serde(default, skip_serializing_if = "Option::is_none")]
+  pub sha256: Option<String>,
 }
 
 /// Supported dependency source backends for direct manifest entries.
@@ -116,6 +128,47 @@ pub struct DependencySpec {
 pub enum DependencySource {
   Github,
   Registry,
+  Git,
+  Path,
+  Archive,
+}
+
+impl DependencySource {
+  pub fn as_str(&self) -> &'static str {
+    match self {
+      Self::Github => "github",
+      Self::Registry => "registry",
+      Self::Git => "git",
+      Self::Path => "path",
+      Self::Archive => "archive",
+    }
+  }
+
+  pub fn requires_canonical_package_id(&self) -> bool {
+    matches!(self, Self::Github | Self::Registry)
+  }
+}
+
+impl Default for DependencySpec {
+  fn default() -> Self {
+    Self {
+      source: DependencySource::Github,
+      package: None,
+      rev: String::new(),
+      version: None,
+      registry: None,
+      git: None,
+      path: None,
+      url: None,
+      sha256: None,
+    }
+  }
+}
+
+impl DependencySpec {
+  pub fn declared_package<'a>(&'a self, key: &'a str) -> &'a str {
+    self.package.as_deref().unwrap_or(key)
+  }
 }
 
 impl Manifest {
@@ -164,6 +217,19 @@ impl Manifest {
     self.dependencies.remove(package)
   }
 
+  /// Resolve a dependency selector to the manifest key.
+  ///
+  /// The selector may match either the table key or `dependencies.<key>.package`.
+  pub fn resolve_dependency_key(&self, selector: &str) -> Option<String> {
+    if self.dependencies.contains_key(selector) {
+      return Some(selector.to_string());
+    }
+    self
+      .dependencies
+      .iter()
+      .find_map(|(key, spec)| (spec.package.as_deref() == Some(selector)).then(|| key.clone()))
+  }
+
   fn validate(&self) -> Result<(), ManifestError> {
     if self.project.name.trim().is_empty() {
       return Err(ManifestError::Validation("project.name must not be empty".into()));
@@ -182,23 +248,7 @@ impl Manifest {
       ));
     }
     for (id, spec) in &self.dependencies {
-      let has_rev = !spec.rev.trim().is_empty();
-      let has_version = spec.version.as_deref().is_some_and(|v| !v.trim().is_empty());
-      if has_rev && has_version {
-        return Err(ManifestError::Validation(format!(
-          "dependency `{id}` cannot set both `rev` and `version`"
-        )));
-      }
-      if !has_rev && !has_version {
-        return Err(ManifestError::Validation(format!(
-          "dependency `{id}` must set either `rev` or `version`"
-        )));
-      }
-      if matches!(spec.source, DependencySource::Registry) && has_rev {
-        return Err(ManifestError::Validation(format!(
-          "dependency `{id}` uses source `registry` and must set `version` instead of `rev`"
-        )));
-      }
+      validate_dependency_spec(id, spec)?;
     }
     let mut target_names = std::collections::BTreeSet::new();
     for target in &self.project.targets {
@@ -300,23 +350,7 @@ impl PackageManifest {
       ));
     }
     for (id, spec) in &self.dependencies {
-      let has_rev = !spec.rev.trim().is_empty();
-      let has_version = spec.version.as_deref().is_some_and(|v| !v.trim().is_empty());
-      if has_rev && has_version {
-        return Err(ManifestError::Validation(format!(
-          "dependency `{id}` cannot set both `rev` and `version`"
-        )));
-      }
-      if !has_rev && !has_version {
-        return Err(ManifestError::Validation(format!(
-          "dependency `{id}` must set either `rev` or `version`"
-        )));
-      }
-      if matches!(spec.source, DependencySource::Registry) && has_rev {
-        return Err(ManifestError::Validation(format!(
-          "dependency `{id}` uses source `registry` and must set `version` instead of `rev`"
-        )));
-      }
+      validate_dependency_spec(id, spec)?;
     }
     Ok(())
   }
@@ -327,10 +361,19 @@ impl PackageManifest {
     package: &str,
   ) -> Option<DependencyRequirementRef<'a>> {
     let spec = self.dependencies.get(package)?;
+    if !matches!(
+      spec.source,
+      DependencySource::Github | DependencySource::Registry | DependencySource::Git
+    ) {
+      return None;
+    }
     if let Some(version) = spec.version.as_deref()
       && !version.trim().is_empty()
     {
       return Some(DependencyRequirementRef::Version(version));
+    }
+    if matches!(spec.source, DependencySource::Git) && spec.rev.trim().is_empty() {
+      return None;
     }
     Some(DependencyRequirementRef::Rev(if spec.rev.trim().is_empty() { "HEAD" } else { &spec.rev }))
   }
@@ -401,13 +444,170 @@ impl Manifest {
     package: &str,
   ) -> Option<DependencyRequirementRef<'a>> {
     let spec = self.dependencies.get(package)?;
+    if !matches!(
+      spec.source,
+      DependencySource::Github | DependencySource::Registry | DependencySource::Git
+    ) {
+      return None;
+    }
     if let Some(version) = spec.version.as_deref()
       && !version.trim().is_empty()
     {
       return Some(DependencyRequirementRef::Version(version));
     }
+    if matches!(spec.source, DependencySource::Git) && spec.rev.trim().is_empty() {
+      return None;
+    }
     Some(DependencyRequirementRef::Rev(if spec.rev.trim().is_empty() { "HEAD" } else { &spec.rev }))
   }
+}
+
+fn validate_dependency_spec(id: &str, spec: &DependencySpec) -> Result<(), ManifestError> {
+  let has_rev = !spec.rev.trim().is_empty();
+  let has_version = spec.version.as_deref().is_some_and(|v| !v.trim().is_empty());
+  let has_registry = spec.registry.as_deref().is_some_and(|v| !v.trim().is_empty());
+  let has_git = spec.git.as_deref().is_some_and(|v| !v.trim().is_empty());
+  let has_path = spec.path.as_deref().is_some_and(|v| !v.trim().is_empty());
+  let has_url = spec.url.as_deref().is_some_and(|v| !v.trim().is_empty());
+  let has_sha256 = spec.sha256.as_deref().is_some_and(|v| !v.trim().is_empty());
+
+  if spec.package.as_deref().is_some_and(|v| v.trim().is_empty()) {
+    return Err(ManifestError::Validation(format!(
+      "dependency `{id}` has empty `package`; omit it or set a non-empty package coordinate"
+    )));
+  }
+  if spec.registry.as_deref().is_some_and(|v| v.trim().is_empty()) {
+    return Err(ManifestError::Validation(format!(
+      "dependency `{id}` has empty `registry`; omit it or set a non-empty registry name"
+    )));
+  }
+  if spec.git.as_deref().is_some_and(|v| v.trim().is_empty()) {
+    return Err(ManifestError::Validation(format!(
+      "dependency `{id}` has empty `git`; omit it or set a non-empty URL/path"
+    )));
+  }
+  if spec.path.as_deref().is_some_and(|v| v.trim().is_empty()) {
+    return Err(ManifestError::Validation(format!(
+      "dependency `{id}` has empty `path`; omit it or set a non-empty path"
+    )));
+  }
+  if spec.url.as_deref().is_some_and(|v| v.trim().is_empty()) {
+    return Err(ManifestError::Validation(format!(
+      "dependency `{id}` has empty `url`; omit it or set a non-empty archive URL"
+    )));
+  }
+  if spec.sha256.as_deref().is_some_and(|v| v.trim().is_empty()) {
+    return Err(ManifestError::Validation(format!(
+      "dependency `{id}` has empty `sha256`; omit it or set a non-empty checksum"
+    )));
+  }
+
+  match spec.source {
+    DependencySource::Github => {
+      if has_rev && has_version {
+        return Err(ManifestError::Validation(format!(
+          "dependency `{id}` cannot set both `rev` and `version`"
+        )));
+      }
+      if !has_rev && !has_version {
+        return Err(ManifestError::Validation(format!(
+          "dependency `{id}` must set either `rev` or `version`"
+        )));
+      }
+      if has_registry || has_git || has_path || has_url || has_sha256 {
+        return Err(ManifestError::Validation(format!(
+          "dependency `{id}` uses source `github`; only `package`, `rev`, and `version` are supported"
+        )));
+      }
+      let declared = spec.declared_package(id);
+      let _ = PackageId::parse(declared).map_err(|err| {
+        ManifestError::Validation(format!(
+          "dependency `{id}` has invalid github package `{declared}`: {err}"
+        ))
+      })?;
+    },
+    DependencySource::Registry => {
+      if has_rev {
+        return Err(ManifestError::Validation(format!(
+          "dependency `{id}` uses source `registry` and must set `version` instead of `rev`"
+        )));
+      }
+      if !has_version {
+        return Err(ManifestError::Validation(format!(
+          "dependency `{id}` uses source `registry` and must set `version`"
+        )));
+      }
+      if has_git || has_path || has_url || has_sha256 {
+        return Err(ManifestError::Validation(format!(
+          "dependency `{id}` uses source `registry`; only `package`, `registry`, and `version` are supported"
+        )));
+      }
+      let declared = spec.declared_package(id);
+      let _ = PackageId::parse(declared).map_err(|err| {
+        ManifestError::Validation(format!(
+          "dependency `{id}` has invalid registry package `{declared}`: {err}"
+        ))
+      })?;
+    },
+    DependencySource::Git => {
+      if has_version {
+        return Err(ManifestError::Validation(format!(
+          "dependency `{id}` uses source `git` and does not support `version`; use `rev`"
+        )));
+      }
+      if !has_rev {
+        return Err(ManifestError::Validation(format!(
+          "dependency `{id}` uses source `git` and must set `rev`"
+        )));
+      }
+      if !has_git {
+        return Err(ManifestError::Validation(format!(
+          "dependency `{id}` uses source `git` and must set `git = \"...\"`"
+        )));
+      }
+      if has_registry || has_path || has_url || has_sha256 {
+        return Err(ManifestError::Validation(format!(
+          "dependency `{id}` uses source `git`; only `package`, `git`, and `rev` are supported"
+        )));
+      }
+    },
+    DependencySource::Path => {
+      if has_rev || has_version {
+        return Err(ManifestError::Validation(format!(
+          "dependency `{id}` uses source `path` and cannot set `rev` or `version`"
+        )));
+      }
+      if !has_path {
+        return Err(ManifestError::Validation(format!(
+          "dependency `{id}` uses source `path` and must set `path = \"...\"`"
+        )));
+      }
+      if has_registry || has_git || has_url || has_sha256 {
+        return Err(ManifestError::Validation(format!(
+          "dependency `{id}` uses source `path`; only `package` and `path` are supported"
+        )));
+      }
+    },
+    DependencySource::Archive => {
+      if has_rev || has_version {
+        return Err(ManifestError::Validation(format!(
+          "dependency `{id}` uses source `archive` and cannot set `rev` or `version`"
+        )));
+      }
+      if !has_url || !has_sha256 {
+        return Err(ManifestError::Validation(format!(
+          "dependency `{id}` uses source `archive` and must set both `url` and `sha256`"
+        )));
+      }
+      if has_registry || has_git || has_path {
+        return Err(ManifestError::Validation(format!(
+          "dependency `{id}` uses source `archive`; only `package`, `url`, and `sha256` are supported"
+        )));
+      }
+    },
+  }
+
+  Ok(())
 }
 
 /// Borrowed dependency requirement view used by resolver/commands.
@@ -476,7 +676,12 @@ mod tests {
     };
     manifest.dependencies.insert(
       "nlohmann/json".into(),
-      DependencySpec { source: DependencySource::Github, rev: "HEAD".into(), version: None },
+      DependencySpec {
+        source: DependencySource::Github,
+        rev: "HEAD".into(),
+        version: None,
+        ..DependencySpec::default()
+      },
     );
 
     let raw = toml::to_string_pretty(&manifest).expect("serialize");
@@ -585,13 +790,24 @@ include_roots = ["include"]
           "xsimd/xsimd".into(),
           DependencySpec {
             source: DependencySource::Registry,
+            package: None,
             rev: String::new(),
             version: Some("^13".into()),
+            registry: None,
+            git: None,
+            path: None,
+            url: None,
+            sha256: None,
           },
         ),
         (
           "nlohmann/json".into(),
-          DependencySpec { source: DependencySource::Github, rev: "HEAD".into(), version: None },
+          DependencySpec {
+            source: DependencySource::Github,
+            rev: "HEAD".into(),
+            version: None,
+            ..DependencySpec::default()
+          },
         ),
       ]),
     };
@@ -652,13 +868,24 @@ include_roots = ["include"]
           "fmtlib/fmt".into(),
           DependencySpec {
             source: DependencySource::Github,
+            package: None,
             rev: String::new(),
             version: Some("^11".into()),
+            registry: None,
+            git: None,
+            path: None,
+            url: None,
+            sha256: None,
           },
         ),
         (
           "nlohmann/json".into(),
-          DependencySpec { source: DependencySource::Github, rev: "HEAD".into(), version: None },
+          DependencySpec {
+            source: DependencySource::Github,
+            rev: "HEAD".into(),
+            version: None,
+            ..DependencySpec::default()
+          },
         ),
       ]),
     };

@@ -338,6 +338,10 @@ entry = "src/main.cpp"
         LockedPackage {
           id: "demo/one".into(),
           source: "github".into(),
+          source_git: None,
+          source_path: None,
+          source_url: None,
+          source_checksum_sha256: None,
           registry: None,
           source_package: None,
           requested_rev: "HEAD".into(),
@@ -359,6 +363,10 @@ entry = "src/main.cpp"
         LockedPackage {
           id: "demo/two".into(),
           source: "github".into(),
+          source_git: None,
+          source_path: None,
+          source_url: None,
+          source_checksum_sha256: None,
           registry: None,
           source_package: None,
           requested_rev: "HEAD".into(),

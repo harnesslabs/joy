@@ -23,6 +23,14 @@ pub struct LockedPackage {
   pub id: String,
   pub source: String,
   #[serde(default)]
+  pub source_git: Option<String>,
+  #[serde(default)]
+  pub source_path: Option<String>,
+  #[serde(default)]
+  pub source_url: Option<String>,
+  #[serde(default)]
+  pub source_checksum_sha256: Option<String>,
+  #[serde(default)]
   pub registry: Option<String>,
   #[serde(default)]
   pub source_package: Option<String>,
@@ -145,6 +153,10 @@ mod tests {
       packages: vec![LockedPackage {
         id: "nlohmann/json".into(),
         source: "github".into(),
+        source_git: None,
+        source_path: None,
+        source_url: None,
+        source_checksum_sha256: None,
         registry: None,
         source_package: None,
         requested_rev: "HEAD".into(),
