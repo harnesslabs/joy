@@ -101,6 +101,11 @@ fn doctor_json_reports_environment_checks() {
   assert!(payload["data"]["artifacts"].is_object() || payload["data"]["artifacts"].is_null());
   assert!(payload["data"]["lockfile"].is_object() || payload["data"]["lockfile"].is_null());
   assert!(payload["data"]["dependency_metadata"].is_object());
+  assert!(payload["data"]["editor_extension_gate"].is_object());
+  assert_eq!(
+    payload["data"]["editor_extension_gate"]["strategy"].as_str(),
+    Some("cli_compile_db_first")
+  );
   assert!(payload["data"]["project_warnings"].is_array());
   assert!(payload["data"]["project_hints"].is_array());
 }
@@ -113,6 +118,7 @@ fn doctor_human_output_is_sectioned() {
   assert!(stdout.contains("Doctor "));
   assert!(stdout.contains("Summary"));
   assert!(stdout.contains("Tools"));
+  assert!(stdout.contains("Editor Gate"));
   assert!(stdout.contains("- git:"));
 }
 

@@ -69,9 +69,9 @@ pub fn handle(_args: DoctorArgs) -> Result<CommandOutput, JoyError> {
     }),
   };
 
-  let project_json = inspect_project_context();
-
   let toolchain_ok = toolchain_result.is_ok();
+  let project_json = inspect_project_context();
+  let editor_gate = assess_editor_extension_gate(&project_json, toolchain_ok);
   let cache_ok = cache_json.get("ok").and_then(|v| v.as_bool()).unwrap_or(false);
   let recipes_ok = recipes_json.get("ok").and_then(|v| v.as_bool()).unwrap_or(false);
   let project_ok = project_json.get("ok").and_then(|v| v.as_bool()).unwrap_or(true);
@@ -190,6 +190,32 @@ pub fn handle(_args: DoctorArgs) -> Result<CommandOutput, JoyError> {
         );
     }
   }
+  human_builder = human_builder
+    .line("Editor Gate")
+    .kv(
+      "strategy",
+      editor_gate
+        .get("strategy")
+        .and_then(|v| v.as_str())
+        .unwrap_or("cli_compile_db_first")
+        .to_string(),
+    )
+    .kv(
+      "score",
+      format!(
+        "{}/{}",
+        editor_gate.get("criteria_passed").and_then(|v| v.as_u64()).unwrap_or_default(),
+        editor_gate.get("criteria_total").and_then(|v| v.as_u64()).unwrap_or_default()
+      ),
+    )
+    .kv(
+      "extension recommendation",
+      if editor_gate.get("extension_recommended").and_then(|v| v.as_bool()).unwrap_or(false) {
+        "consider extension".to_string()
+      } else {
+        "defer (CLI-first)".to_string()
+      },
+    );
 
   if !git_status.ok {
     human_builder =
@@ -216,6 +242,20 @@ pub fn handle(_args: DoctorArgs) -> Result<CommandOutput, JoyError> {
     human_builder = human_builder
       .warning(format!("Bundled recipes failed to load: {recipes_err}"))
       .hint("Reinstall `joy` or verify the bundled `recipes/` directory is intact");
+  }
+  if editor_gate.get("extension_recommended").and_then(|v| v.as_bool()).unwrap_or(false) {
+    let reason = editor_gate
+      .get("reason")
+      .and_then(|v| v.as_str())
+      .unwrap_or("editor usability gate criteria failed");
+    human_builder =
+      human_builder.warning(format!("Editor extension gate triggered: {reason}")).hint(
+        editor_gate
+          .get("next_action")
+          .and_then(|v| v.as_str())
+          .unwrap_or("verify compile DB generation flow and consider extension scaffolding")
+          .to_string(),
+      );
   }
 
   if let Some(project_warnings) = project_json.get("warnings").and_then(|v| v.as_array()) {
@@ -266,10 +306,74 @@ pub fn handle(_args: DoctorArgs) -> Result<CommandOutput, JoyError> {
         .get("dependency_metadata")
         .cloned()
         .unwrap_or(json!({"present": false})),
+      "editor_extension_gate": editor_gate,
       "project_warnings": project_json.get("warnings").cloned().unwrap_or(json!([])),
       "project_hints": project_json.get("hints").cloned().unwrap_or(json!([])),
     }),
   ))
+}
+
+fn assess_editor_extension_gate(project_json: &Value, toolchain_ready: bool) -> Value {
+  let project_has_dependencies = project_json
+    .get("project")
+    .and_then(|v| v.get("direct_dependency_count"))
+    .and_then(|v| v.as_u64())
+    .is_some_and(|count| count > 0);
+  let graph_ready = project_json
+    .get("artifacts")
+    .and_then(|v| v.get("dependency_graph"))
+    .and_then(|v| v.get("present"))
+    .and_then(|v| v.as_bool())
+    .unwrap_or(false);
+  let compile_db_ready = project_json
+    .get("artifacts")
+    .and_then(|v| v.get("root_compile_commands"))
+    .and_then(|v| v.get("present"))
+    .and_then(|v| v.as_bool())
+    .unwrap_or(false);
+  let lockfile_ready = project_json
+    .get("lockfile")
+    .and_then(|v| v.get("present"))
+    .and_then(|v| v.as_bool())
+    .unwrap_or(false)
+    && project_json.get("lockfile").and_then(|v| v.get("parse_error")).is_some_and(|v| v.is_null());
+  let criteria_total = 4u64;
+  let criteria_passed =
+    [project_has_dependencies, toolchain_ready, graph_ready && lockfile_ready, compile_db_ready]
+      .into_iter()
+      .filter(|value| *value)
+      .count() as u64;
+  let extension_recommended = project_has_dependencies
+    && toolchain_ready
+    && graph_ready
+    && lockfile_ready
+    && !compile_db_ready;
+  let (reason, next_action) = if extension_recommended {
+    (
+      "project dependency graph is healthy but compile_commands.json is still missing",
+      "run `joy sync`/`joy build` once more; if compile DB remains absent, extension work is justified",
+    )
+  } else if !project_has_dependencies {
+    ("project has no declared dependencies", "extension remains deferred")
+  } else if !toolchain_ready {
+    ("toolchain is not ready, so editor telemetry is incomplete", "install compiler+ninja first")
+  } else {
+    ("CLI + compile database path has not failed objective gates", "continue CLI-first workflow")
+  };
+  json!({
+    "enabled_by_default": false,
+    "strategy": "cli_compile_db_first",
+    "project_has_dependencies": project_has_dependencies,
+    "toolchain_ready": toolchain_ready,
+    "graph_ready": graph_ready,
+    "compile_db_ready": compile_db_ready,
+    "lockfile_ready": lockfile_ready,
+    "criteria_total": criteria_total,
+    "criteria_passed": criteria_passed,
+    "extension_recommended": extension_recommended,
+    "reason": reason,
+    "next_action": next_action,
+  })
 }
 
 fn inspect_project_context() -> Value {

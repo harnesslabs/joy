@@ -1322,6 +1322,7 @@ fn metadata_and_why_and_tree_locked_use_graph_and_lockfile_state() {
   assert_eq!(metadata_payload["command"], "metadata");
   assert_eq!(metadata_payload["data"]["artifacts"]["graph_present"], true);
   assert_eq!(metadata_payload["data"]["lockfile"]["present"], true);
+  assert!(metadata_payload["data"]["editor_extension_gate"].is_object());
   let graph_packages =
     metadata_payload["data"]["graph"]["packages"].as_array().expect("graph packages");
   assert!(
@@ -1524,6 +1525,11 @@ fn doctor_reports_missing_graph_and_compile_db_for_project_with_dependencies() {
   assert_eq!(payload["data"]["project"]["direct_dependency_count"], 1);
   assert_eq!(payload["data"]["artifacts"]["dependency_graph"]["present"], false);
   assert_eq!(payload["data"]["artifacts"]["root_compile_commands"]["present"], false);
+  assert!(payload["data"]["editor_extension_gate"].is_object());
+  assert_eq!(
+    payload["data"]["editor_extension_gate"]["strategy"].as_str(),
+    Some("cli_compile_db_first")
+  );
   assert!(
     payload["data"]["project_warnings"]
       .as_array()
