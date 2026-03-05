@@ -19,6 +19,7 @@ pub mod sync;
 pub mod tree;
 pub mod update;
 pub mod vendor;
+pub mod verify;
 pub mod version;
 pub mod why;
 
@@ -97,6 +98,9 @@ pub fn dispatch(command: Commands, runtime: RuntimeFlags) -> Result<CommandOutpu
     },
     Commands::Vendor(args) => {
       dispatch_project_scoped("vendor", runtime, |runtime| vendor::handle(args, runtime))
+    },
+    Commands::Verify(args) => {
+      dispatch_project_scoped("verify", runtime, |runtime| verify::handle(args, runtime))
     },
     Commands::Cache(args) => cache::handle(args),
     Commands::Metadata(args) => {

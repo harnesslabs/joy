@@ -3130,3 +3130,84 @@ profile = "release"
   assert_eq!(payload["data"]["workspace_member"], "apps/app");
   assert_eq!(payload["data"]["profile"], "release");
 }
+
+#[test]
+fn verify_emits_sbom_and_reports_non_failing_advisories() {
+  let temp = TempDir::new().expect("tempdir");
+  init_project(&temp);
+  let Some((remote_base, _bare_repo, _commit)) = setup_local_github_remote("nlohmann/json") else {
+    return;
+  };
+  let joy_home = temp.path().join("joy-home");
+
+  let mut add = cargo_bin_cmd!("joy");
+  add
+    .current_dir(temp.path())
+    .env("JOY_GITHUB_BASE", remote_base.path())
+    .env("JOY_HOME", &joy_home)
+    .args(["add", "nlohmann/json"])
+    .assert()
+    .success();
+
+  let mut verify = cargo_bin_cmd!("joy");
+  let assert = verify
+    .current_dir(temp.path())
+    .env("JOY_GITHUB_BASE", remote_base.path())
+    .env("JOY_HOME", &joy_home)
+    .args(["--json", "verify", "--sbom", "sbom.json"])
+    .assert()
+    .success();
+  let payload = json_stdout(&assert.get_output().stdout);
+  assert_eq!(payload["command"], "verify");
+  assert_eq!(payload["data"]["summary"]["package_count"], 1);
+  assert_eq!(payload["data"]["summary"]["failed_count"], 0);
+  let sbom_path = payload["data"]["sbom_path"].as_str().expect("sbom path");
+  assert!(Path::new(sbom_path).is_file(), "expected verify to write SBOM file at {sbom_path}");
+}
+
+#[test]
+fn verify_fails_on_lockfile_checksum_mismatch() {
+  let temp = TempDir::new().expect("tempdir");
+  init_project(&temp);
+  let Some((remote_base, _bare_repo, _commit)) = setup_local_github_remote("nlohmann/json") else {
+    return;
+  };
+  let joy_home = temp.path().join("joy-home");
+
+  let mut add = cargo_bin_cmd!("joy");
+  add
+    .current_dir(temp.path())
+    .env("JOY_GITHUB_BASE", remote_base.path())
+    .env("JOY_HOME", &joy_home)
+    .args(["add", "nlohmann/json"])
+    .assert()
+    .success();
+
+  let mut lock = read_lockfile_toml(&temp);
+  let Some(packages) = lock.get_mut("packages").and_then(|v| v.as_array_mut()) else {
+    panic!("expected packages array in lockfile");
+  };
+  let Some(pkg) = packages.get_mut(0).and_then(|v| v.as_table_mut()) else {
+    panic!("expected first lockfile package table");
+  };
+  pkg.insert("source_checksum_sha256".into(), toml::Value::String("deadbeef".to_string()));
+  write_lockfile_toml(&temp, &lock);
+
+  let mut verify = cargo_bin_cmd!("joy");
+  let assert = verify
+    .current_dir(temp.path())
+    .env("JOY_GITHUB_BASE", remote_base.path())
+    .env("JOY_HOME", &joy_home)
+    .args(["--json", "verify"])
+    .assert()
+    .failure();
+  let payload = json_stdout(&assert.get_output().stdout);
+  assert_eq!(payload["command"], "verify");
+  assert_eq!(payload["error"]["code"], "verify_failed");
+  assert!(
+    payload["error"]["message"]
+      .as_str()
+      .is_some_and(|msg| msg.contains("source checksum mismatch")),
+    "expected checksum mismatch detail in verify failure message: {payload:?}"
+  );
+}

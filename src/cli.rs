@@ -309,6 +309,9 @@ pub enum Commands {
   Fetch(FetchArgs),
   /// Vendor dependencies into a project-local directory.
   Vendor(VendorArgs),
+  /// Verify lockfile/source integrity and emit a baseline SBOM summary.
+  #[command(after_help = "Examples:\n  joy verify\n  joy --json verify --strict --sbom sbom.json")]
+  Verify(VerifyArgs),
   /// Manage global cache lifecycle.
   Cache(CacheArgs),
   /// Emit machine-oriented project/dependency/editor metadata.
@@ -445,6 +448,16 @@ pub struct FetchArgs {}
 pub struct VendorArgs {
   #[arg(long)]
   pub output: Option<String>,
+}
+
+#[derive(Debug, Args)]
+pub struct VerifyArgs {
+  /// Require checksum coverage for every locked package.
+  #[arg(long)]
+  pub strict: bool,
+  /// Write generated SBOM JSON to this path.
+  #[arg(long)]
+  pub sbom: Option<String>,
 }
 
 #[derive(Debug, Args)]
@@ -819,6 +832,15 @@ mod tests {
         CacheSubcommand::Gc(gc) => assert!(gc.aggressive),
       },
       other => panic!("expected cache, got {other:?}"),
+    }
+
+    let verify = Cli::parse_from(["joy", "verify", "--strict", "--sbom", "sbom.json"]);
+    match verify.command {
+      Commands::Verify(args) => {
+        assert!(args.strict);
+        assert_eq!(args.sbom.as_deref(), Some("sbom.json"));
+      },
+      other => panic!("expected verify, got {other:?}"),
     }
   }
 
