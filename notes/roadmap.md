@@ -15,7 +15,7 @@ Phase 38-76 is archived and complete. The active roadmap wave is Phase 77-86: Ca
 - Phase 80 Universal resolver + lock provenance: in progress (additive lockfile fields + unsupported-source diagnostics; full provider backend support pending)
 - Phase 81 Generic compiled dependency support (CMake-first): completed (`1dab34d`)
 - Phase 82 Offline-first operations: in progress (`joy fetch`, `joy vendor`, `joy cache gc` implemented)
-- Phase 83 Workspace/profile parity: pending
+- Phase 83 Workspace/profile parity: completed (`98de2b1`)
 - Phase 84 Supply-chain hardening (`joy verify`, SBOM, signatures): pending
 - Phase 85 Self-hosted publishing workflow: pending
 - Phase 86 Usability closeout + editor gate: pending
