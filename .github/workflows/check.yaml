@@ -133,7 +133,20 @@ jobs:
       - name: Install MinGW (Windows GNU)
         if: runner.os == 'Windows' && endsWith(matrix.target, '-gnu')
         run: |
-          choco install mingw --version=12.2.0 -y
+          $ErrorActionPreference = 'Stop'
+          $maxAttempts = 4
+          for ($attempt = 1; $attempt -le $maxAttempts; $attempt++) {
+            choco install mingw --version=12.2.0 -y --no-progress
+            if ($LASTEXITCODE -eq 0) {
+              break
+            }
+            if ($attempt -eq $maxAttempts) {
+              throw "Failed to install mingw after $maxAttempts attempts."
+            }
+            $delaySeconds = 20 * $attempt
+            Write-Host "mingw install attempt $attempt/$maxAttempts failed (exit $LASTEXITCODE). Retrying in ${delaySeconds}s..."
+            Start-Sleep -Seconds $delaySeconds
+          }
           Import-Module "$env:ChocolateyInstall\helpers\chocolateyProfile.psm1"
           refreshenv
           echo "C:\ProgramData\chocolatey\lib\mingw\tools\install\mingw64\bin" | Out-File -FilePath $env:GITHUB_PATH -Encoding utf8 -Append
@@ -181,7 +194,20 @@ jobs:
       - name: Install MinGW (Windows GNU)
         if: runner.os == 'Windows' && endsWith(matrix.target, '-gnu')
         run: |
-          choco install mingw --version=12.2.0 -y
+          $ErrorActionPreference = 'Stop'
+          $maxAttempts = 4
+          for ($attempt = 1; $attempt -le $maxAttempts; $attempt++) {
+            choco install mingw --version=12.2.0 -y --no-progress
+            if ($LASTEXITCODE -eq 0) {
+              break
+            }
+            if ($attempt -eq $maxAttempts) {
+              throw "Failed to install mingw after $maxAttempts attempts."
+            }
+            $delaySeconds = 20 * $attempt
+            Write-Host "mingw install attempt $attempt/$maxAttempts failed (exit $LASTEXITCODE). Retrying in ${delaySeconds}s..."
+            Start-Sleep -Seconds $delaySeconds
+          }
           Import-Module "$env:ChocolateyInstall\helpers\chocolateyProfile.psm1"
           refreshenv
           echo "C:\ProgramData\chocolatey\lib\mingw\tools\install\mingw64\bin" | Out-File -FilePath $env:GITHUB_PATH -Encoding utf8 -Append
@@ -224,7 +250,20 @@ jobs:
       - name: Install MinGW (Windows GNU)
         if: runner.os == 'Windows' && endsWith(matrix.target, '-gnu')
         run: |
-          choco install mingw --version=12.2.0 -y
+          $ErrorActionPreference = 'Stop'
+          $maxAttempts = 4
+          for ($attempt = 1; $attempt -le $maxAttempts; $attempt++) {
+            choco install mingw --version=12.2.0 -y --no-progress
+            if ($LASTEXITCODE -eq 0) {
+              break
+            }
+            if ($attempt -eq $maxAttempts) {
+              throw "Failed to install mingw after $maxAttempts attempts."
+            }
+            $delaySeconds = 20 * $attempt
+            Write-Host "mingw install attempt $attempt/$maxAttempts failed (exit $LASTEXITCODE). Retrying in ${delaySeconds}s..."
+            Start-Sleep -Seconds $delaySeconds
+          }
           Import-Module "$env:ChocolateyInstall\helpers\chocolateyProfile.psm1"
           refreshenv
           echo "C:\ProgramData\chocolatey\lib\mingw\tools\install\mingw64\bin" | Out-File -FilePath $env:GITHUB_PATH -Encoding utf8 -Append
@@ -242,7 +281,20 @@ jobs:
       - name: Install CMake and Ninja (Windows)
         if: runner.os == 'Windows'
         run: |
-          choco install cmake ninja -y
+          $ErrorActionPreference = 'Stop'
+          $maxAttempts = 4
+          for ($attempt = 1; $attempt -le $maxAttempts; $attempt++) {
+            choco install cmake ninja -y --no-progress
+            if ($LASTEXITCODE -eq 0) {
+              break
+            }
+            if ($attempt -eq $maxAttempts) {
+              throw "Failed to install CMake/Ninja after $maxAttempts attempts."
+            }
+            $delaySeconds = 20 * $attempt
+            Write-Host "CMake/Ninja install attempt $attempt/$maxAttempts failed (exit $LASTEXITCODE). Retrying in ${delaySeconds}s..."
+            Start-Sleep -Seconds $delaySeconds
+          }
           Import-Module "$env:ChocolateyInstall\helpers\chocolateyProfile.psm1"
           refreshenv
 
@@ -281,7 +333,20 @@ jobs:
       - name: Install MinGW (Windows)
         if: runner.os == 'Windows'
         run: |
-          choco install mingw --version=12.2.0 -y
+          $ErrorActionPreference = 'Stop'
+          $maxAttempts = 4
+          for ($attempt = 1; $attempt -le $maxAttempts; $attempt++) {
+            choco install mingw --version=12.2.0 -y --no-progress
+            if ($LASTEXITCODE -eq 0) {
+              break
+            }
+            if ($attempt -eq $maxAttempts) {
+              throw "Failed to install mingw after $maxAttempts attempts."
+            }
+            $delaySeconds = 20 * $attempt
+            Write-Host "mingw install attempt $attempt/$maxAttempts failed (exit $LASTEXITCODE). Retrying in ${delaySeconds}s..."
+            Start-Sleep -Seconds $delaySeconds
+          }
           Import-Module "$env:ChocolateyInstall\helpers\chocolateyProfile.psm1"
           refreshenv
           echo "C:\ProgramData\chocolatey\lib\mingw\tools\install\mingw64\bin" | Out-File -FilePath $env:GITHUB_PATH -Encoding utf8 -Append
