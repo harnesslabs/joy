@@ -6,6 +6,16 @@ The format is based on Keep a Changelog and this project adheres to Semantic Ver
 
 ## [Unreleased]
 
+## [0.1.2](https://github.com/harnesslabs/joy/compare/v0.1.1...v0.1.2) - 2026-03-05
+
+### Fixed
+
+- *(release)* avoid same-file copy in github-release job ([#155](https://github.com/harnesslabs/joy/pull/155))
+
+### Other
+
+- deletion-first simplification pass ([#156](https://github.com/harnesslabs/joy/pull/156))
+
 ## [0.1.1](https://github.com/harnesslabs/joy/compare/v0.1.0...v0.1.1) - 2026-03-04
 
 ### Fixed
