@@ -294,6 +294,18 @@ pub enum Commands {
   /// Report available updates for direct and transitive dependencies.
   #[command(after_help = "Examples:\n  joy outdated\n  joy --json outdated")]
   Outdated(OutdatedArgs),
+  /// Manage registry configuration.
+  Registry(RegistryArgs),
+  /// Search package metadata in a configured registry.
+  Search(SearchArgs),
+  /// Show package metadata for a configured registry package.
+  Info(InfoArgs),
+  /// Warm dependency cache state without building.
+  Fetch(FetchArgs),
+  /// Vendor dependencies into a project-local directory.
+  Vendor(VendorArgs),
+  /// Manage global cache lifecycle.
+  Cache(CacheArgs),
   /// Emit machine-oriented project/dependency/editor metadata.
   #[command(after_help = "Examples:\n  joy metadata\n  joy --json metadata")]
   Metadata(MetadataArgs),
@@ -526,7 +538,10 @@ pub struct RunArgs {
 mod tests {
   use clap::Parser;
 
-  use super::{Cli, CliColorArg, CliGlyphsArg, CliProgressArg, Commands, OutdatedSourceArg};
+  use super::{
+    CacheSubcommand, Cli, CliColorArg, CliGlyphsArg, CliProgressArg, Commands, OutdatedSourceArg,
+    RegistrySubcommand,
+  };
 
   #[test]
   fn parses_version_command() {
@@ -717,6 +732,88 @@ mod tests {
     match cli.command {
       Commands::Metadata(_) => {},
       other => panic!("expected metadata, got {other:?}"),
+    }
+  }
+
+  #[test]
+  fn parses_registry_add_and_set_default_commands() {
+    let add = Cli::parse_from([
+      "joy",
+      "registry",
+      "add",
+      "corp",
+      "https://example.com/registry.git",
+      "--project",
+      "--default",
+    ]);
+    match add.command {
+      Commands::Registry(args) => match args.command {
+        RegistrySubcommand::Add(sub) => {
+          assert_eq!(sub.name, "corp");
+          assert_eq!(sub.index, "https://example.com/registry.git");
+          assert!(sub.project);
+          assert!(sub.default);
+        },
+        other => panic!("expected registry add, got {other:?}"),
+      },
+      other => panic!("expected registry, got {other:?}"),
+    }
+
+    let set_default = Cli::parse_from(["joy", "registry", "set-default", "corp"]);
+    match set_default.command {
+      Commands::Registry(args) => match args.command {
+        RegistrySubcommand::SetDefault(sub) => {
+          assert_eq!(sub.name, "corp");
+          assert!(!sub.project);
+        },
+        other => panic!("expected registry set-default, got {other:?}"),
+      },
+      other => panic!("expected registry, got {other:?}"),
+    }
+  }
+
+  #[test]
+  fn parses_search_and_info_commands() {
+    let search = Cli::parse_from(["joy", "search", "fmt", "--registry", "corp", "--limit", "7"]);
+    match search.command {
+      Commands::Search(args) => {
+        assert_eq!(args.query, "fmt");
+        assert_eq!(args.registry.as_deref(), Some("corp"));
+        assert_eq!(args.limit, 7);
+      },
+      other => panic!("expected search, got {other:?}"),
+    }
+
+    let info = Cli::parse_from(["joy", "info", "fmtlib/fmt", "--registry", "default"]);
+    match info.command {
+      Commands::Info(args) => {
+        assert_eq!(args.package, "fmtlib/fmt");
+        assert_eq!(args.registry.as_deref(), Some("default"));
+      },
+      other => panic!("expected info, got {other:?}"),
+    }
+  }
+
+  #[test]
+  fn parses_fetch_vendor_and_cache_gc_commands() {
+    let fetch = Cli::parse_from(["joy", "fetch"]);
+    match fetch.command {
+      Commands::Fetch(_) => {},
+      other => panic!("expected fetch, got {other:?}"),
+    }
+
+    let vendor = Cli::parse_from(["joy", "vendor", "--output", "third_party"]);
+    match vendor.command {
+      Commands::Vendor(args) => assert_eq!(args.output.as_deref(), Some("third_party")),
+      other => panic!("expected vendor, got {other:?}"),
+    }
+
+    let cache = Cli::parse_from(["joy", "cache", "gc", "--aggressive"]);
+    match cache.command {
+      Commands::Cache(args) => match args.command {
+        CacheSubcommand::Gc(gc) => assert!(gc.aggressive),
+      },
+      other => panic!("expected cache, got {other:?}"),
     }
   }
 

@@ -1,7 +1,9 @@
 pub mod add;
 pub mod build;
+pub mod cache;
 pub(crate) mod dependency_common;
 pub mod doctor;
+pub mod fetch;
 pub(crate) mod graph_common;
 pub mod info;
 pub mod init;
@@ -16,6 +18,7 @@ pub mod search;
 pub mod sync;
 pub mod tree;
 pub mod update;
+pub mod vendor;
 pub mod version;
 pub mod why;
 
@@ -86,6 +89,16 @@ pub fn dispatch(command: Commands, runtime: RuntimeFlags) -> Result<CommandOutpu
     Commands::Outdated(args) => {
       dispatch_project_scoped("outdated", runtime, |runtime| outdated::handle(args, runtime))
     },
+    Commands::Registry(args) => registry_cmd::handle(args),
+    Commands::Search(args) => search::handle(args),
+    Commands::Info(args) => info::handle(args),
+    Commands::Fetch(args) => {
+      dispatch_project_scoped("fetch", runtime, |runtime| fetch::handle(args, runtime))
+    },
+    Commands::Vendor(args) => {
+      dispatch_project_scoped("vendor", runtime, |runtime| vendor::handle(args, runtime))
+    },
+    Commands::Cache(args) => cache::handle(args),
     Commands::Metadata(args) => {
       dispatch_project_scoped("metadata", runtime, |runtime| metadata::handle(args, runtime))
     },
