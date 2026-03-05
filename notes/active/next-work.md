@@ -1,9 +1,15 @@
-# Next Work (Post Phase 38-76 Delivery)
+# Next Work (Phase 77-86 Active Wave)
 
-Phase 38-76 (core dependency graph + nested dependencies + editor integration wave) is complete on this branch.
+Immediate queue for the Cargo/uv-style usability wave:
 
-Immediate follow-up queue:
-
-1. Seed the next roadmap wave (Phase 77+) based on post-Phase 38-76 gaps, release hardening, and real-world package adoption feedback
-2. Sync GitHub tracker issues/milestones (`#101`-`#146`) with local completion state when opening the delivery PR
-3. Run a release-focused polish pass (packaging, install docs, platform matrices) before first public release cut
+1. Complete resolver/fetch provider abstraction for non-github sources (`git`, `path`, `archive`) and graduate from staged-only manifest updates to real sync/build flows.
+2. Implement generic recipe-less CMake fallback pipeline (Phase 81) with cross-platform fixtures for GNU + MSVC.
+3. Tighten lock provenance and supply-chain policy:
+   - source provenance for each backend
+   - strict checksum validation for vendored/archive inputs
+   - `joy verify` + baseline SBOM output (Phase 84)
+4. Expand offline CI matrix for warm-cache and vendored-only builds with deterministic failure codes.
+5. Start Phase 85 protocol work:
+   - self-hosted registry publish flow
+   - auth token handling
+   - owner/yank lifecycle commands.
