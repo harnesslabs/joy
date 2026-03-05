@@ -329,10 +329,16 @@ pub struct InitArgs {
 #[derive(Debug, Args)]
 pub struct AddArgs {
   pub package: String,
+  #[arg(long = "as")]
+  pub as_name: Option<String>,
   #[arg(long)]
   pub rev: Option<String>,
   #[arg(long)]
   pub version: Option<String>,
+  #[arg(long)]
+  pub registry: Option<String>,
+  #[arg(long)]
+  pub sha256: Option<String>,
   #[arg(long)]
   pub no_sync: bool,
 }
@@ -349,6 +355,96 @@ pub struct UpdateArgs {
   pub rev: Option<String>,
   #[arg(long)]
   pub version: Option<String>,
+  #[arg(long)]
+  pub registry: Option<String>,
+  #[arg(long)]
+  pub sha256: Option<String>,
+}
+
+#[derive(Debug, Args)]
+pub struct RegistryArgs {
+  #[command(subcommand)]
+  pub command: RegistrySubcommand,
+}
+
+#[derive(Debug, Subcommand)]
+pub enum RegistrySubcommand {
+  List(RegistryListArgs),
+  Add(RegistryAddArgs),
+  Remove(RegistryRemoveArgs),
+  SetDefault(RegistrySetDefaultArgs),
+}
+
+#[derive(Debug, Args)]
+pub struct RegistryListArgs {
+  #[arg(long)]
+  pub project: bool,
+}
+
+#[derive(Debug, Args)]
+pub struct RegistryAddArgs {
+  pub name: String,
+  pub index: String,
+  #[arg(long)]
+  pub default: bool,
+  #[arg(long)]
+  pub project: bool,
+}
+
+#[derive(Debug, Args)]
+pub struct RegistryRemoveArgs {
+  pub name: String,
+  #[arg(long)]
+  pub project: bool,
+}
+
+#[derive(Debug, Args)]
+pub struct RegistrySetDefaultArgs {
+  pub name: String,
+  #[arg(long)]
+  pub project: bool,
+}
+
+#[derive(Debug, Args)]
+pub struct SearchArgs {
+  pub query: String,
+  #[arg(long)]
+  pub registry: Option<String>,
+  #[arg(long, default_value_t = 20)]
+  pub limit: usize,
+}
+
+#[derive(Debug, Args)]
+pub struct InfoArgs {
+  pub package: String,
+  #[arg(long)]
+  pub registry: Option<String>,
+}
+
+#[derive(Debug, Args)]
+pub struct FetchArgs {}
+
+#[derive(Debug, Args)]
+pub struct VendorArgs {
+  #[arg(long)]
+  pub output: Option<String>,
+}
+
+#[derive(Debug, Args)]
+pub struct CacheArgs {
+  #[command(subcommand)]
+  pub command: CacheSubcommand,
+}
+
+#[derive(Debug, Subcommand)]
+pub enum CacheSubcommand {
+  Gc(CacheGcArgs),
+}
+
+#[derive(Debug, Args)]
+pub struct CacheGcArgs {
+  #[arg(long)]
+  pub aggressive: bool,
 }
 
 #[derive(Debug, Args)]
@@ -540,6 +636,29 @@ mod tests {
     let cli = Cli::parse_from(["joy", "add", "nlohmann/json", "--no-sync"]);
     match cli.command {
       Commands::Add(args) => assert!(args.no_sync),
+      other => panic!("expected add, got {other:?}"),
+    }
+  }
+
+  #[test]
+  fn parses_add_with_alias_registry_and_sha256() {
+    let cli = Cli::parse_from([
+      "joy",
+      "add",
+      "archive:https://example.com/lib.tar.gz",
+      "--as",
+      "archive_dep",
+      "--registry",
+      "corp",
+      "--sha256",
+      "deadbeef",
+    ]);
+    match cli.command {
+      Commands::Add(args) => {
+        assert_eq!(args.as_name.as_deref(), Some("archive_dep"));
+        assert_eq!(args.registry.as_deref(), Some("corp"));
+        assert_eq!(args.sha256.as_deref(), Some("deadbeef"));
+      },
       other => panic!("expected add, got {other:?}"),
     }
   }
