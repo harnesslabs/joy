@@ -132,7 +132,12 @@ impl RegistryStore {
   /// Return all known versions for a package (descending semver order).
   pub fn package_versions(&self, package_id: &str) -> Option<Vec<String>> {
     let pkg = self.packages_by_id.get(package_id)?;
-    let mut versions = pkg.releases.iter().map(|r| r.version.to_string()).collect::<Vec<_>>();
+    let mut versions = pkg
+      .releases
+      .iter()
+      .filter(|release| !release.raw.yanked)
+      .map(|r| r.version.to_string())
+      .collect::<Vec<_>>();
     versions.sort();
     versions.reverse();
     Some(versions)
@@ -158,6 +163,7 @@ impl RegistryStore {
         package
           .releases
           .iter()
+          .filter(|release| !release.raw.yanked)
           .filter(|release| req.matches(&release.version))
           .max_by(|a, b| a.version.cmp(&b.version).then_with(|| a.raw.version.cmp(&b.raw.version)))
           .ok_or_else(|| RegistryError::VersionNotFound {
@@ -170,13 +176,15 @@ impl RegistryStore {
         let version = Version::parse(raw_version).map_err(|source| {
           RegistryError::InvalidVersionReq { requirement: raw_version.into(), source }
         })?;
-        package.releases.iter().find(|release| release.version == version).ok_or_else(|| {
-          RegistryError::VersionNotFound {
+        package
+          .releases
+          .iter()
+          .find(|release| release.version == version && !release.raw.yanked)
+          .ok_or_else(|| RegistryError::VersionNotFound {
             registry: self.name.clone(),
             package: package_id.to_string(),
             requested_requirement: raw_version.to_string(),
-          }
-        })?
+          })?
       },
     };
 
@@ -552,6 +560,8 @@ struct RegistryReleaseEntry {
   package: String,
   rev: String,
   #[serde(default)]
+  yanked: bool,
+  #[serde(default)]
   manifest: Option<RegistryManifestSummaryEntry>,
 }
 
@@ -797,6 +807,43 @@ version = "^13"
     assert_eq!(manifest.dependencies[0].source, crate::manifest::DependencySource::Registry);
     assert_eq!(manifest.dependencies[0].version.as_deref(), Some("^13"));
     assert_eq!(manifest.dependencies[0].rev, None);
+  }
+
+  #[test]
+  fn ignores_yanked_versions_during_resolution() {
+    let temp = TempDir::new().expect("tempdir");
+    write_index(
+      temp.path(),
+      r#"version = 2
+
+[[packages]]
+id = "fmtlib/fmt"
+
+[[packages.versions]]
+version = "11.0.0"
+source = "github"
+package = "fmtlib/fmt"
+rev = "v11.0.0"
+
+[[packages.versions]]
+version = "11.1.0"
+source = "github"
+package = "fmtlib/fmt"
+rev = "v11.1.0"
+yanked = true
+"#,
+    );
+
+    let registry = RegistryStore::load_from_dir("default", temp.path()).expect("load registry");
+    let resolved =
+      registry.resolve("fmtlib/fmt", RegistryRequirement::Semver("^11")).expect("resolve");
+    assert_eq!(resolved.resolved_version, "11.0.0");
+    assert_eq!(registry.package_versions("fmtlib/fmt"), Some(vec!["11.0.0".into()]));
+
+    let err = registry
+      .resolve("fmtlib/fmt", RegistryRequirement::ExactVersion("11.1.0"))
+      .expect_err("yanked exact version should fail");
+    assert!(err.is_version_not_found());
   }
 
   #[test]

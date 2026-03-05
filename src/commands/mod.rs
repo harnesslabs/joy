@@ -10,6 +10,7 @@ pub mod init;
 pub mod metadata;
 pub mod new;
 pub mod outdated;
+pub mod publishing;
 pub mod recipe_check;
 pub mod registry_cmd;
 pub mod remove;
@@ -102,6 +103,10 @@ pub fn dispatch(command: Commands, runtime: RuntimeFlags) -> Result<CommandOutpu
     Commands::Verify(args) => {
       dispatch_project_scoped("verify", runtime, |runtime| verify::handle(args, runtime))
     },
+    Commands::Package(args) => publishing::handle_package(args),
+    Commands::Publish(args) => publishing::handle_publish(args, runtime),
+    Commands::Owner(args) => publishing::handle_owner(args, runtime),
+    Commands::Yank(args) => publishing::handle_yank(args, runtime),
     Commands::Cache(args) => cache::handle(args),
     Commands::Metadata(args) => {
       dispatch_project_scoped("metadata", runtime, |runtime| metadata::handle(args, runtime))

@@ -312,6 +312,14 @@ pub enum Commands {
   /// Verify lockfile/source integrity and emit a baseline SBOM summary.
   #[command(after_help = "Examples:\n  joy verify\n  joy --json verify --strict --sbom sbom.json")]
   Verify(VerifyArgs),
+  /// Initialize and manage reusable package publishing workflows.
+  Package(PackageArgs),
+  /// Publish a package manifest into a self-hosted registry index.
+  Publish(PublishArgs),
+  /// Manage package owners in a self-hosted registry index.
+  Owner(OwnerArgs),
+  /// Yank or unyank a published package version.
+  Yank(YankArgs),
   /// Manage global cache lifecycle.
   Cache(CacheArgs),
   /// Emit machine-oriented project/dependency/editor metadata.
@@ -461,6 +469,83 @@ pub struct VerifyArgs {
 }
 
 #[derive(Debug, Args)]
+pub struct PackageArgs {
+  #[command(subcommand)]
+  pub command: PackageSubcommand,
+}
+
+#[derive(Debug, Subcommand)]
+pub enum PackageSubcommand {
+  Init(PackageInitArgs),
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, ValueEnum)]
+pub enum PackageKindArg {
+  HeaderOnly,
+  Cmake,
+}
+
+#[derive(Debug, Args)]
+pub struct PackageInitArgs {
+  pub id: String,
+  #[arg(long, default_value = "0.1.0")]
+  pub version: String,
+  #[arg(long, value_enum, default_value_t = PackageKindArg::HeaderOnly)]
+  pub kind: PackageKindArg,
+  #[arg(long)]
+  pub force: bool,
+}
+
+#[derive(Debug, Args)]
+pub struct PublishArgs {
+  #[arg(long)]
+  pub registry: Option<String>,
+  #[arg(long)]
+  pub rev: Option<String>,
+  #[arg(long)]
+  pub source_package: Option<String>,
+}
+
+#[derive(Debug, Args)]
+pub struct OwnerArgs {
+  #[command(subcommand)]
+  pub command: OwnerSubcommand,
+}
+
+#[derive(Debug, Subcommand)]
+pub enum OwnerSubcommand {
+  List(OwnerListArgs),
+  Add(OwnerMutationArgs),
+  Remove(OwnerMutationArgs),
+}
+
+#[derive(Debug, Args)]
+pub struct OwnerListArgs {
+  pub package: String,
+  #[arg(long)]
+  pub registry: Option<String>,
+}
+
+#[derive(Debug, Args)]
+pub struct OwnerMutationArgs {
+  pub package: String,
+  pub owner: String,
+  #[arg(long)]
+  pub registry: Option<String>,
+}
+
+#[derive(Debug, Args)]
+pub struct YankArgs {
+  pub package: String,
+  #[arg(long)]
+  pub version: String,
+  #[arg(long)]
+  pub undo: bool,
+  #[arg(long)]
+  pub registry: Option<String>,
+}
+
+#[derive(Debug, Args)]
 pub struct CacheArgs {
   #[command(subcommand)]
   pub command: CacheSubcommand,
@@ -558,7 +643,7 @@ mod tests {
 
   use super::{
     CacheSubcommand, Cli, CliColorArg, CliGlyphsArg, CliProgressArg, Commands, OutdatedSourceArg,
-    RegistrySubcommand,
+    OwnerSubcommand, PackageSubcommand, RegistrySubcommand,
   };
 
   #[test]
@@ -841,6 +926,75 @@ mod tests {
         assert_eq!(args.sbom.as_deref(), Some("sbom.json"));
       },
       other => panic!("expected verify, got {other:?}"),
+    }
+  }
+
+  #[test]
+  fn parses_package_publish_owner_and_yank_commands() {
+    let package = Cli::parse_from([
+      "joy",
+      "package",
+      "init",
+      "acme/widgets",
+      "--version",
+      "1.2.3",
+      "--kind",
+      "cmake",
+      "--force",
+    ]);
+    match package.command {
+      Commands::Package(args) => match args.command {
+        PackageSubcommand::Init(init) => {
+          assert_eq!(init.id, "acme/widgets");
+          assert_eq!(init.version, "1.2.3");
+          assert_eq!(init.kind, super::PackageKindArg::Cmake);
+          assert!(init.force);
+        },
+      },
+      other => panic!("expected package command, got {other:?}"),
+    }
+
+    let publish = Cli::parse_from(["joy", "publish", "--registry", "local", "--rev", "v1.2.3"]);
+    match publish.command {
+      Commands::Publish(args) => {
+        assert_eq!(args.registry.as_deref(), Some("local"));
+        assert_eq!(args.rev.as_deref(), Some("v1.2.3"));
+      },
+      other => panic!("expected publish, got {other:?}"),
+    }
+
+    let owner =
+      Cli::parse_from(["joy", "owner", "add", "acme/widgets", "alice", "--registry", "r"]);
+    match owner.command {
+      Commands::Owner(args) => match args.command {
+        OwnerSubcommand::Add(add) => {
+          assert_eq!(add.package, "acme/widgets");
+          assert_eq!(add.owner, "alice");
+          assert_eq!(add.registry.as_deref(), Some("r"));
+        },
+        other => panic!("expected owner add, got {other:?}"),
+      },
+      other => panic!("expected owner, got {other:?}"),
+    }
+
+    let yank = Cli::parse_from([
+      "joy",
+      "yank",
+      "acme/widgets",
+      "--version",
+      "1.2.3",
+      "--undo",
+      "--registry",
+      "r",
+    ]);
+    match yank.command {
+      Commands::Yank(args) => {
+        assert_eq!(args.package, "acme/widgets");
+        assert_eq!(args.version, "1.2.3");
+        assert!(args.undo);
+        assert_eq!(args.registry.as_deref(), Some("r"));
+      },
+      other => panic!("expected yank, got {other:?}"),
     }
   }
 
