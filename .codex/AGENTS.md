@@ -168,3 +168,12 @@ When the user asks for a bug hunt, UX audit, debugging sweep, or issue triage pa
 * **Scope discipline:** Cover README flows first, then edge cases (invalid inputs, lockfile flags, missing tools, cache behaviors, JSON mode, repeat runs).
 * **No surprise fixes:** Unless the user explicitly asks for fixes in the same pass, do not patch product code while triaging. Capture issues and evidence instead.
 * **Process docs:** Follow `/Users/autoparallel/Code/joy/.codex/bug-bash-playbook.md` for the current commands, labels, issue template, and tracker update checklist.
+
+### 8.3 Documentation Recovery Mode (Mandatory When Asked)
+When the user asks to update docs, close mdBook drift, or bring command/reference docs up to date, follow the docs playbook workflow instead of ad-hoc edits.
+
+* **Canonical docs target:** `book/` is the detailed source of truth; keep `README.md` concise and aligned.
+* **Coverage requirement:** Ensure shipped command/subcommand coverage and machine/error reference parity.
+* **Status discipline:** Mark planned/deferred items explicitly; do not present roadmap intent as shipped.
+* **Validation:** Run docs validation before PR readiness (`just docs-lint`; escalate to `just ci-pr` for large docs waves).
+* **Process docs:** Follow `/Users/autoparallel/Code/joy/.codex/documentation-playbook.md` for chapter structure, source-of-truth order, and PR checklist.

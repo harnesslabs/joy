@@ -1,58 +1,101 @@
 # Reproducible Workflows
 
-`joy` includes explicit commands and flags for repeatable local and CI builds.
+`joy` provides lockfile and offline controls intended for repeatable CI and local rebuilds.
 
 ## `joy sync`
 
-`joy sync` resolves dependencies, refreshes local materialized state, and updates lockfile state without compiling the final project binary.
+`joy sync` resolves dependencies, materializes headers/libs, refreshes graph artifacts, and updates `joy.lock` when needed without compiling the final binary.
 
 ```bash
 joy sync
 ```
 
-Use this when you want to prepare dependency/cache state before a later `build` or `run`.
-
 ## `--locked`
 
-Rejects lockfile updates during the command.
+Reject lockfile updates for commands that consume dependency state.
 
 ```bash
 joy build --locked
+joy sync --locked
+joy run --locked
+joy why nlohmann/json --locked
+joy tree --locked
 ```
 
-Use this in CI to ensure no uncommitted dependency/manifest drift is being introduced.
+Use `--locked` in CI to reject uncommitted dependency or manifest drift.
+
+## `--update-lock`
+
+Force lockfile refresh when intentional dependency/manifest changes are present.
+
+```bash
+joy sync --update-lock
+joy build --update-lock
+joy run --update-lock
+```
+
+`--locked` and `--update-lock` are mutually exclusive.
 
 ## `--offline`
 
-Disables network access and uses only cached dependency data.
+Disable network access and use only cached dependency data.
 
 ```bash
+joy --offline sync
 joy --offline build
 joy --offline run
+joy --offline outdated
 ```
 
-If cache entries are missing, `joy` fails with stable machine-readable error codes (for example `offline_cache_miss`).
+If cache is cold for required sources, commands fail with stable machine-readable error codes.
 
 ## `--frozen`
 
-`--frozen` is the strict CI-friendly mode:
+`--frozen` is strict CI mode:
 
-- no network access
-- no lockfile changes
-
-It implies `--offline` and locked semantics.
+- implies offline behavior
+- disallows lockfile changes
 
 ```bash
-joy --frozen build
 joy --frozen sync
+joy --frozen build
+joy --frozen run
 ```
+
+## Cache Warmup and Vendoring
+
+Warm cache before strict offline runs:
+
+```bash
+joy fetch
+joy sync
+```
+
+Vendor resolved lockfile sources for controlled source snapshots:
+
+```bash
+joy vendor
+joy vendor --output third_party/vendor
+```
+
+## Verify and SBOM in CI
+
+Use `joy verify` to check provenance and produce SBOM data.
+
+```bash
+joy --json verify --strict --sbom sbom.json
+```
+
+This validates lock provenance fields by source backend and emits a baseline `joy-sbom-v1` component list.
 
 ## Typical CI Pattern
 
 ```bash
 joy --json doctor
+joy fetch
 joy --frozen sync
 joy --frozen build
+joy --json verify --strict --sbom sbom.json
 ```
 
-For machine consumers, use `--json` and key off `error.code` instead of free-form human text.
+Automation should key off `error.code` and documented payload fields, not human text.

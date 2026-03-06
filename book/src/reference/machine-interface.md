@@ -10,7 +10,7 @@ JSON output always uses one of two top-level envelopes:
   "joy_version": "<semver>",
   "ok": true,
   "command": "<name>",
-  "data": { ... }
+  "data": { "...": "..." }
 }
 ```
 
@@ -20,34 +20,44 @@ JSON output always uses one of two top-level envelopes:
   "joy_version": "<semver>",
   "ok": false,
   "command": "<name>",
-  "error": { "code": "<stable_code>", "message": "<text>" }
+  "error": {
+    "code": "<stable_code>",
+    "message": "<human_text>"
+  }
 }
 ```
 
 ## Compatibility Policy
 
-- Top-level envelope keys are stable: `ok`, `command`, and `data` or `error`.
-- Existing command payload keys are additive-only within a given `schema_version`.
-- `schema_version` changes only for intentional machine-interface contract revisions.
-- `joy_version` reports the CLI build version that produced the envelope.
-- Stable automation should key off `error.code`, not free-form `error.message`.
-- Human-mode output may change for UX improvements; automation should use `--json`.
+- Top-level envelope keys are stable: `schema_version`, `joy_version`, `ok`, `command`, plus `data` or `error`.
+- Existing payload keys are additive within a fixed `schema_version`.
+- `schema_version` changes only for explicit contract revisions.
+- `error.code` is the automation key; `error.message` is human-oriented and may evolve.
+- Human output is not a machine contract; automation should use `--json`.
 
-## Human Mode vs Machine Mode
+## Workspace Routing Metadata
 
-- Human mode prioritizes readability and actionable guidance.
-- Machine mode suppresses human formatting/progress and prints strict JSON to `stdout`.
-
-## Selected Payload Additions (Recent Phases)
-
-Project-scoped commands include additive workspace routing metadata:
+Project-scoped command payloads may include additive workspace fields when invoked from workspace root routing:
 
 - `workspace_root` (`string | null`)
 - `workspace_member` (`string | null`)
 
-`build` / `run` payloads include target-selection metadata:
+## Build/Run/Sync Target Metadata
+
+`build` and `run` include target metadata:
 
 - `target`
 - `target_default`
 
-For detailed field lists, inspect integration tests under `tests/` and command JSON payload builders in `src/commands/`.
+`build`, `sync`, and `run` include lockfile metadata:
+
+- `lockfile_path`
+- `lockfile_updated`
+
+## Machine Payload Catalog
+
+See [Machine Payload Matrix](machine-payloads.md) for command-specific key maps.
+
+## Error Code Catalog
+
+See [Error Codes](error-codes.md) for stable machine error keys.

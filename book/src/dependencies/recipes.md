@@ -1,6 +1,6 @@
 # Recipes (Compiled Dependencies)
 
-`joy` ships a curated recipe index in `recipes/` for dependencies that require build/install steps.
+`joy` ships a curated recipe index in `recipes/` for dependencies that require build/install metadata.
 
 Examples include:
 
@@ -14,10 +14,16 @@ Examples include:
 
 When a dependency is recipe-backed and compiled:
 
-1. `joy` resolves the dependency graph and recipe metadata.
+1. `joy` resolves dependency graph + recipe metadata.
 2. It computes ABI-sensitive cache keys/hashes.
-3. It builds the dependency with CMake + Ninja in the global cache.
-4. It installs headers/libs into the project-local `.joy/` environment.
+3. It builds dependency artifacts with CMake + Ninja in global cache.
+4. It installs headers/libs into project-local `.joy/` state.
+
+## Generic CMake Fallback (Shipped)
+
+If a dependency has no recipe but contains a top-level `CMakeLists.txt`, `joy` can run a generic CMake-first compiled fallback path.
+
+This keeps more compiled packages usable without waiting for curated recipe additions.
 
 ## Validate Recipe Metadata
 
@@ -26,4 +32,4 @@ joy recipe-check
 joy --json recipe-check
 ```
 
-Use this locally and in CI to validate bundled recipe metadata changes.
+Use this in local development and CI whenever recipe metadata changes.

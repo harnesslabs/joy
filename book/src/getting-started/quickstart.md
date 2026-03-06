@@ -13,23 +13,32 @@ joy tree
 What happens:
 
 1. `joy new` scaffolds `joy.toml`, `src/main.cpp`, and `.gitignore`.
-2. `joy add` records the dependency, runs a sync-lite refresh, and materializes headers into `.joy/`.
-3. `joy run` builds the project (and dependencies when needed), refreshes dependency/editor artifacts, and executes the binary.
-4. `joy tree` shows the resolved dependency graph.
+2. `joy add` records dependency intent and runs sync-lite refresh by default.
+3. `joy run` builds the project and executes the binary.
+4. `joy tree` shows resolved dependency graph state.
 
-`joy sync`, `joy build`, and `joy run` also refresh `compile_commands.json` at the project root (best effort) so clangd / VSCode can resolve dependency includes.
+## Reproducible Follow-Up Flow
+
+After the first run, validate deterministic state:
+
+```bash
+joy fetch
+joy --frozen sync
+joy --frozen build
+joy --json verify --strict --sbom sbom.json
+```
 
 ## What Gets Created
 
-Project-local state is kept under `.joy/` (created lazily) and a lockfile is kept in `joy.lock` for reproducibility.
+Project-local state is kept under `.joy/` and lock state in `joy.lock`.
 
-Typical project layout:
+Typical layout:
 
 ```text
 hello_cpp/
   joy.toml
-  joy.lock          # created when sync/build/run resolves lock state
-  compile_commands.json  # auto-generated when toolchain discovery succeeds
+  joy.lock
+  compile_commands.json
   src/
     main.cpp
   .joy/
@@ -44,7 +53,8 @@ hello_cpp/
 
 ## Next Steps
 
-- Learn the core command set in [Core Commands](../workflows/core-commands.md)
-- If your editor still cannot resolve includes, read [Troubleshooting](../troubleshooting/common-failures.md) (clangd / VSCode `compile_commands.json` setup)
-- Use [Reproducible Workflows](../workflows/reproducible.md) for CI and offline runs
-- Read [Workspaces and Targets](../workflows/workspaces-targets.md) for multi-project repos
+- [Core Commands](../workflows/core-commands.md)
+- [Dependency Source Backends](../workflows/dependency-sources.md)
+- [Registry Discovery and Configuration](../workflows/registry-discovery.md)
+- [Offline Fetch, Vendor, and Cache](../workflows/offline-vendor-cache.md)
+- [Troubleshooting](../troubleshooting/common-failures.md)
