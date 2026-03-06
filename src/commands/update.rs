@@ -300,22 +300,33 @@ pub fn handle(args: UpdateArgs, runtime: RuntimeFlags) -> Result<CommandOutput, 
         if spec != desired {
           manifest_changed |= manifest.add_dependency(key.clone(), desired.clone());
         }
-        warnings.push(format!(
-          "dependency `{key}` uses source `git`; update changed manifest only (build/sync support is incomplete)"
-        ));
+        let package = resolve_update_package_id(&key, &desired)?;
+        let source_git = desired.git.as_deref().ok_or_else(|| {
+          JoyError::new(
+            "update",
+            "invalid_dependency_source",
+            format!("dependency `{key}` uses source `git` but missing `git = \"...\"`"),
+            1,
+          )
+        })?;
+        let fetched = fetch::fetch_git_with_cache(&package, source_git, &desired.rev, &cache)
+          .map_err(|err| map_fetch_error("update", err))?;
+        let installed =
+          linking::install_headers(&env_layout.include_dir, &package, &fetched.source_dir)
+            .map_err(|err| JoyError::new("update", "header_install_failed", err.to_string(), 1))?;
         updated.push(UpdatedDependency {
           key: key.clone(),
-          package: desired.package.clone(),
+          package: Some(package.to_string()),
           source: "git".to_string(),
           registry: None,
           source_package: None,
-          requested_rev: Some(desired.rev),
+          requested_rev: Some(fetched.requested_rev),
           requested_requirement: None,
-          resolved_version: None,
-          resolved_commit: None,
-          cache_hit: None,
-          header_link_path: None,
-          staged_only: true,
+          resolved_version: fetched.resolved_version,
+          resolved_commit: Some(fetched.resolved_commit),
+          cache_hit: Some(fetched.cache_hit),
+          header_link_path: Some(installed.link_path.display().to_string()),
+          staged_only: false,
         });
       },
       DependencySource::Path => {
@@ -327,22 +338,33 @@ pub fn handle(args: UpdateArgs, runtime: RuntimeFlags) -> Result<CommandOutput, 
             1,
           ));
         }
-        warnings.push(format!(
-          "dependency `{key}` uses source `path`; no remote update step was performed"
-        ));
+        let package = resolve_update_package_id(&key, &spec)?;
+        let source_path = spec.path.as_deref().ok_or_else(|| {
+          JoyError::new(
+            "update",
+            "invalid_dependency_source",
+            format!("dependency `{key}` uses source `path` but missing `path = \"...\"`"),
+            1,
+          )
+        })?;
+        let fetched = fetch::fetch_path_with_cache(&package, source_path, &cache)
+          .map_err(|err| map_fetch_error("update", err))?;
+        let installed =
+          linking::install_headers(&env_layout.include_dir, &package, &fetched.source_dir)
+            .map_err(|err| JoyError::new("update", "header_install_failed", err.to_string(), 1))?;
         updated.push(UpdatedDependency {
           key: key.clone(),
-          package: spec.package.clone(),
+          package: Some(package.to_string()),
           source: "path".to_string(),
           registry: None,
           source_package: None,
-          requested_rev: None,
+          requested_rev: Some(fetched.requested_rev),
           requested_requirement: None,
-          resolved_version: None,
-          resolved_commit: None,
-          cache_hit: None,
-          header_link_path: None,
-          staged_only: true,
+          resolved_version: fetched.resolved_version,
+          resolved_commit: Some(fetched.resolved_commit),
+          cache_hit: Some(fetched.cache_hit),
+          header_link_path: Some(installed.link_path.display().to_string()),
+          staged_only: false,
         });
       },
       DependencySource::Archive => {
@@ -361,22 +383,41 @@ pub fn handle(args: UpdateArgs, runtime: RuntimeFlags) -> Result<CommandOutput, 
         if spec != desired {
           manifest_changed |= manifest.add_dependency(key.clone(), desired.clone());
         }
-        warnings.push(format!(
-          "dependency `{key}` uses source `archive`; update changed manifest only (build/sync support is incomplete)"
-        ));
+        let package = resolve_update_package_id(&key, &desired)?;
+        let source_url = desired.url.as_deref().ok_or_else(|| {
+          JoyError::new(
+            "update",
+            "invalid_dependency_source",
+            format!("dependency `{key}` uses source `archive` but missing `url = \"...\"`"),
+            1,
+          )
+        })?;
+        let sha256 = desired.sha256.as_deref().ok_or_else(|| {
+          JoyError::new(
+            "update",
+            "invalid_dependency_source",
+            format!("dependency `{key}` uses source `archive` but missing `sha256 = \"...\"`"),
+            1,
+          )
+        })?;
+        let fetched = fetch::fetch_archive_with_cache(&package, source_url, sha256, &cache)
+          .map_err(|err| map_fetch_error("update", err))?;
+        let installed =
+          linking::install_headers(&env_layout.include_dir, &package, &fetched.source_dir)
+            .map_err(|err| JoyError::new("update", "header_install_failed", err.to_string(), 1))?;
         updated.push(UpdatedDependency {
           key: key.clone(),
-          package: desired.package.clone(),
+          package: Some(package.to_string()),
           source: "archive".to_string(),
           registry: None,
           source_package: None,
-          requested_rev: None,
+          requested_rev: Some(fetched.requested_rev),
           requested_requirement: None,
-          resolved_version: None,
-          resolved_commit: None,
-          cache_hit: None,
-          header_link_path: None,
-          staged_only: true,
+          resolved_version: fetched.resolved_version,
+          resolved_commit: Some(fetched.resolved_commit),
+          cache_hit: Some(fetched.cache_hit),
+          header_link_path: Some(installed.link_path.display().to_string()),
+          staged_only: false,
         });
       },
     }
@@ -449,4 +490,45 @@ pub fn handle(args: UpdateArgs, runtime: RuntimeFlags) -> Result<CommandOutput, 
       "warnings": warnings,
     }),
   ))
+}
+
+fn resolve_update_package_id(key: &str, spec: &DependencySpec) -> Result<PackageId, JoyError> {
+  let declared = spec.declared_package(key);
+  if let Ok(package) = PackageId::parse(declared) {
+    return Ok(package);
+  }
+  if matches!(spec.source, DependencySource::Git)
+    && let Some(locator) = spec.git.as_deref()
+    && let Some(package) = infer_git_package_id(locator)
+  {
+    return Ok(package);
+  }
+  let mut slug = String::new();
+  for ch in key.chars() {
+    if ch.is_ascii_alphanumeric() || matches!(ch, '_' | '-' | '.') {
+      slug.push(ch);
+    } else {
+      slug.push('_');
+    }
+  }
+  let slug = slug.trim_matches('_');
+  let slug = if slug.is_empty() { "dep" } else { slug };
+  PackageId::parse(&format!("local/{slug}"))
+    .map_err(|err| JoyError::new("update", "invalid_package_id", err.to_string(), 1))
+}
+
+fn infer_git_package_id(locator: &str) -> Option<PackageId> {
+  let trimmed = locator.trim().trim_end_matches('/').trim_end_matches(".git");
+  let base = trimmed
+    .strip_prefix("ssh://")
+    .or_else(|| trimmed.strip_prefix("https://"))
+    .or_else(|| trimmed.strip_prefix("http://"))
+    .unwrap_or(trimmed);
+  let parts = base.split('/').filter(|p| !p.is_empty()).collect::<Vec<_>>();
+  if parts.len() < 2 {
+    return None;
+  }
+  let repo = parts[parts.len() - 1];
+  let owner = parts[parts.len() - 2];
+  PackageId::parse(&format!("{owner}/{repo}")).ok()
 }

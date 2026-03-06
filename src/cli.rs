@@ -1,4 +1,5 @@
 use clap::{Args, Parser, Subcommand, ValueEnum};
+use std::cell::RefCell;
 use std::env;
 use std::io::IsTerminal;
 use std::path::PathBuf;
@@ -582,10 +583,66 @@ pub enum OutdatedSourceArg {
   Github,
 }
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) enum OutdatedSourceOverride {
+  Git,
+  Path,
+  Archive,
+}
+
+thread_local! {
+  static OUTDATED_SOURCE_OVERRIDE: RefCell<Option<OutdatedSourceOverride>> = const { RefCell::new(None) };
+}
+
+fn set_outdated_source_override(value: Option<OutdatedSourceOverride>) {
+  OUTDATED_SOURCE_OVERRIDE.with(|slot| *slot.borrow_mut() = value);
+}
+
+pub(crate) fn take_outdated_source_override() -> Option<OutdatedSourceOverride> {
+  OUTDATED_SOURCE_OVERRIDE.with(|slot| slot.borrow_mut().take())
+}
+
+fn parse_outdated_source_arg(raw: &str) -> Result<OutdatedSourceArg, String> {
+  let normalized = raw.trim().to_ascii_lowercase();
+  let parsed = match normalized.as_str() {
+    "all" => {
+      set_outdated_source_override(None);
+      OutdatedSourceArg::All
+    },
+    "registry" => {
+      set_outdated_source_override(None);
+      OutdatedSourceArg::Registry
+    },
+    "github" => {
+      set_outdated_source_override(None);
+      OutdatedSourceArg::Github
+    },
+    "git" => {
+      set_outdated_source_override(Some(OutdatedSourceOverride::Git));
+      OutdatedSourceArg::All
+    },
+    "path" => {
+      set_outdated_source_override(Some(OutdatedSourceOverride::Path));
+      OutdatedSourceArg::All
+    },
+    "archive" => {
+      set_outdated_source_override(Some(OutdatedSourceOverride::Archive));
+      OutdatedSourceArg::All
+    },
+    _ => {
+      return Err(
+        "invalid value for `--sources`; expected one of: all, registry, github, git, path, archive"
+          .to_string(),
+      );
+    },
+  };
+  Ok(parsed)
+}
+
 #[derive(Debug, Args)]
 pub struct OutdatedArgs {
   /// Restrict update checks to a dependency source subset.
-  #[arg(long, value_enum, default_value_t = OutdatedSourceArg::All)]
+  #[arg(long, default_value = "all", value_parser = parse_outdated_source_arg)]
   pub sources: OutdatedSourceArg,
 }
 
@@ -643,7 +700,8 @@ mod tests {
 
   use super::{
     CacheSubcommand, Cli, CliColorArg, CliGlyphsArg, CliProgressArg, Commands, OutdatedSourceArg,
-    OwnerSubcommand, PackageSubcommand, RegistrySubcommand,
+    OutdatedSourceOverride, OwnerSubcommand, PackageSubcommand, RegistrySubcommand,
+    take_outdated_source_override,
   };
 
   #[test]
@@ -827,6 +885,28 @@ mod tests {
       Commands::Outdated(args) => assert_eq!(args.sources, OutdatedSourceArg::Github),
       other => panic!("expected outdated, got {other:?}"),
     }
+    assert_eq!(take_outdated_source_override(), None);
+
+    let cli = Cli::parse_from(["joy", "outdated", "--sources", "git"]);
+    match cli.command {
+      Commands::Outdated(args) => assert_eq!(args.sources, OutdatedSourceArg::All),
+      other => panic!("expected outdated, got {other:?}"),
+    }
+    assert_eq!(take_outdated_source_override(), Some(OutdatedSourceOverride::Git));
+
+    let cli = Cli::parse_from(["joy", "outdated", "--sources", "path"]);
+    match cli.command {
+      Commands::Outdated(args) => assert_eq!(args.sources, OutdatedSourceArg::All),
+      other => panic!("expected outdated, got {other:?}"),
+    }
+    assert_eq!(take_outdated_source_override(), Some(OutdatedSourceOverride::Path));
+
+    let cli = Cli::parse_from(["joy", "outdated", "--sources", "archive"]);
+    match cli.command {
+      Commands::Outdated(args) => assert_eq!(args.sources, OutdatedSourceArg::All),
+      other => panic!("expected outdated, got {other:?}"),
+    }
+    assert_eq!(take_outdated_source_override(), Some(OutdatedSourceOverride::Archive));
   }
 
   #[test]

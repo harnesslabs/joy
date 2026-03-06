@@ -38,14 +38,6 @@ pub fn handle(args: VendorArgs, runtime: RuntimeFlags) -> Result<CommandOutput, 
   let mut vendored = Vec::new();
   let mut skipped = Vec::new();
   for pkg in &lock.packages {
-    if pkg.source != "github" && pkg.source != "registry" {
-      skipped.push(json!({
-        "id": pkg.id,
-        "source": pkg.source,
-        "reason": "vendor currently supports github/registry lockfile entries only",
-      }));
-      continue;
-    }
     let package = match PackageId::parse(&pkg.id) {
       Ok(package) => package,
       Err(err) => {
@@ -57,8 +49,62 @@ pub fn handle(args: VendorArgs, runtime: RuntimeFlags) -> Result<CommandOutput, 
         continue;
       },
     };
-    let fetched = fetch::fetch_github(&package, &pkg.resolved_commit)
-      .map_err(|err| JoyError::new("vendor", "fetch_failed", err.to_string(), 1))?;
+    let fetched = match pkg.source.as_str() {
+      "github" | "registry" => fetch::fetch_github(&package, &pkg.resolved_commit)
+        .map_err(|err| JoyError::new("vendor", "fetch_failed", err.to_string(), 1))?,
+      "git" => {
+        let Some(source_git) = pkg.source_git.as_deref() else {
+          skipped.push(json!({
+            "id": pkg.id,
+            "source": pkg.source,
+            "reason": "missing lockfile field `source_git`",
+          }));
+          continue;
+        };
+        fetch::fetch_git(&package, source_git, &pkg.requested_rev)
+          .map_err(|err| JoyError::new("vendor", "fetch_failed", err.to_string(), 1))?
+      },
+      "path" => {
+        let Some(source_path) = pkg.source_path.as_deref() else {
+          skipped.push(json!({
+            "id": pkg.id,
+            "source": pkg.source,
+            "reason": "missing lockfile field `source_path`",
+          }));
+          continue;
+        };
+        fetch::fetch_path(&package, source_path)
+          .map_err(|err| JoyError::new("vendor", "fetch_failed", err.to_string(), 1))?
+      },
+      "archive" => {
+        let Some(source_url) = pkg.source_url.as_deref() else {
+          skipped.push(json!({
+            "id": pkg.id,
+            "source": pkg.source,
+            "reason": "missing lockfile field `source_url`",
+          }));
+          continue;
+        };
+        let Some(sha256) = pkg.source_checksum_sha256.as_deref() else {
+          skipped.push(json!({
+            "id": pkg.id,
+            "source": pkg.source,
+            "reason": "missing lockfile field `source_checksum_sha256`",
+          }));
+          continue;
+        };
+        fetch::fetch_archive(&package, source_url, sha256)
+          .map_err(|err| JoyError::new("vendor", "fetch_failed", err.to_string(), 1))?
+      },
+      _ => {
+        skipped.push(json!({
+          "id": pkg.id,
+          "source": pkg.source,
+          "reason": format!("unsupported lockfile source `{}`", pkg.source),
+        }));
+        continue;
+      },
+    };
     let target_dir = output_root.join(vendor_slug(&pkg.id)).join(&pkg.resolved_commit);
     if target_dir.exists() {
       fs::remove_dir_all(&target_dir).map_err(|err| {

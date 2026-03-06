@@ -7,7 +7,7 @@ use crate::commands::CommandOutput;
 use crate::error::JoyError;
 use crate::fs_ops;
 use crate::install_index::InstallIndex;
-use crate::manifest::{DependencySource, Manifest};
+use crate::manifest::Manifest;
 use crate::output::HumanMessageBuilder;
 use crate::package_id::PackageId;
 use crate::project_env;
@@ -63,15 +63,9 @@ pub fn handle(args: RemoveArgs, runtime: RuntimeFlags) -> Result<CommandOutput, 
   let env_layout = project_env::ensure_layout(&cwd)
     .map_err(|err| JoyError::new("remove", "env_setup_failed", err.to_string(), 1))?;
   let resolved_package = removed_spec.declared_package(&key).to_string();
-  let header_link_path =
-    if matches!(removed_spec.source, DependencySource::Github | DependencySource::Registry) {
-      match PackageId::parse(&resolved_package) {
-        Ok(package) => Some(env_layout.include_dir.join("deps").join(package.slug())),
-        Err(_) => None,
-      }
-    } else {
-      None
-    };
+  let header_link_path = resolve_package_id_for_remove(&key, &removed_spec)
+    .ok()
+    .map(|package| env_layout.include_dir.join("deps").join(package.slug()));
   let header_link_removed = if let Some(path) = header_link_path.as_ref() {
     fs_ops::remove_path_if_exists(path)
       .map_err(|err| JoyError::io("remove", "removing installed headers", path, &err))?
@@ -108,8 +102,6 @@ pub fn handle(args: RemoveArgs, runtime: RuntimeFlags) -> Result<CommandOutput, 
   }
   let human = human_builder.build();
 
-  let is_legacy_source =
-    matches!(removed_spec.source, DependencySource::Github | DependencySource::Registry);
   let mut data = serde_json::Map::new();
   data.insert(
     "header_link_path".to_string(),
@@ -129,11 +121,25 @@ pub fn handle(args: RemoveArgs, runtime: RuntimeFlags) -> Result<CommandOutput, 
     json!(lockfile_warning.clone().map(|w| vec![w]).unwrap_or_default()),
   );
 
-  if !is_legacy_source {
-    let resolved_declared = removed_spec.declared_package(&key).to_string();
-    data.insert("key".to_string(), json!(key));
-    data.insert("resolved_package".to_string(), json!(resolved_declared));
-  }
-
   Ok(CommandOutput::new("remove", human, serde_json::Value::Object(data)))
+}
+
+fn resolve_package_id_for_remove(
+  key: &str,
+  spec: &crate::manifest::DependencySpec,
+) -> Result<PackageId, crate::package_id::PackageIdError> {
+  if let Ok(package) = PackageId::parse(spec.declared_package(key)) {
+    return Ok(package);
+  }
+  let mut slug = String::new();
+  for ch in key.chars() {
+    if ch.is_ascii_alphanumeric() || matches!(ch, '_' | '-' | '.') {
+      slug.push(ch);
+    } else {
+      slug.push('_');
+    }
+  }
+  let slug = slug.trim_matches('_');
+  let slug = if slug.is_empty() { "dep" } else { slug };
+  PackageId::parse(&format!("local/{slug}"))
 }

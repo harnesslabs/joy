@@ -214,10 +214,6 @@ pub fn handle(args: AddArgs, runtime: RuntimeFlags) -> Result<CommandOutput, Joy
           1,
         ));
       }
-      warnings.push(
-        "git dependencies are recorded in `joy.toml`, but build/sync resolver support is not complete yet"
-          .to_string(),
-      );
       DependencySpec {
         source: DependencySource::Git,
         package: None,
@@ -239,10 +235,6 @@ pub fn handle(args: AddArgs, runtime: RuntimeFlags) -> Result<CommandOutput, Joy
           1,
         ));
       }
-      warnings.push(
-        "path dependencies are recorded in `joy.toml`, but build/sync resolver support is not complete yet"
-          .to_string(),
-      );
       DependencySpec {
         source: DependencySource::Path,
         package: None,
@@ -272,10 +264,6 @@ pub fn handle(args: AddArgs, runtime: RuntimeFlags) -> Result<CommandOutput, Joy
           1,
         )
       })?;
-      warnings.push(
-        "archive dependencies are recorded in `joy.toml`, but build/sync resolver support is not complete yet"
-          .to_string(),
-      );
       DependencySpec {
         source: DependencySource::Archive,
         package: None,
@@ -298,9 +286,7 @@ pub fn handle(args: AddArgs, runtime: RuntimeFlags) -> Result<CommandOutput, Joy
     return Err(JoyError::new("add", "manifest_write_error", err.to_string(), 1));
   }
 
-  if !args.no_sync
-    && matches!(manifest_spec.source, DependencySource::Github | DependencySource::Registry)
-  {
+  if !args.no_sync {
     sync_attempted = true;
     let sync_result = build::sync_project(build::BuildOptions {
       release: false,
@@ -325,8 +311,6 @@ pub fn handle(args: AddArgs, runtime: RuntimeFlags) -> Result<CommandOutput, Joy
         err.exit_code,
       ));
     }
-  } else if !args.no_sync {
-    warnings.push("sync-lite was skipped for this dependency source backend".to_string());
   }
 
   let lockfile_path = runtime

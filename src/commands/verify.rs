@@ -45,24 +45,31 @@ pub fn handle(args: VerifyArgs, runtime: RuntimeFlags) -> Result<CommandOutput, 
     let mut issues = provenance_issues(pkg);
     let mut advisory = Vec::<String>::new();
     let expected_checksum = pkg.source_checksum_sha256.clone();
+    let checksum_required = matches!(pkg.source.as_str(), "archive");
 
     let (source_dir, actual_checksum) = resolve_source_checksum(pkg, &project_root)?;
 
-    if let Some(expected) = expected_checksum.as_deref() {
-      if let Some(actual) = actual_checksum.as_deref() {
-        if !actual.eq_ignore_ascii_case(expected) {
-          issues.push(format!("source checksum mismatch: expected {expected}, actual {actual}"));
+    if pkg.source != "archive" {
+      if let Some(expected) = expected_checksum.as_deref() {
+        if let Some(actual) = actual_checksum.as_deref() {
+          if !actual.eq_ignore_ascii_case(expected) {
+            issues.push(format!("source checksum mismatch: expected {expected}, actual {actual}"));
+          }
+        } else {
+          issues.push(
+            "lockfile checksum is present, but this source backend cannot be verified yet".into(),
+          );
         }
-      } else {
-        issues.push(
-          "lockfile checksum is present, but this source backend cannot be verified yet".into(),
-        );
+      } else if !args.strict {
+        advisory.push("checksum not pinned in lockfile".into());
       }
-    } else if args.strict {
-      issues
-        .push("missing lockfile checksum (strict mode requires `source_checksum_sha256`)".into());
-    } else {
-      advisory.push("checksum not pinned in lockfile".into());
+    } else if expected_checksum.as_deref().is_none_or(|v| v.trim().is_empty()) {
+      if args.strict || checksum_required {
+        issues
+          .push("missing lockfile checksum (strict mode requires `source_checksum_sha256`)".into());
+      } else {
+        advisory.push("checksum not pinned in lockfile".into());
+      }
     }
 
     let vendor_dir =
@@ -243,6 +250,18 @@ fn resolve_source_checksum(
       let checksum = hash_path_sha256("verify", &fetched.source_dir)?;
       Ok((Some(fetched.source_dir), Some(checksum)))
     },
+    "git" => {
+      let package = parse_or_synthetic_package_id(&pkg.id)?;
+      let Some(source_git) = pkg.source_git.as_deref() else {
+        return Ok((None, None));
+      };
+      let requested_rev =
+        if pkg.requested_rev.trim().is_empty() { "HEAD" } else { &pkg.requested_rev };
+      let fetched = fetch::fetch_git(&package, source_git, requested_rev)
+        .map_err(|err| JoyError::new("verify", "fetch_failed", err.to_string(), 1))?;
+      let checksum = hash_path_sha256("verify", &fetched.source_dir)?;
+      Ok((Some(fetched.source_dir), Some(checksum)))
+    },
     "path" => {
       let Some(raw) = pkg.source_path.as_deref() else {
         return Ok((None, None));
@@ -254,8 +273,39 @@ fn resolve_source_checksum(
       let checksum = hash_path_sha256("verify", &path)?;
       Ok((Some(path), Some(checksum)))
     },
+    "archive" => {
+      let package = parse_or_synthetic_package_id(&pkg.id)?;
+      let Some(source_url) = pkg.source_url.as_deref() else {
+        return Ok((None, None));
+      };
+      let Some(sha256) = pkg.source_checksum_sha256.as_deref() else {
+        return Ok((None, None));
+      };
+      let fetched = fetch::fetch_archive(&package, source_url, sha256)
+        .map_err(|err| JoyError::new("verify", "fetch_failed", err.to_string(), 1))?;
+      let checksum = hash_path_sha256("verify", &fetched.source_dir)?;
+      Ok((Some(fetched.source_dir), Some(checksum)))
+    },
     _ => Ok((None, None)),
   }
+}
+
+fn parse_or_synthetic_package_id(raw: &str) -> Result<PackageId, JoyError> {
+  if let Ok(package) = PackageId::parse(raw) {
+    return Ok(package);
+  }
+  let mut slug = String::new();
+  for ch in raw.chars() {
+    if ch.is_ascii_alphanumeric() || matches!(ch, '_' | '-' | '.') {
+      slug.push(ch);
+    } else {
+      slug.push('_');
+    }
+  }
+  let slug = slug.trim_matches('_');
+  let slug = if slug.is_empty() { "dep" } else { slug };
+  PackageId::parse(&format!("local/{slug}"))
+    .map_err(|err| JoyError::new("verify", "invalid_package_id", err.to_string(), 1))
 }
 
 fn resolve_input_path(project_root: &Path, raw: &str) -> PathBuf {

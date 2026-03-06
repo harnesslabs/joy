@@ -4,6 +4,7 @@ use serde_json::json;
 use std::env;
 use std::fs;
 use std::path::{Path, PathBuf};
+use std::time::{SystemTime, UNIX_EPOCH};
 
 use crate::cli::{
   OwnerArgs, OwnerSubcommand, PackageArgs, PackageInitArgs, PackageKindArg, PackageSubcommand,
@@ -11,7 +12,8 @@ use crate::cli::{
 };
 use crate::commands::CommandOutput;
 use crate::error::JoyError;
-use crate::git_ops;
+use crate::git_ops::{self, GitCommandError};
+use crate::global_cache::GlobalCache;
 use crate::lockfile;
 use crate::manifest::{DependencyRequirementRef, PackageKind, PackageManifest};
 use crate::output::HumanMessageBuilder;
@@ -119,6 +121,7 @@ pub fn handle_publish(
     "publish",
     &registry_target.registry_root,
     &format!("publish {} {}", package_manifest.package.id, package_manifest.package.version),
+    registry_target.remote_url.as_deref(),
   )?;
 
   Ok(CommandOutput::new(
@@ -228,6 +231,7 @@ pub fn handle_yank(args: YankArgs, _runtime: RuntimeFlags) -> Result<CommandOutp
       "yank",
       &registry_target.registry_root,
       &format!("{} {} {}", if args.undo { "unyank" } else { "yank" }, args.package, args.version),
+      registry_target.remote_url.as_deref(),
     )?;
   }
 
@@ -362,6 +366,7 @@ fn mutate_owner(
       "owner",
       &registry_target.registry_root,
       &format!("owner {action} {package} {owner}"),
+      registry_target.remote_url.as_deref(),
     )?;
   }
 
@@ -389,6 +394,7 @@ struct RegistryTarget {
   name: String,
   registry_root: PathBuf,
   index_path: PathBuf,
+  remote_url: Option<String>,
 }
 
 fn resolve_registry_target(
@@ -414,14 +420,14 @@ fn resolve_registry_target(
     )
   })?;
   if raw.contains("://") {
-    return Err(JoyError::new(
-      command,
-      "publish_registry_transport_unsupported",
-      format!(
-        "registry `{selected}` uses remote transport `{raw}`; publish/owner/yank currently require a local filesystem index path"
-      ),
-      1,
-    ));
+    let registry_root = materialize_remote_registry_checkout(command, &selected, raw)?;
+    let index_path = registry_root.join("index.toml");
+    return Ok(RegistryTarget {
+      name: selected,
+      registry_root,
+      index_path,
+      remote_url: Some(raw.to_string()),
+    });
   }
   let raw_path = PathBuf::from(raw);
   let index_path = if raw_path
@@ -435,7 +441,7 @@ fn resolve_registry_target(
   };
   let registry_root =
     index_path.parent().map(Path::to_path_buf).unwrap_or_else(|| project_root.to_path_buf());
-  Ok(RegistryTarget { name: selected, registry_root, index_path })
+  Ok(RegistryTarget { name: selected, registry_root, index_path, remote_url: None })
 }
 
 fn load_registry_index(
@@ -511,6 +517,7 @@ fn commit_index_if_git_repo(
   command: &'static str,
   registry_root: &Path,
   message: &str,
+  remote_url: Option<&str>,
 ) -> Result<bool, JoyError> {
   if !registry_root.join(".git").is_dir() {
     return Ok(false);
@@ -532,7 +539,96 @@ fn commit_index_if_git_repo(
 
   git_ops::run(Some(registry_root), ["commit", "-m", message], "committing registry index update")
     .map_err(|err| JoyError::new(command, "git_failed", err.to_string(), 1))?;
+  if remote_url.is_some() {
+    git_ops::run(Some(registry_root), ["push", "origin", "HEAD"], "pushing registry index update")
+      .map_err(|err| {
+        map_registry_transport_git_error(command, "pushing registry index update", remote_url, err)
+      })?;
+  }
   Ok(true)
+}
+
+fn materialize_remote_registry_checkout(
+  command: &'static str,
+  registry_name: &str,
+  remote_url: &str,
+) -> Result<PathBuf, JoyError> {
+  let cache = GlobalCache::resolve()
+    .map_err(|err| JoyError::new(command, "cache_setup_failed", err.to_string(), 1))?;
+  fs::create_dir_all(cache.tmp_dir())
+    .map_err(|err| JoyError::io(command, "creating cache temp directory", cache.tmp_dir(), &err))?;
+  let nonce = SystemTime::now().duration_since(UNIX_EPOCH).map(|d| d.as_nanos()).unwrap_or(0);
+  let checkout = cache.tmp_dir().join(format!(
+    "registry-publish-{}-{}-{nonce}",
+    sanitize_registry_name(registry_name),
+    std::process::id()
+  ));
+  if checkout.exists() {
+    fs::remove_dir_all(&checkout)
+      .map_err(|err| JoyError::io(command, "removing stale registry checkout", &checkout, &err))?;
+  }
+  git_ops::run_dynamic(
+    None,
+    vec!["clone".into(), remote_url.into(), checkout.as_os_str().to_os_string()],
+    "cloning registry index checkout",
+  )
+  .map_err(|err| {
+    map_registry_transport_git_error(
+      command,
+      "cloning registry index checkout",
+      Some(remote_url),
+      err,
+    )
+  })?;
+  Ok(checkout)
+}
+
+fn sanitize_registry_name(name: &str) -> String {
+  name
+    .chars()
+    .map(|ch| if ch.is_ascii_alphanumeric() || matches!(ch, '_' | '-' | '.') { ch } else { '_' })
+    .collect()
+}
+
+fn redact_remote_url(url: &str) -> String {
+  let Some((scheme, tail)) = url.split_once("://") else {
+    return url.to_string();
+  };
+  if let Some(idx) = tail.find('@') {
+    format!("{scheme}://{}", &tail[idx + 1..])
+  } else {
+    url.to_string()
+  }
+}
+
+fn map_registry_transport_git_error(
+  command: &'static str,
+  action: &str,
+  remote_url: Option<&str>,
+  err: GitCommandError,
+) -> JoyError {
+  match err {
+    GitCommandError::Spawn { .. } => {
+      JoyError::new(command, "registry_transport_failed", format!("{action} failed: {err}"), 1)
+    },
+    GitCommandError::Failed { ref stderr, .. } => {
+      let lower = stderr.to_ascii_lowercase();
+      let auth_related = [
+        "authentication failed",
+        "could not read username",
+        "access denied",
+        "permission denied",
+        "invalid username or password",
+        "http basic: access denied",
+      ]
+      .iter()
+      .any(|needle| lower.contains(needle));
+      let code = if auth_related { "registry_auth_failed" } else { "registry_transport_failed" };
+      let target =
+        remote_url.map(redact_remote_url).unwrap_or_else(|| "<registry-remote>".to_string());
+      JoyError::new(command, code, format!("{action} failed for `{target}`: {err}"), 1)
+    },
+  }
 }
 
 fn ensure_git_identity(command: &'static str, registry_root: &Path) -> Result<(), JoyError> {

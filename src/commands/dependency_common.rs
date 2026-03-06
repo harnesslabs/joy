@@ -142,6 +142,12 @@ pub(crate) fn map_fetch_error(command: &'static str, err: fetch::FetchError) -> 
     "offline_network_disabled"
   } else if err.is_invalid_version_requirement() {
     "invalid_version_requirement"
+  } else if err.is_invalid_checksum() {
+    "invalid_checksum"
+  } else if err.is_checksum_mismatch() {
+    "checksum_mismatch"
+  } else if err.is_unsupported_archive_format() {
+    "archive_format_unsupported"
   } else if err.is_version_not_found() {
     "version_not_found"
   } else {

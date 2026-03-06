@@ -1,16 +1,16 @@
 use serde_json::json;
-use std::collections::BTreeMap;
 use std::env;
 
 use crate::cli::{FetchArgs, RuntimeFlags};
 use crate::commands::CommandOutput;
 use crate::error::JoyError;
 use crate::fetch;
-use crate::manifest::{DependencySource, Manifest};
+use crate::manifest::Manifest;
 use crate::output::HumanMessageBuilder;
-use crate::package_id::PackageId;
-use crate::registry::{RegistryRequirement, RegistryStore};
-use crate::registry_config;
+use crate::recipes::RecipeStore;
+use crate::resolver;
+
+use super::graph_common::map_resolver_error;
 
 pub fn handle(_args: FetchArgs, runtime: RuntimeFlags) -> Result<CommandOutput, JoyError> {
   let _fetch_runtime = fetch::push_runtime_options(fetch::RuntimeOptions {
@@ -31,107 +31,96 @@ pub fn handle(_args: FetchArgs, runtime: RuntimeFlags) -> Result<CommandOutput, 
   }
   let manifest = Manifest::load(&manifest_path)
     .map_err(|err| JoyError::new("fetch", "manifest_parse_error", err.to_string(), 1))?;
-  let effective = registry_config::load_effective(Some(&cwd))
-    .map_err(|err| JoyError::new("fetch", "registry_config_error", err.to_string(), 1))?;
-  let default_registry = effective.default.unwrap_or_else(|| "default".to_string());
+  let recipes = RecipeStore::load_default()
+    .map_err(|err| JoyError::new("fetch", "recipe_load_failed", err.to_string(), 1))?;
+  let resolved = resolver::resolve_manifest(&manifest, &recipes)
+    .map_err(|err| map_resolver_error("fetch", err))?;
 
-  let mut registry_stores = BTreeMap::<String, RegistryStore>::new();
   let mut fetched = Vec::new();
-  let mut skipped = Vec::new();
-
-  for (key, spec) in &manifest.dependencies {
-    let declared = spec.declared_package(key);
-    match spec.source {
-      DependencySource::Github => {
-        let package = PackageId::parse(declared).map_err(|err| {
-          JoyError::new("fetch", "invalid_package_id", format!("dependency `{key}`: {err}"), 1)
-        })?;
-        let fetched_result = if let Some(version_req) = spec.version.as_deref() {
-          fetch::fetch_github_semver(&package, version_req)
-            .map_err(|err| JoyError::new("fetch", "fetch_failed", err.to_string(), 1))?
-        } else {
-          let requested = if spec.rev.trim().is_empty() { "HEAD" } else { spec.rev.as_str() };
-          fetch::fetch_github(&package, requested)
-            .map_err(|err| JoyError::new("fetch", "fetch_failed", err.to_string(), 1))?
-        };
-        fetched.push(json!({
-          "key": key,
-          "package": declared,
-          "source": "github",
-          "rev": fetched_result.requested_rev,
-          "resolved_version": fetched_result.resolved_version,
-          "resolved_commit": fetched_result.resolved_commit,
-          "cache_hit": fetched_result.cache_hit,
-          "source_dir": fetched_result.source_dir.display().to_string(),
-        }));
+  for pkg in resolved.packages() {
+    let source_provenance =
+      resolved.source_provenance(pkg.id.as_str()).cloned().unwrap_or_default();
+    let fetched_result = match pkg.source {
+      crate::manifest::DependencySource::Github | crate::manifest::DependencySource::Registry => {
+        fetch::fetch_github(&pkg.id, &pkg.requested_rev)
+          .map_err(|err| JoyError::new("fetch", "fetch_failed", err.to_string(), 1))?
       },
-      DependencySource::Registry => {
-        let package = PackageId::parse(declared).map_err(|err| {
-          JoyError::new("fetch", "invalid_package_id", format!("dependency `{key}`: {err}"), 1)
-        })?;
-        let Some(version_req) = spec.version.as_deref() else {
-          return Err(JoyError::new(
+      crate::manifest::DependencySource::Git => {
+        let source_git = source_provenance.source_git.as_deref().ok_or_else(|| {
+          JoyError::new(
             "fetch",
-            "invalid_manifest",
-            format!("registry dependency `{key}` must declare `version`"),
+            "invalid_dependency_source",
+            format!("resolved git dependency `{}` is missing `source_git`", pkg.id),
             1,
-          ));
-        };
-        let registry_name = spec.registry.clone().unwrap_or_else(|| default_registry.clone());
-        let store = if let Some(store) = registry_stores.get(&registry_name) {
-          store.clone()
-        } else {
-          let loaded = RegistryStore::load_named_for_project(&registry_name, Some(&cwd))
-            .map_err(|err| JoyError::new("fetch", "registry_load_failed", err.to_string(), 1))?;
-          registry_stores.insert(registry_name.clone(), loaded.clone());
-          loaded
-        };
-        let release = store
-          .resolve(package.as_str(), RegistryRequirement::Semver(version_req))
-          .map_err(|err| JoyError::new("fetch", "registry_load_failed", err.to_string(), 1))?;
-        let fetched_result = fetch::fetch_github(&package, &release.source_rev)
-          .map_err(|err| JoyError::new("fetch", "fetch_failed", err.to_string(), 1))?;
-        fetched.push(json!({
-          "key": key,
-          "package": declared,
-          "source": "registry",
-          "registry": registry_name,
-          "requested_requirement": release.requested_requirement,
-          "resolved_version": release.resolved_version,
-          "rev": fetched_result.requested_rev,
-          "resolved_commit": fetched_result.resolved_commit,
-          "cache_hit": fetched_result.cache_hit,
-          "source_dir": fetched_result.source_dir.display().to_string(),
-        }));
+          )
+        })?;
+        fetch::fetch_git(&pkg.id, source_git, &pkg.requested_rev)
+          .map_err(|err| JoyError::new("fetch", "fetch_failed", err.to_string(), 1))?
       },
-      DependencySource::Git | DependencySource::Path | DependencySource::Archive => {
-        skipped.push(json!({
-          "key": key,
-          "source": spec.source.as_str(),
-          "reason": "fetch for this source backend is not implemented yet",
-        }));
+      crate::manifest::DependencySource::Path => {
+        let source_path = source_provenance.source_path.as_deref().ok_or_else(|| {
+          JoyError::new(
+            "fetch",
+            "invalid_dependency_source",
+            format!("resolved path dependency `{}` is missing `source_path`", pkg.id),
+            1,
+          )
+        })?;
+        fetch::fetch_path(&pkg.id, source_path)
+          .map_err(|err| JoyError::new("fetch", "fetch_failed", err.to_string(), 1))?
       },
-    }
+      crate::manifest::DependencySource::Archive => {
+        let source_url = source_provenance.source_url.as_deref().ok_or_else(|| {
+          JoyError::new(
+            "fetch",
+            "invalid_dependency_source",
+            format!("resolved archive dependency `{}` is missing `source_url`", pkg.id),
+            1,
+          )
+        })?;
+        let sha256 = source_provenance.source_checksum_sha256.as_deref().ok_or_else(|| {
+          JoyError::new(
+            "fetch",
+            "invalid_dependency_source",
+            format!("resolved archive dependency `{}` is missing `source_checksum_sha256`", pkg.id),
+            1,
+          )
+        })?;
+        fetch::fetch_archive(&pkg.id, source_url, sha256)
+          .map_err(|err| JoyError::new("fetch", "fetch_failed", err.to_string(), 1))?
+      },
+    };
+    fetched.push(json!({
+      "id": pkg.id.to_string(),
+      "source": pkg.source.as_str(),
+      "registry": pkg.registry,
+      "source_package": pkg.source_package,
+      "requested_requirement": pkg.requested_requirement,
+      "resolved_version": pkg.resolved_version,
+      "rev": fetched_result.requested_rev,
+      "resolved_commit": fetched_result.resolved_commit,
+      "cache_hit": fetched_result.cache_hit,
+      "source_dir": fetched_result.source_dir.display().to_string(),
+      "source_git": source_provenance.source_git,
+      "source_path": source_provenance.source_path,
+      "source_url": source_provenance.source_url,
+      "source_checksum_sha256": source_provenance.source_checksum_sha256,
+    }));
   }
 
-  let mut human = HumanMessageBuilder::new("Warmed dependency cache")
+  let human = HumanMessageBuilder::new("Warmed dependency cache")
     .kv("fetched", fetched.len().to_string())
-    .kv("skipped", skipped.len().to_string());
-  if !skipped.is_empty() {
-    human = human.warning(
-      "Some dependencies were skipped because fetch support is not implemented for their source",
-    );
-  }
+    .build();
   Ok(CommandOutput::new(
     "fetch",
-    human.build(),
+    human,
     json!({
       "project_root": cwd.display().to_string(),
       "manifest_path": manifest_path.display().to_string(),
       "fetched_count": fetched.len(),
-      "skipped_count": skipped.len(),
       "fetched": fetched,
-      "skipped": skipped,
+      "skipped_count": 0,
+      "skipped": [],
     }),
   ))
 }

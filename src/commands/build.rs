@@ -673,23 +673,68 @@ fn prefetch_dependency_stage(
   command: &'static str,
   resolved_stage: &ResolvedDependencyStage,
 ) -> Result<PrefetchedDependencyStage, JoyError> {
-  let requests = resolved_stage
-    .build_order_ids
-    .iter()
-    .map(|id| {
-      let pkg = resolved_stage
-        .resolved
-        .package(id)
-        .expect("build_order_ids must correspond to resolved packages");
-      (pkg.id.clone(), pkg.requested_rev.clone())
-    })
-    .collect::<Vec<_>>();
-  let prefetched =
-    fetch::prefetch_github_packages(requests).map_err(|err| map_fetch_error(command, err))?;
-  let all_by_key = prefetched
-    .into_iter()
-    .map(|f| ((f.package.to_string(), f.requested_rev.clone()), f))
-    .collect::<BTreeMap<_, _>>();
+  let mut all_by_key = BTreeMap::new();
+  for id in &resolved_stage.build_order_ids {
+    let pkg = resolved_stage
+      .resolved
+      .package(id)
+      .expect("build_order_ids must correspond to resolved packages");
+    let source_provenance =
+      resolved_stage.resolved.source_provenance(id).cloned().unwrap_or_default();
+    let fetched = match pkg.source {
+      crate::manifest::DependencySource::Github | crate::manifest::DependencySource::Registry => {
+        fetch::fetch_github(&pkg.id, &pkg.requested_rev)
+          .map_err(|err| map_fetch_error(command, err))?
+      },
+      crate::manifest::DependencySource::Git => {
+        let source_git = source_provenance.source_git.as_deref().ok_or_else(|| {
+          JoyError::new(
+            command,
+            "invalid_dependency_source",
+            format!("resolved git dependency `{}` is missing `source_git` metadata", pkg.id),
+            1,
+          )
+        })?;
+        fetch::fetch_git(&pkg.id, source_git, &pkg.requested_rev)
+          .map_err(|err| map_fetch_error(command, err))?
+      },
+      crate::manifest::DependencySource::Path => {
+        let source_path = source_provenance.source_path.as_deref().ok_or_else(|| {
+          JoyError::new(
+            command,
+            "invalid_dependency_source",
+            format!("resolved path dependency `{}` is missing `source_path` metadata", pkg.id),
+            1,
+          )
+        })?;
+        fetch::fetch_path(&pkg.id, source_path).map_err(|err| map_fetch_error(command, err))?
+      },
+      crate::manifest::DependencySource::Archive => {
+        let source_url = source_provenance.source_url.as_deref().ok_or_else(|| {
+          JoyError::new(
+            command,
+            "invalid_dependency_source",
+            format!("resolved archive dependency `{}` is missing `source_url` metadata", pkg.id),
+            1,
+          )
+        })?;
+        let sha256 = source_provenance.source_checksum_sha256.as_deref().ok_or_else(|| {
+          JoyError::new(
+            command,
+            "invalid_dependency_source",
+            format!(
+              "resolved archive dependency `{}` is missing `source_checksum_sha256` metadata",
+              pkg.id
+            ),
+            1,
+          )
+        })?;
+        fetch::fetch_archive(&pkg.id, source_url, sha256)
+          .map_err(|err| map_fetch_error(command, err))?
+      },
+    };
+    all_by_key.insert((fetched.package.to_string(), fetched.requested_rev.clone()), fetched);
+  }
   let build_by_key = all_by_key.clone();
   Ok(PrefetchedDependencyStage { all_by_key, build_by_key })
 }
@@ -1215,14 +1260,16 @@ fn assemble_lockfile_packages(
     }
     let (metadata_source, package_manifest_digest, declared_deps_source) =
       lockfile_metadata_provenance(recipe.is_some(), &fetched.source_dir);
+    let source_provenance =
+      resolved.source_provenance(pkg.id.as_str()).cloned().unwrap_or_default();
 
     packages.push(lockfile::LockedPackage {
       id: pkg.id.to_string(),
       source: dependency_source_name(&pkg.source).to_string(),
-      source_git: None,
-      source_path: None,
-      source_url: None,
-      source_checksum_sha256: None,
+      source_git: source_provenance.source_git,
+      source_path: source_provenance.source_path,
+      source_url: source_provenance.source_url,
+      source_checksum_sha256: source_provenance.source_checksum_sha256,
       registry: pkg.registry.clone(),
       source_package: pkg.source_package.clone(),
       requested_rev: pkg.requested_rev.clone(),
