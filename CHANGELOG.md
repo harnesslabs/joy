@@ -6,6 +6,17 @@ The format is based on Keep a Changelog and this project adheres to Semantic Ver
 
 ## [Unreleased]
 
+## [0.2.0](https://github.com/harnesslabs/joy/compare/v0.1.2...v0.2.0) - 2026-03-06
+
+### Added
+
+- phase87-92 source parity and remote registry publish transport ([#181](https://github.com/harnesslabs/joy/pull/181))
+- phase77-86 cargo/uv-grade usability wave ([#179](https://github.com/harnesslabs/joy/pull/179))
+
+### Other
+
+- *(book)* recover mdbook parity and add playbook ([#182](https://github.com/harnesslabs/joy/pull/182))
+
 ## [0.1.2](https://github.com/harnesslabs/joy/compare/v0.1.1...v0.1.2) - 2026-03-05
 
 ### Fixed
