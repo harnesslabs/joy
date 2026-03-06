@@ -27,10 +27,6 @@ use crate::registry::{self, RegistryRequirement};
 pub struct ResolvedPackage {
   pub id: PackageId,
   pub source: DependencySource,
-  pub source_git: Option<String>,
-  pub source_path: Option<String>,
-  pub source_url: Option<String>,
-  pub source_checksum_sha256: Option<String>,
   pub registry: Option<String>,
   pub source_package: Option<String>,
   pub requested_rev: String,
@@ -42,11 +38,21 @@ pub struct ResolvedPackage {
   pub direct: bool,
 }
 
+/// Source locator metadata associated with a resolved package ID.
+#[derive(Debug, Clone, PartialEq, Eq, Default)]
+pub struct ResolvedSourceProvenance {
+  pub source_git: Option<String>,
+  pub source_path: Option<String>,
+  pub source_url: Option<String>,
+  pub source_checksum_sha256: Option<String>,
+}
+
 /// Resolved dependency DAG with stable lookup helpers.
 #[derive(Debug, Clone)]
 pub struct ResolvedGraph {
   graph: DiGraph<ResolvedPackage, ()>,
   by_id: BTreeMap<String, NodeIndex>,
+  source_provenance: BTreeMap<String, ResolvedSourceProvenance>,
 }
 
 impl ResolvedGraph {
@@ -58,6 +64,11 @@ impl ResolvedGraph {
   /// Iterate all resolved packages in graph insertion order.
   pub fn packages(&self) -> impl Iterator<Item = &ResolvedPackage> {
     self.graph.node_weights()
+  }
+
+  /// Lookup source locator metadata for a resolved package ID.
+  pub fn source_provenance(&self, id: &str) -> Option<&ResolvedSourceProvenance> {
+    self.source_provenance.get(id)
   }
 
   /// Return a topological build order with dependencies before dependents.
@@ -221,19 +232,11 @@ pub fn resolve_manifest(
       let source_git = direct_source_meta
         .get(package.as_str())
         .and_then(|meta| meta.source_git.as_deref())
-        .ok_or_else(|| ResolverError::MissingSourceField {
-          dependency: package.to_string(),
-          source_kind: source.as_str().to_string(),
-          field: "git",
-        })?;
+        .ok_or_else(|| missing_source_metadata_error(package, source, "git"))?;
       let rev = match request {
         ResolveRequest::Rev(rev) => rev.as_str(),
         ResolveRequest::Version(_) => {
-          return Err(ResolverError::MissingSourceField {
-            dependency: package.to_string(),
-            source_kind: source.as_str().to_string(),
-            field: "rev",
-          });
+          return Err(missing_source_metadata_error(package, source, "rev"));
         },
       };
       let fetched = fetch::fetch_git(package, source_git, rev)
@@ -256,11 +259,7 @@ pub fn resolve_manifest(
       let source_path = direct_source_meta
         .get(package.as_str())
         .and_then(|meta| meta.source_path.as_deref())
-        .ok_or_else(|| ResolverError::MissingSourceField {
-          dependency: package.to_string(),
-          source_kind: source.as_str().to_string(),
-          field: "path",
-        })?;
+        .ok_or_else(|| missing_source_metadata_error(package, source, "path"))?;
       let fetched = fetch::fetch_path(package, source_path)
         .map_err(|source| ResolverError::Fetch { package: package.to_string(), source })?;
       Ok(ResolvedSelection {
@@ -281,19 +280,11 @@ pub fn resolve_manifest(
       let source_url = direct_source_meta
         .get(package.as_str())
         .and_then(|meta| meta.source_url.as_deref())
-        .ok_or_else(|| ResolverError::MissingSourceField {
-          dependency: package.to_string(),
-          source_kind: source.as_str().to_string(),
-          field: "url",
-        })?;
+        .ok_or_else(|| missing_source_metadata_error(package, source, "url"))?;
       let source_checksum_sha256 = direct_source_meta
         .get(package.as_str())
         .and_then(|meta| meta.source_checksum_sha256.as_deref())
-        .ok_or_else(|| ResolverError::MissingSourceField {
-          dependency: package.to_string(),
-          source_kind: source.as_str().to_string(),
-          field: "sha256",
-        })?;
+        .ok_or_else(|| missing_source_metadata_error(package, source, "sha256"))?;
       let fetched = fetch::fetch_archive(package, source_url, source_checksum_sha256)
         .map_err(|source| ResolverError::Fetch { package: package.to_string(), source })?;
       Ok(ResolvedSelection {
@@ -363,6 +354,7 @@ where
   // resolution pluggable without rewriting conflict/cycle handling.
   let mut graph = DiGraph::<ResolvedPackage, ()>::new();
   let mut by_id = BTreeMap::<String, NodeIndex>::new();
+  let mut source_provenance = BTreeMap::<String, ResolvedSourceProvenance>::new();
   let mut queue = VecDeque::<PendingDependency>::new();
 
   for (raw_id, spec) in &manifest.dependencies {
@@ -410,28 +402,14 @@ where
       if existing.source_package.is_none() && selection.source_package.is_some() {
         existing.source_package = selection.source_package.clone();
       }
-      if existing.source_git.is_none() && selection.source_git.is_some() {
-        existing.source_git = selection.source_git.clone();
-      }
-      if existing.source_path.is_none() && selection.source_path.is_some() {
-        existing.source_path = selection.source_path.clone();
-      }
-      if existing.source_url.is_none() && selection.source_url.is_some() {
-        existing.source_url = selection.source_url.clone();
-      }
-      if existing.source_checksum_sha256.is_none() && selection.source_checksum_sha256.is_some() {
-        existing.source_checksum_sha256 = selection.source_checksum_sha256.clone();
-      }
+      let entry = source_provenance.entry(key.clone()).or_default();
+      merge_source_provenance(entry, &selection);
       existing_idx
     } else {
       let recipe = recipes.get(&pending.package);
       let node = ResolvedPackage {
         id: pending.package.clone(),
         source: pending.source.clone(),
-        source_git: selection.source_git.clone(),
-        source_path: selection.source_path.clone(),
-        source_url: selection.source_url.clone(),
-        source_checksum_sha256: selection.source_checksum_sha256.clone(),
         registry: selection.registry.clone(),
         source_package: selection.source_package.clone(),
         requested_rev,
@@ -444,6 +422,7 @@ where
       };
       let idx = graph.add_node(node);
       by_id.insert(key.clone(), idx);
+      source_provenance.insert(key.clone(), selection_source_provenance(&selection));
 
       if let Some(recipe) = recipe {
         for dep in recipe.dep_packages() {
@@ -495,7 +474,7 @@ where
     }
   }
 
-  let resolved = ResolvedGraph { graph, by_id };
+  let resolved = ResolvedGraph { graph, by_id, source_provenance };
   let _ = resolved.build_order()?;
   Ok(resolved)
 }
@@ -536,6 +515,30 @@ struct ResolvedSelection {
   resolved_version: Option<String>,
   resolved_commit: String,
   declared_deps: Vec<DeclaredDependency>,
+}
+
+fn selection_source_provenance(selection: &ResolvedSelection) -> ResolvedSourceProvenance {
+  ResolvedSourceProvenance {
+    source_git: selection.source_git.clone(),
+    source_path: selection.source_path.clone(),
+    source_url: selection.source_url.clone(),
+    source_checksum_sha256: selection.source_checksum_sha256.clone(),
+  }
+}
+
+fn merge_source_provenance(existing: &mut ResolvedSourceProvenance, selection: &ResolvedSelection) {
+  if existing.source_git.is_none() && selection.source_git.is_some() {
+    existing.source_git = selection.source_git.clone();
+  }
+  if existing.source_path.is_none() && selection.source_path.is_some() {
+    existing.source_path = selection.source_path.clone();
+  }
+  if existing.source_url.is_none() && selection.source_url.is_some() {
+    existing.source_url = selection.source_url.clone();
+  }
+  if existing.source_checksum_sha256.is_none() && selection.source_checksum_sha256.is_some() {
+    existing.source_checksum_sha256 = selection.source_checksum_sha256.clone();
+  }
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -654,6 +657,25 @@ struct DirectSourceMeta {
   source_checksum_sha256: Option<String>,
 }
 
+fn missing_source_field_marker(field: &'static str) -> String {
+  format!("[missing-field:{field}]")
+}
+
+pub(crate) fn unsupported_source_is_missing_metadata(source_kind: &str) -> bool {
+  source_kind.contains("[missing-field:")
+}
+
+fn missing_source_metadata_error(
+  package: &PackageId,
+  source: &DependencySource,
+  field: &'static str,
+) -> ResolverError {
+  ResolverError::UnsupportedSource {
+    dependency: package.to_string(),
+    source_kind: format!("{} {}", source.as_str(), missing_source_field_marker(field)),
+  }
+}
+
 fn resolve_dependency_package_id(
   raw_id: &str,
   spec: &DependencySpec,
@@ -757,14 +779,8 @@ pub enum ResolverError {
     #[source]
     source: registry::RegistryError,
   },
-  #[error(
-    "dependency `{dependency}` uses source `{source_kind}` which is not yet supported by resolver"
-  )]
+  #[error("dependency `{dependency}` source `{source_kind}` cannot be resolved by resolver")]
   UnsupportedSource { dependency: String, source_kind: String },
-  #[error(
-    "dependency `{dependency}` uses source `{source_kind}` but is missing required `{field}` metadata"
-  )]
-  MissingSourceField { dependency: String, source_kind: String, field: &'static str },
   #[error(
     "registry package `{package}` currently maps to `{source_package}`, but alias package coordinates are not supported yet"
   )]

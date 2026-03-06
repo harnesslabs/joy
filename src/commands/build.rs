@@ -679,13 +679,15 @@ fn prefetch_dependency_stage(
       .resolved
       .package(id)
       .expect("build_order_ids must correspond to resolved packages");
+    let source_provenance =
+      resolved_stage.resolved.source_provenance(id).cloned().unwrap_or_default();
     let fetched = match pkg.source {
       crate::manifest::DependencySource::Github | crate::manifest::DependencySource::Registry => {
         fetch::fetch_github(&pkg.id, &pkg.requested_rev)
           .map_err(|err| map_fetch_error(command, err))?
       },
       crate::manifest::DependencySource::Git => {
-        let source_git = pkg.source_git.as_deref().ok_or_else(|| {
+        let source_git = source_provenance.source_git.as_deref().ok_or_else(|| {
           JoyError::new(
             command,
             "invalid_dependency_source",
@@ -697,7 +699,7 @@ fn prefetch_dependency_stage(
           .map_err(|err| map_fetch_error(command, err))?
       },
       crate::manifest::DependencySource::Path => {
-        let source_path = pkg.source_path.as_deref().ok_or_else(|| {
+        let source_path = source_provenance.source_path.as_deref().ok_or_else(|| {
           JoyError::new(
             command,
             "invalid_dependency_source",
@@ -708,7 +710,7 @@ fn prefetch_dependency_stage(
         fetch::fetch_path(&pkg.id, source_path).map_err(|err| map_fetch_error(command, err))?
       },
       crate::manifest::DependencySource::Archive => {
-        let source_url = pkg.source_url.as_deref().ok_or_else(|| {
+        let source_url = source_provenance.source_url.as_deref().ok_or_else(|| {
           JoyError::new(
             command,
             "invalid_dependency_source",
@@ -716,7 +718,7 @@ fn prefetch_dependency_stage(
             1,
           )
         })?;
-        let sha256 = pkg.source_checksum_sha256.as_deref().ok_or_else(|| {
+        let sha256 = source_provenance.source_checksum_sha256.as_deref().ok_or_else(|| {
           JoyError::new(
             command,
             "invalid_dependency_source",
@@ -1258,14 +1260,16 @@ fn assemble_lockfile_packages(
     }
     let (metadata_source, package_manifest_digest, declared_deps_source) =
       lockfile_metadata_provenance(recipe.is_some(), &fetched.source_dir);
+    let source_provenance =
+      resolved.source_provenance(pkg.id.as_str()).cloned().unwrap_or_default();
 
     packages.push(lockfile::LockedPackage {
       id: pkg.id.to_string(),
       source: dependency_source_name(&pkg.source).to_string(),
-      source_git: pkg.source_git.clone(),
-      source_path: pkg.source_path.clone(),
-      source_url: pkg.source_url.clone(),
-      source_checksum_sha256: pkg.source_checksum_sha256.clone(),
+      source_git: source_provenance.source_git,
+      source_path: source_provenance.source_path,
+      source_url: source_provenance.source_url,
+      source_checksum_sha256: source_provenance.source_checksum_sha256,
       registry: pkg.registry.clone(),
       source_package: pkg.source_package.clone(),
       requested_rev: pkg.requested_rev.clone(),

@@ -75,7 +75,11 @@ pub(crate) fn map_resolver_error(command: &'static str, err: resolver::ResolverE
     | resolver::ResolverError::RegistryResolve { .. } => "registry_load_failed",
     resolver::ResolverError::RegistryAliasUnsupported { .. } => "registry_alias_unsupported",
     resolver::ResolverError::PackageMetadataMismatch { .. } => "package_metadata_mismatch",
-    resolver::ResolverError::MissingSourceField { .. } => "invalid_dependency_source",
+    resolver::ResolverError::UnsupportedSource { source_kind, .. }
+      if resolver::unsupported_source_is_missing_metadata(source_kind) =>
+    {
+      "invalid_dependency_source"
+    },
     resolver::ResolverError::UnsupportedSource { .. } => "source_backend_unsupported",
     _ => "dependency_resolve_failed",
   };

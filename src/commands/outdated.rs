@@ -5,7 +5,10 @@ use std::env;
 
 use super::dependency_common::map_registry_error;
 use super::graph_common::validate_locked_graph_lockfile;
-use crate::cli::{OutdatedArgs, OutdatedSourceArg, RuntimeFlags};
+use crate::cli::{
+  OutdatedArgs, OutdatedSourceArg, OutdatedSourceOverride, RuntimeFlags,
+  take_outdated_source_override,
+};
 use crate::commands::CommandOutput;
 use crate::error::JoyError;
 use crate::fetch;
@@ -31,9 +34,16 @@ impl From<OutdatedSourceArg> for OutdatedSources {
       OutdatedSourceArg::All => Self::All,
       OutdatedSourceArg::Registry => Self::Registry,
       OutdatedSourceArg::Github => Self::Github,
-      OutdatedSourceArg::Git => Self::Git,
-      OutdatedSourceArg::Path => Self::Path,
-      OutdatedSourceArg::Archive => Self::Archive,
+    }
+  }
+}
+
+impl From<OutdatedSourceOverride> for OutdatedSources {
+  fn from(value: OutdatedSourceOverride) -> Self {
+    match value {
+      OutdatedSourceOverride::Git => Self::Git,
+      OutdatedSourceOverride::Path => Self::Path,
+      OutdatedSourceOverride::Archive => Self::Archive,
     }
   }
 }
@@ -93,7 +103,8 @@ pub fn handle(args: OutdatedArgs, runtime: RuntimeFlags) -> Result<CommandOutput
     .collect::<Vec<_>>();
   roots.sort();
 
-  let sources = OutdatedSources::from(args.sources);
+  let sources =
+    take_outdated_source_override().map_or_else(|| OutdatedSources::from(args.sources), Into::into);
   let mut registry_stores = BTreeMap::<String, RegistryStore>::new();
 
   let mut rows = lock

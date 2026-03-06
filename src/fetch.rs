@@ -645,12 +645,53 @@ fn normalize_sha256(raw: &str) -> Result<String, FetchError> {
   let normalized = raw.trim().to_ascii_lowercase();
   let valid = normalized.len() == 64 && normalized.chars().all(|ch| ch.is_ascii_hexdigit());
   if !valid {
-    return Err(FetchError::InvalidChecksum {
-      checksum: raw.to_string(),
-      reason: "expected 64 lowercase/uppercase hex characters".to_string(),
-    });
+    return Err(invalid_checksum_error(raw));
   }
   Ok(normalized)
+}
+
+const ARCHIVE_INVALID_CHECKSUM_ACTION: &str = "validating archive checksum metadata";
+const ARCHIVE_CHECKSUM_MISMATCH_ACTION: &str = "verifying archive checksum against lockfile";
+const ARCHIVE_UNSUPPORTED_FORMAT_ACTION: &str = "validating archive file extension";
+
+fn archive_validation_io_error(action: &'static str, path: PathBuf, message: String) -> FetchError {
+  FetchError::Io {
+    action: action.to_string(),
+    path,
+    source: std::io::Error::new(std::io::ErrorKind::InvalidData, message),
+  }
+}
+
+fn invalid_checksum_error(raw: &str) -> FetchError {
+  archive_validation_io_error(
+    ARCHIVE_INVALID_CHECKSUM_ACTION,
+    PathBuf::from("<source-checksum>"),
+    format!("invalid sha256 checksum `{raw}`: expected 64 lowercase/uppercase hex characters"),
+  )
+}
+
+fn checksum_mismatch_error(
+  package: &PackageId,
+  expected: &str,
+  actual: &str,
+  archive_file: &Path,
+) -> FetchError {
+  archive_validation_io_error(
+    ARCHIVE_CHECKSUM_MISMATCH_ACTION,
+    archive_file.to_path_buf(),
+    format!(
+      "archive/source checksum mismatch for `{}`: expected {expected}, actual {actual}",
+      package.as_str()
+    ),
+  )
+}
+
+fn unsupported_archive_format_error(archive_file: &Path, expected: &str) -> FetchError {
+  archive_validation_io_error(
+    ARCHIVE_UNSUPPORTED_FORMAT_ACTION,
+    archive_file.to_path_buf(),
+    format!("unsupported archive format for `{}` (expected {expected})", archive_file.display()),
+  )
 }
 
 fn materialize_archive_snapshot(
@@ -685,11 +726,7 @@ fn materialize_archive_snapshot(
     let existing = hash_file_sha256(archive_file)?;
     if existing != expected_sha256 {
       if runtime_offline_enabled() {
-        return Err(FetchError::ChecksumMismatch {
-          package: package.to_string(),
-          expected: expected_sha256.to_string(),
-          actual: existing,
-        });
+        return Err(checksum_mismatch_error(package, expected_sha256, &existing, archive_file));
       }
       fs::remove_file(archive_file).map_err(|source| FetchError::Io {
         action: "removing stale archive cache file".into(),
@@ -711,11 +748,7 @@ fn materialize_archive_snapshot(
 
   let actual_checksum = hash_file_sha256(archive_file)?;
   if actual_checksum != expected_sha256 {
-    return Err(FetchError::ChecksumMismatch {
-      package: package.to_string(),
-      expected: expected_sha256.to_string(),
-      actual: actual_checksum,
-    });
+    return Err(checksum_mismatch_error(package, expected_sha256, &actual_checksum, archive_file));
   }
 
   let nonce = SystemTime::now().duration_since(UNIX_EPOCH).map(|dur| dur.as_nanos()).unwrap_or(0);
@@ -811,10 +844,7 @@ fn extract_archive_file(archive_file: &Path, out_dir: &Path) -> Result<(), Fetch
   let name =
     archive_file.file_name().and_then(|v| v.to_str()).unwrap_or_default().to_ascii_lowercase();
   if !(name.ends_with(".tar.gz") || name.ends_with(".tgz")) {
-    return Err(FetchError::UnsupportedArchiveFormat {
-      archive: archive_file.to_path_buf(),
-      expected: ".tar.gz or .tgz".to_string(),
-    });
+    return Err(unsupported_archive_format_error(archive_file, ".tar.gz or .tgz"));
   }
   let file = fs::File::open(archive_file).map_err(|source| FetchError::Io {
     action: "opening archive cache file".into(),
@@ -1097,12 +1127,6 @@ pub enum FetchError {
     #[source]
     source: std::io::Error,
   },
-  #[error("invalid sha256 checksum `{checksum}`: {reason}")]
-  InvalidChecksum { checksum: String, reason: String },
-  #[error("archive/source checksum mismatch for `{package}`: expected {expected}, actual {actual}")]
-  ChecksumMismatch { package: String, expected: String, actual: String },
-  #[error("unsupported archive format for `{archive}` (expected {expected})")]
-  UnsupportedArchiveFormat { archive: PathBuf, expected: String },
   #[error("failed to create tokio runtime for parallel fetch: {0}")]
   Runtime(std::io::Error),
   #[error("{0}")]
@@ -1162,15 +1186,30 @@ impl FetchError {
   }
 
   pub fn is_invalid_checksum(&self) -> bool {
-    matches!(self, Self::InvalidChecksum { .. })
+    matches!(
+      self,
+      Self::Io { action, source, .. }
+        if action == ARCHIVE_INVALID_CHECKSUM_ACTION
+          && source.kind() == std::io::ErrorKind::InvalidData
+    )
   }
 
   pub fn is_checksum_mismatch(&self) -> bool {
-    matches!(self, Self::ChecksumMismatch { .. })
+    matches!(
+      self,
+      Self::Io { action, source, .. }
+        if action == ARCHIVE_CHECKSUM_MISMATCH_ACTION
+          && source.kind() == std::io::ErrorKind::InvalidData
+    )
   }
 
   pub fn is_unsupported_archive_format(&self) -> bool {
-    matches!(self, Self::UnsupportedArchiveFormat { .. })
+    matches!(
+      self,
+      Self::Io { action, source, .. }
+        if action == ARCHIVE_UNSUPPORTED_FORMAT_ACTION
+          && source.kind() == std::io::ErrorKind::InvalidData
+    )
   }
 
   pub fn is_transient_network(&self) -> bool {
@@ -1210,9 +1249,6 @@ impl FetchError {
       | Self::OfflineNetworkDisabled { .. }
       | Self::InvalidVersionReq { .. }
       | Self::VersionNotFound { .. }
-      | Self::InvalidChecksum { .. }
-      | Self::ChecksumMismatch { .. }
-      | Self::UnsupportedArchiveFormat { .. }
       | Self::GlobalCache(_)
       | Self::Io { .. }
       | Self::Runtime(_)

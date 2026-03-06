@@ -38,13 +38,15 @@ pub fn handle(_args: FetchArgs, runtime: RuntimeFlags) -> Result<CommandOutput, 
 
   let mut fetched = Vec::new();
   for pkg in resolved.packages() {
+    let source_provenance =
+      resolved.source_provenance(pkg.id.as_str()).cloned().unwrap_or_default();
     let fetched_result = match pkg.source {
       crate::manifest::DependencySource::Github | crate::manifest::DependencySource::Registry => {
         fetch::fetch_github(&pkg.id, &pkg.requested_rev)
           .map_err(|err| JoyError::new("fetch", "fetch_failed", err.to_string(), 1))?
       },
       crate::manifest::DependencySource::Git => {
-        let source_git = pkg.source_git.as_deref().ok_or_else(|| {
+        let source_git = source_provenance.source_git.as_deref().ok_or_else(|| {
           JoyError::new(
             "fetch",
             "invalid_dependency_source",
@@ -56,7 +58,7 @@ pub fn handle(_args: FetchArgs, runtime: RuntimeFlags) -> Result<CommandOutput, 
           .map_err(|err| JoyError::new("fetch", "fetch_failed", err.to_string(), 1))?
       },
       crate::manifest::DependencySource::Path => {
-        let source_path = pkg.source_path.as_deref().ok_or_else(|| {
+        let source_path = source_provenance.source_path.as_deref().ok_or_else(|| {
           JoyError::new(
             "fetch",
             "invalid_dependency_source",
@@ -68,7 +70,7 @@ pub fn handle(_args: FetchArgs, runtime: RuntimeFlags) -> Result<CommandOutput, 
           .map_err(|err| JoyError::new("fetch", "fetch_failed", err.to_string(), 1))?
       },
       crate::manifest::DependencySource::Archive => {
-        let source_url = pkg.source_url.as_deref().ok_or_else(|| {
+        let source_url = source_provenance.source_url.as_deref().ok_or_else(|| {
           JoyError::new(
             "fetch",
             "invalid_dependency_source",
@@ -76,7 +78,7 @@ pub fn handle(_args: FetchArgs, runtime: RuntimeFlags) -> Result<CommandOutput, 
             1,
           )
         })?;
-        let sha256 = pkg.source_checksum_sha256.as_deref().ok_or_else(|| {
+        let sha256 = source_provenance.source_checksum_sha256.as_deref().ok_or_else(|| {
           JoyError::new(
             "fetch",
             "invalid_dependency_source",
@@ -99,10 +101,10 @@ pub fn handle(_args: FetchArgs, runtime: RuntimeFlags) -> Result<CommandOutput, 
       "resolved_commit": fetched_result.resolved_commit,
       "cache_hit": fetched_result.cache_hit,
       "source_dir": fetched_result.source_dir.display().to_string(),
-      "source_git": pkg.source_git,
-      "source_path": pkg.source_path,
-      "source_url": pkg.source_url,
-      "source_checksum_sha256": pkg.source_checksum_sha256,
+      "source_git": source_provenance.source_git,
+      "source_path": source_provenance.source_path,
+      "source_url": source_provenance.source_url,
+      "source_checksum_sha256": source_provenance.source_checksum_sha256,
     }));
   }
 
