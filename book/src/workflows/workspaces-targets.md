@@ -10,17 +10,34 @@ Workspace root `joy.toml`:
 [workspace]
 members = ["apps/app", "tools/tooling"]
 default_member = "apps/app" # optional
+profile = "release"         # optional: dev|release
 ```
 
-Run a command from the workspace root:
+Run project-scoped commands from the workspace root:
 
 ```bash
 joy -p apps/app build
 joy -p apps/app run
 joy -p apps/app tree
+joy -p apps/app sync
+joy -p apps/app verify
 ```
 
-If no `default_member` is set, `joy` requires `-p/--package <member>` for project-scoped commands run from the workspace root.
+If `default_member` is unset, workspace-root project commands require `-p/--workspace-package`.
+
+## Workspace Lockfile Behavior (Shipped)
+
+When routed from workspace root with `-p`:
+
+- lockfile path is `<workspace-root>/joy.lock`
+- lock hash is computed from root manifest + member manifests
+- lock package entries aggregate across workspace members
+
+Use this to keep workspace member dependency state deterministic in CI.
+
+## Workspace Profile Default (Shipped)
+
+If `[workspace] profile = "release"` is set, `sync/build/run` default to release profile for workspace-routed commands unless `--release` explicitly overrides behavior.
 
 ## Named Targets (Shipped)
 
@@ -44,9 +61,3 @@ Build or run a named target:
 joy build --target tool
 joy run --target tool
 ```
-
-## Deferred: Workspace-Wide Lockfile Strategy
-
-Status: `Deferred`
-
-Today, per-member `joy.lock` and `.joy/` state are the active behavior. A workspace-wide lockfile strategy is a future roadmap item.
