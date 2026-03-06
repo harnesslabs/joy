@@ -1,6 +1,7 @@
 use clap::{Args, Parser, Subcommand, ValueEnum};
 use std::env;
 use std::io::IsTerminal;
+use std::path::PathBuf;
 
 use crate::output::{
   ColorPreference, GlyphMode, GlyphPreference, HumanUiConfig, OutputMode, ProgressPreference,
@@ -90,6 +91,8 @@ impl Cli {
       progress: progress_enabled,
       ui,
       workspace_package: self.workspace_package.clone(),
+      workspace_root: None,
+      workspace_member: None,
     }
   }
 
@@ -139,6 +142,8 @@ pub struct RuntimeFlags {
   pub progress: bool,
   pub ui: HumanUiConfig,
   pub workspace_package: Option<String>,
+  pub workspace_root: Option<PathBuf>,
+  pub workspace_member: Option<String>,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, ValueEnum)]
@@ -294,6 +299,29 @@ pub enum Commands {
   /// Report available updates for direct and transitive dependencies.
   #[command(after_help = "Examples:\n  joy outdated\n  joy --json outdated")]
   Outdated(OutdatedArgs),
+  /// Manage registry configuration.
+  Registry(RegistryArgs),
+  /// Search package metadata in a configured registry.
+  Search(SearchArgs),
+  /// Show package metadata for a configured registry package.
+  Info(InfoArgs),
+  /// Warm dependency cache state without building.
+  Fetch(FetchArgs),
+  /// Vendor dependencies into a project-local directory.
+  Vendor(VendorArgs),
+  /// Verify lockfile/source integrity and emit a baseline SBOM summary.
+  #[command(after_help = "Examples:\n  joy verify\n  joy --json verify --strict --sbom sbom.json")]
+  Verify(VerifyArgs),
+  /// Initialize and manage reusable package publishing workflows.
+  Package(PackageArgs),
+  /// Publish a package manifest into a self-hosted registry index.
+  Publish(PublishArgs),
+  /// Manage package owners in a self-hosted registry index.
+  Owner(OwnerArgs),
+  /// Yank or unyank a published package version.
+  Yank(YankArgs),
+  /// Manage global cache lifecycle.
+  Cache(CacheArgs),
   /// Emit machine-oriented project/dependency/editor metadata.
   #[command(after_help = "Examples:\n  joy metadata\n  joy --json metadata")]
   Metadata(MetadataArgs),
@@ -329,10 +357,16 @@ pub struct InitArgs {
 #[derive(Debug, Args)]
 pub struct AddArgs {
   pub package: String,
+  #[arg(long = "as")]
+  pub as_name: Option<String>,
   #[arg(long)]
   pub rev: Option<String>,
   #[arg(long)]
   pub version: Option<String>,
+  #[arg(long)]
+  pub registry: Option<String>,
+  #[arg(long)]
+  pub sha256: Option<String>,
   #[arg(long)]
   pub no_sync: bool,
 }
@@ -349,6 +383,183 @@ pub struct UpdateArgs {
   pub rev: Option<String>,
   #[arg(long)]
   pub version: Option<String>,
+  #[arg(long)]
+  pub registry: Option<String>,
+  #[arg(long)]
+  pub sha256: Option<String>,
+}
+
+#[derive(Debug, Args)]
+pub struct RegistryArgs {
+  #[command(subcommand)]
+  pub command: RegistrySubcommand,
+}
+
+#[derive(Debug, Subcommand)]
+pub enum RegistrySubcommand {
+  List(RegistryListArgs),
+  Add(RegistryAddArgs),
+  Remove(RegistryRemoveArgs),
+  SetDefault(RegistrySetDefaultArgs),
+}
+
+#[derive(Debug, Args)]
+pub struct RegistryListArgs {
+  #[arg(long)]
+  pub project: bool,
+}
+
+#[derive(Debug, Args)]
+pub struct RegistryAddArgs {
+  pub name: String,
+  pub index: String,
+  #[arg(long)]
+  pub default: bool,
+  #[arg(long)]
+  pub project: bool,
+}
+
+#[derive(Debug, Args)]
+pub struct RegistryRemoveArgs {
+  pub name: String,
+  #[arg(long)]
+  pub project: bool,
+}
+
+#[derive(Debug, Args)]
+pub struct RegistrySetDefaultArgs {
+  pub name: String,
+  #[arg(long)]
+  pub project: bool,
+}
+
+#[derive(Debug, Args)]
+pub struct SearchArgs {
+  pub query: String,
+  #[arg(long)]
+  pub registry: Option<String>,
+  #[arg(long, default_value_t = 20)]
+  pub limit: usize,
+}
+
+#[derive(Debug, Args)]
+pub struct InfoArgs {
+  pub package: String,
+  #[arg(long)]
+  pub registry: Option<String>,
+}
+
+#[derive(Debug, Args)]
+pub struct FetchArgs {}
+
+#[derive(Debug, Args)]
+pub struct VendorArgs {
+  #[arg(long)]
+  pub output: Option<String>,
+}
+
+#[derive(Debug, Args)]
+pub struct VerifyArgs {
+  /// Require checksum coverage for every locked package.
+  #[arg(long)]
+  pub strict: bool,
+  /// Write generated SBOM JSON to this path.
+  #[arg(long)]
+  pub sbom: Option<String>,
+}
+
+#[derive(Debug, Args)]
+pub struct PackageArgs {
+  #[command(subcommand)]
+  pub command: PackageSubcommand,
+}
+
+#[derive(Debug, Subcommand)]
+pub enum PackageSubcommand {
+  Init(PackageInitArgs),
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, ValueEnum)]
+pub enum PackageKindArg {
+  HeaderOnly,
+  Cmake,
+}
+
+#[derive(Debug, Args)]
+pub struct PackageInitArgs {
+  pub id: String,
+  #[arg(long, default_value = "0.1.0")]
+  pub version: String,
+  #[arg(long, value_enum, default_value_t = PackageKindArg::HeaderOnly)]
+  pub kind: PackageKindArg,
+  #[arg(long)]
+  pub force: bool,
+}
+
+#[derive(Debug, Args)]
+pub struct PublishArgs {
+  #[arg(long)]
+  pub registry: Option<String>,
+  #[arg(long)]
+  pub rev: Option<String>,
+  #[arg(long)]
+  pub source_package: Option<String>,
+}
+
+#[derive(Debug, Args)]
+pub struct OwnerArgs {
+  #[command(subcommand)]
+  pub command: OwnerSubcommand,
+}
+
+#[derive(Debug, Subcommand)]
+pub enum OwnerSubcommand {
+  List(OwnerListArgs),
+  Add(OwnerMutationArgs),
+  Remove(OwnerMutationArgs),
+}
+
+#[derive(Debug, Args)]
+pub struct OwnerListArgs {
+  pub package: String,
+  #[arg(long)]
+  pub registry: Option<String>,
+}
+
+#[derive(Debug, Args)]
+pub struct OwnerMutationArgs {
+  pub package: String,
+  pub owner: String,
+  #[arg(long)]
+  pub registry: Option<String>,
+}
+
+#[derive(Debug, Args)]
+pub struct YankArgs {
+  pub package: String,
+  #[arg(long)]
+  pub version: String,
+  #[arg(long)]
+  pub undo: bool,
+  #[arg(long)]
+  pub registry: Option<String>,
+}
+
+#[derive(Debug, Args)]
+pub struct CacheArgs {
+  #[command(subcommand)]
+  pub command: CacheSubcommand,
+}
+
+#[derive(Debug, Subcommand)]
+pub enum CacheSubcommand {
+  Gc(CacheGcArgs),
+}
+
+#[derive(Debug, Args)]
+pub struct CacheGcArgs {
+  #[arg(long)]
+  pub aggressive: bool,
 }
 
 #[derive(Debug, Args)]
@@ -430,7 +641,10 @@ pub struct RunArgs {
 mod tests {
   use clap::Parser;
 
-  use super::{Cli, CliColorArg, CliGlyphsArg, CliProgressArg, Commands, OutdatedSourceArg};
+  use super::{
+    CacheSubcommand, Cli, CliColorArg, CliGlyphsArg, CliProgressArg, Commands, OutdatedSourceArg,
+    OwnerSubcommand, PackageSubcommand, RegistrySubcommand,
+  };
 
   #[test]
   fn parses_version_command() {
@@ -545,6 +759,29 @@ mod tests {
   }
 
   #[test]
+  fn parses_add_with_alias_registry_and_sha256() {
+    let cli = Cli::parse_from([
+      "joy",
+      "add",
+      "archive:https://example.com/lib.tar.gz",
+      "--as",
+      "archive_dep",
+      "--registry",
+      "corp",
+      "--sha256",
+      "deadbeef",
+    ]);
+    match cli.command {
+      Commands::Add(args) => {
+        assert_eq!(args.as_name.as_deref(), Some("archive_dep"));
+        assert_eq!(args.registry.as_deref(), Some("corp"));
+        assert_eq!(args.sha256.as_deref(), Some("deadbeef"));
+      },
+      other => panic!("expected add, got {other:?}"),
+    }
+  }
+
+  #[test]
   fn parses_tree_command() {
     let cli = Cli::parse_from(["joy", "tree"]);
     match cli.command {
@@ -598,6 +835,166 @@ mod tests {
     match cli.command {
       Commands::Metadata(_) => {},
       other => panic!("expected metadata, got {other:?}"),
+    }
+  }
+
+  #[test]
+  fn parses_registry_add_and_set_default_commands() {
+    let add = Cli::parse_from([
+      "joy",
+      "registry",
+      "add",
+      "corp",
+      "https://example.com/registry.git",
+      "--project",
+      "--default",
+    ]);
+    match add.command {
+      Commands::Registry(args) => match args.command {
+        RegistrySubcommand::Add(sub) => {
+          assert_eq!(sub.name, "corp");
+          assert_eq!(sub.index, "https://example.com/registry.git");
+          assert!(sub.project);
+          assert!(sub.default);
+        },
+        other => panic!("expected registry add, got {other:?}"),
+      },
+      other => panic!("expected registry, got {other:?}"),
+    }
+
+    let set_default = Cli::parse_from(["joy", "registry", "set-default", "corp"]);
+    match set_default.command {
+      Commands::Registry(args) => match args.command {
+        RegistrySubcommand::SetDefault(sub) => {
+          assert_eq!(sub.name, "corp");
+          assert!(!sub.project);
+        },
+        other => panic!("expected registry set-default, got {other:?}"),
+      },
+      other => panic!("expected registry, got {other:?}"),
+    }
+  }
+
+  #[test]
+  fn parses_search_and_info_commands() {
+    let search = Cli::parse_from(["joy", "search", "fmt", "--registry", "corp", "--limit", "7"]);
+    match search.command {
+      Commands::Search(args) => {
+        assert_eq!(args.query, "fmt");
+        assert_eq!(args.registry.as_deref(), Some("corp"));
+        assert_eq!(args.limit, 7);
+      },
+      other => panic!("expected search, got {other:?}"),
+    }
+
+    let info = Cli::parse_from(["joy", "info", "fmtlib/fmt", "--registry", "default"]);
+    match info.command {
+      Commands::Info(args) => {
+        assert_eq!(args.package, "fmtlib/fmt");
+        assert_eq!(args.registry.as_deref(), Some("default"));
+      },
+      other => panic!("expected info, got {other:?}"),
+    }
+  }
+
+  #[test]
+  fn parses_fetch_vendor_and_cache_gc_commands() {
+    let fetch = Cli::parse_from(["joy", "fetch"]);
+    match fetch.command {
+      Commands::Fetch(_) => {},
+      other => panic!("expected fetch, got {other:?}"),
+    }
+
+    let vendor = Cli::parse_from(["joy", "vendor", "--output", "third_party"]);
+    match vendor.command {
+      Commands::Vendor(args) => assert_eq!(args.output.as_deref(), Some("third_party")),
+      other => panic!("expected vendor, got {other:?}"),
+    }
+
+    let cache = Cli::parse_from(["joy", "cache", "gc", "--aggressive"]);
+    match cache.command {
+      Commands::Cache(args) => match args.command {
+        CacheSubcommand::Gc(gc) => assert!(gc.aggressive),
+      },
+      other => panic!("expected cache, got {other:?}"),
+    }
+
+    let verify = Cli::parse_from(["joy", "verify", "--strict", "--sbom", "sbom.json"]);
+    match verify.command {
+      Commands::Verify(args) => {
+        assert!(args.strict);
+        assert_eq!(args.sbom.as_deref(), Some("sbom.json"));
+      },
+      other => panic!("expected verify, got {other:?}"),
+    }
+  }
+
+  #[test]
+  fn parses_package_publish_owner_and_yank_commands() {
+    let package = Cli::parse_from([
+      "joy",
+      "package",
+      "init",
+      "acme/widgets",
+      "--version",
+      "1.2.3",
+      "--kind",
+      "cmake",
+      "--force",
+    ]);
+    match package.command {
+      Commands::Package(args) => match args.command {
+        PackageSubcommand::Init(init) => {
+          assert_eq!(init.id, "acme/widgets");
+          assert_eq!(init.version, "1.2.3");
+          assert_eq!(init.kind, super::PackageKindArg::Cmake);
+          assert!(init.force);
+        },
+      },
+      other => panic!("expected package command, got {other:?}"),
+    }
+
+    let publish = Cli::parse_from(["joy", "publish", "--registry", "local", "--rev", "v1.2.3"]);
+    match publish.command {
+      Commands::Publish(args) => {
+        assert_eq!(args.registry.as_deref(), Some("local"));
+        assert_eq!(args.rev.as_deref(), Some("v1.2.3"));
+      },
+      other => panic!("expected publish, got {other:?}"),
+    }
+
+    let owner =
+      Cli::parse_from(["joy", "owner", "add", "acme/widgets", "alice", "--registry", "r"]);
+    match owner.command {
+      Commands::Owner(args) => match args.command {
+        OwnerSubcommand::Add(add) => {
+          assert_eq!(add.package, "acme/widgets");
+          assert_eq!(add.owner, "alice");
+          assert_eq!(add.registry.as_deref(), Some("r"));
+        },
+        other => panic!("expected owner add, got {other:?}"),
+      },
+      other => panic!("expected owner, got {other:?}"),
+    }
+
+    let yank = Cli::parse_from([
+      "joy",
+      "yank",
+      "acme/widgets",
+      "--version",
+      "1.2.3",
+      "--undo",
+      "--registry",
+      "r",
+    ]);
+    match yank.command {
+      Commands::Yank(args) => {
+        assert_eq!(args.package, "acme/widgets");
+        assert_eq!(args.version, "1.2.3");
+        assert!(args.undo);
+        assert_eq!(args.registry.as_deref(), Some("r"));
+      },
+      other => panic!("expected yank, got {other:?}"),
     }
   }
 

@@ -175,6 +175,12 @@ pub fn resolve_manifest(
         declared_deps,
       })
     },
+    DependencySource::Git | DependencySource::Path | DependencySource::Archive => {
+      Err(ResolverError::UnsupportedSource {
+        dependency: package.to_string(),
+        source_kind: source.as_str().to_string(),
+      })
+    },
   })
 }
 
@@ -227,8 +233,17 @@ where
   let mut queue = VecDeque::<PendingDependency>::new();
 
   for (raw_id, spec) in &manifest.dependencies {
-    let package = PackageId::parse(raw_id)
-      .map_err(|source| ResolverError::InvalidPackageId { package: raw_id.clone(), source })?;
+    if !spec.source.requires_canonical_package_id() {
+      return Err(ResolverError::UnsupportedSource {
+        dependency: raw_id.clone(),
+        source_kind: spec.source.as_str().to_string(),
+      });
+    }
+    let declared = spec.declared_package(raw_id);
+    let package = PackageId::parse(declared).map_err(|source| ResolverError::InvalidPackageId {
+      package: declared.to_string(),
+      source,
+    })?;
     queue.push_back(PendingDependency {
       package,
       source: spec.source.clone(),
@@ -315,6 +330,12 @@ where
         }
       } else {
         for dep in &selection.declared_deps {
+          if !dep.source.requires_canonical_package_id() {
+            return Err(ResolverError::UnsupportedSource {
+              dependency: dep.package.to_string(),
+              source_kind: dep.source.as_str().to_string(),
+            });
+          }
           queue.push_back(PendingDependency {
             package: dep.package.clone(),
             source: dep.source.clone(),
@@ -511,6 +532,10 @@ pub enum ResolverError {
     source: registry::RegistryError,
   },
   #[error(
+    "dependency `{dependency}` uses source `{source_kind}` which is not yet supported by resolver"
+  )]
+  UnsupportedSource { dependency: String, source_kind: String },
+  #[error(
     "registry package `{package}` currently maps to `{source_package}`, but alias package coordinates are not supported yet"
   )]
   RegistryAliasUnsupported { package: String, source_package: String },
@@ -658,6 +683,7 @@ include_roots = ["include"]
         source: DependencySource::Github,
         rev: String::new(),
         version: Some("^11".into()),
+        ..DependencySpec::default()
       },
     );
 
@@ -916,7 +942,12 @@ include_roots = ["include"]
     for (id, rev) in deps {
       dependencies.insert(
         id.to_string(),
-        DependencySpec { source: DependencySource::Github, rev: rev.to_string(), version: None },
+        DependencySpec {
+          source: DependencySource::Github,
+          rev: rev.to_string(),
+          version: None,
+          ..DependencySpec::default()
+        },
       );
     }
     Manifest {

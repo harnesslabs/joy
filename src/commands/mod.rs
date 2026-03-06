@@ -1,18 +1,26 @@
 pub mod add;
 pub mod build;
+pub mod cache;
 pub(crate) mod dependency_common;
 pub mod doctor;
+pub mod fetch;
 pub(crate) mod graph_common;
+pub mod info;
 pub mod init;
 pub mod metadata;
 pub mod new;
 pub mod outdated;
+pub mod publishing;
 pub mod recipe_check;
+pub mod registry_cmd;
 pub mod remove;
 pub mod run;
+pub mod search;
 pub mod sync;
 pub mod tree;
 pub mod update;
+pub mod vendor;
+pub mod verify;
 pub mod version;
 pub mod why;
 
@@ -83,6 +91,23 @@ pub fn dispatch(command: Commands, runtime: RuntimeFlags) -> Result<CommandOutpu
     Commands::Outdated(args) => {
       dispatch_project_scoped("outdated", runtime, |runtime| outdated::handle(args, runtime))
     },
+    Commands::Registry(args) => registry_cmd::handle(args),
+    Commands::Search(args) => search::handle(args),
+    Commands::Info(args) => info::handle(args),
+    Commands::Fetch(args) => {
+      dispatch_project_scoped("fetch", runtime, |runtime| fetch::handle(args, runtime))
+    },
+    Commands::Vendor(args) => {
+      dispatch_project_scoped("vendor", runtime, |runtime| vendor::handle(args, runtime))
+    },
+    Commands::Verify(args) => {
+      dispatch_project_scoped("verify", runtime, |runtime| verify::handle(args, runtime))
+    },
+    Commands::Package(args) => publishing::handle_package(args),
+    Commands::Publish(args) => publishing::handle_publish(args, runtime),
+    Commands::Owner(args) => publishing::handle_owner(args, runtime),
+    Commands::Yank(args) => publishing::handle_yank(args, runtime),
+    Commands::Cache(args) => cache::handle(args),
     Commands::Metadata(args) => {
       dispatch_project_scoped("metadata", runtime, |runtime| metadata::handle(args, runtime))
     },
@@ -116,10 +141,13 @@ where
   F: FnOnce(RuntimeFlags) -> Result<CommandOutput, JoyError>,
 {
   let ctx = resolve_workspace_context(command, runtime.workspace_package.as_deref())?;
+  let mut scoped_runtime = runtime.clone();
+  scoped_runtime.workspace_root = ctx.workspace_root.clone();
+  scoped_runtime.workspace_member = ctx.workspace_member.clone();
   let mut result = if let Some(project_root) = &ctx.project_root_override {
-    with_current_dir(project_root, || f(runtime.clone()))?
+    with_current_dir(project_root, || f(scoped_runtime.clone()))?
   } else {
-    f(runtime.clone())?
+    f(scoped_runtime.clone())?
   };
   attach_workspace_metadata(&mut result, &ctx);
   Ok(result)

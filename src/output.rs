@@ -290,6 +290,9 @@ fn human_error_hint(command: &str, err: &JoyError) -> Option<String> {
     "recipe_load_failed" => {
       Some("Run `joy doctor` to validate the bundled recipe store and local environment.".into())
     },
+    "verify_failed" => Some(
+      "Fix checksum/provenance mismatches (or refresh lock/vendor state) and rerun `joy verify`.".into(),
+    ),
     "dependency_not_found" if matches!(command, "remove" | "update") => {
       Some("Use `joy tree` to inspect current dependencies before editing.".into())
     },

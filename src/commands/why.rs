@@ -34,7 +34,11 @@ pub fn handle(args: WhyArgs, runtime: RuntimeFlags) -> Result<CommandOutput, Joy
     .map_err(|err| JoyError::new("why", "manifest_parse_error", err.to_string(), 1))?;
   let provenance_overlay = load_fresh_lockfile_provenance_overlay(&cwd, &manifest_path);
 
-  let mut roots = manifest.dependencies.keys().cloned().collect::<Vec<_>>();
+  let mut roots = manifest
+    .dependencies
+    .iter()
+    .map(|(key, spec)| spec.declared_package(key).to_string())
+    .collect::<Vec<_>>();
   roots.sort();
   if args.locked {
     return handle_locked(&cwd, &manifest_path, &manifest, &args.package, &roots);
@@ -85,10 +89,7 @@ pub fn handle(args: WhyArgs, runtime: RuntimeFlags) -> Result<CommandOutput, Joy
       "paths": paths,
       "package_info": {
         "id": pkg.id.to_string(),
-        "source": match pkg.source {
-          crate::manifest::DependencySource::Github => "github",
-          crate::manifest::DependencySource::Registry => "registry",
-        },
+        "source": pkg.source.as_str(),
         "registry": pkg.registry,
         "requested_rev": pkg.requested_rev,
         "requested_requirement": pkg.requested_requirement,

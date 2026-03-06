@@ -30,6 +30,7 @@ pub fn handle(_args: MetadataArgs, _runtime: RuntimeFlags) -> Result<CommandOutp
   let mut roots = manifest.dependencies.keys().cloned().collect::<Vec<_>>();
   roots.sort();
   let graph_package_count = probe.dependency_graph_package_count.unwrap_or_default();
+  let editor_gate = assess_editor_extension_gate(&probe);
 
   let lockfile_info = if !probe.lockfile.present {
     json!({
@@ -65,6 +66,14 @@ pub fn handle(_args: MetadataArgs, _runtime: RuntimeFlags) -> Result<CommandOutp
     .kv("lockfile", probe.lockfile.path.display().to_string())
     .kv("root compile db", probe.root_compile_commands.path.display().to_string())
     .kv("target compile db files", probe.target_compile_commands.len().to_string())
+    .kv(
+      "editor extension gate",
+      if editor_gate["extension_recommended"].as_bool().unwrap_or(false) {
+        "consider extension"
+      } else {
+        "defer (cli-first)"
+      },
+    )
     .build();
 
   Ok(CommandOutput::new(
@@ -86,6 +95,37 @@ pub fn handle(_args: MetadataArgs, _runtime: RuntimeFlags) -> Result<CommandOutp
       },
       "lockfile": lockfile_info,
       "graph": probe.dependency_graph_json,
+      "editor_extension_gate": editor_gate,
     }),
   ))
+}
+
+fn assess_editor_extension_gate(probe: &project_probe::ProjectProbe) -> Value {
+  let project_has_dependencies = probe.direct_dependency_count > 0;
+  let graph_ready = probe.dependency_graph.present && probe.dependency_graph.parse_error.is_none();
+  let compile_db_ready =
+    probe.root_compile_commands.present || !probe.target_compile_commands.is_empty();
+  let lockfile_ready = probe.lockfile.present && probe.lockfile.parse_error.is_none();
+  let criteria_total = 3u64;
+  let criteria_passed =
+    [graph_ready, compile_db_ready, lockfile_ready].into_iter().filter(|value| *value).count()
+      as u64;
+  let extension_recommended =
+    project_has_dependencies && graph_ready && lockfile_ready && !compile_db_ready;
+  json!({
+    "enabled_by_default": false,
+    "strategy": "cli_compile_db_first",
+    "project_has_dependencies": project_has_dependencies,
+    "graph_ready": graph_ready,
+    "compile_db_ready": compile_db_ready,
+    "lockfile_ready": lockfile_ready,
+    "criteria_total": criteria_total,
+    "criteria_passed": criteria_passed,
+    "extension_recommended": extension_recommended,
+    "reason": if extension_recommended {
+      "dependency graph + lockfile are present but compile DB is still missing"
+    } else {
+      "no objective gate failure requiring extension work"
+    },
+  })
 }

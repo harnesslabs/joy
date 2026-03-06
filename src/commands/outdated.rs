@@ -73,7 +73,11 @@ pub fn handle(args: OutdatedArgs, runtime: RuntimeFlags) -> Result<CommandOutput
   let lockfile_path = cwd.join("joy.lock");
   let lock = validate_locked_graph_lockfile("outdated", &manifest, &manifest_path, &lockfile_path)?;
 
-  let mut roots = manifest.dependencies.keys().cloned().collect::<Vec<_>>();
+  let mut roots = manifest
+    .dependencies
+    .iter()
+    .map(|(key, spec)| spec.declared_package(key).to_string())
+    .collect::<Vec<_>>();
   roots.sort();
 
   let sources = OutdatedSources::from(args.sources);
@@ -84,7 +88,7 @@ pub fn handle(args: OutdatedArgs, runtime: RuntimeFlags) -> Result<CommandOutput
     .iter()
     .filter(|pkg| sources.includes(pkg.source.as_str()))
     .map(|pkg| {
-      let direct = manifest.dependencies.contains_key(&pkg.id);
+      let direct = manifest.resolve_dependency_key(&pkg.id).is_some();
       compute_outdated_row(pkg, direct, &mut registry_store)
     })
     .collect::<Result<Vec<_>, JoyError>>()?;

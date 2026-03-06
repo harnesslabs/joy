@@ -1,9 +1,12 @@
-# Next Work (Post Phase 38-76 Delivery)
+# Next Work (Post Phase 77-86 Implementation Wave)
 
-Phase 38-76 (core dependency graph + nested dependencies + editor integration wave) is complete on this branch.
+Follow-up queue after delivering Phase 81-86 implementation milestones:
 
-Immediate follow-up queue:
-
-1. Seed the next roadmap wave (Phase 77+) based on post-Phase 38-76 gaps, release hardening, and real-world package adoption feedback
-2. Sync GitHub tracker issues/milestones (`#101`-`#146`) with local completion state when opening the delivery PR
-3. Run a release-focused polish pass (packaging, install docs, platform matrices) before first public release cut
+1. Complete universal provider backend support in resolver/fetch for non-github sources (`git`, `path`, `archive`) beyond staged-manifest recording.
+2. Expand offline CI coverage for cold/warm/vendored matrices and enforce deterministic error-code expectations.
+3. Harden publishing protocol for production self-hosted usage:
+   - registry auth token handling/policy
+   - non-local registry transport support for publish/owner/yank workflows.
+4. Close remaining phase-77-80 parity gaps:
+   - named-registry selection in core resolver path
+   - full source-provenance parity for all backend types.

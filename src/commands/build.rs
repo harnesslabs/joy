@@ -15,7 +15,7 @@ use crate::commands::CommandOutput;
 use crate::error::JoyError;
 use crate::install_index::InstallIndex;
 use crate::lockfile;
-use crate::manifest::{Manifest, ManifestDocument, SelectedTarget};
+use crate::manifest::{Manifest, ManifestDocument, SelectedTarget, WorkspaceManifest};
 use crate::ninja::{BuildProfile, NinjaBuildSpec};
 use crate::output::{HumanMessageBuilder, progress_detail, progress_stage};
 use crate::recipes::{Linkage as RecipeLinkage, RecipeStore};
@@ -136,6 +136,8 @@ pub(crate) struct BuildOptions {
   pub update_lock: bool,
   pub offline: bool,
   pub progress: bool,
+  pub workspace_root: Option<PathBuf>,
+  pub workspace_member: Option<String>,
 }
 
 #[derive(Debug, Clone)]
@@ -148,6 +150,15 @@ struct PipelineContext {
   env_layout: project_env::ProjectEnvLayout,
   lock_plan: LockfilePlan,
   profile: BuildProfile,
+  workspace_lock_scope: Option<WorkspaceLockScope>,
+}
+
+#[derive(Debug, Clone)]
+struct WorkspaceLockScope {
+  root: PathBuf,
+  member: String,
+  members: Vec<String>,
+  profile: Option<String>,
 }
 
 fn prepare_pipeline_context(
@@ -169,13 +180,25 @@ fn prepare_pipeline_context(
 
   let manifest = Manifest::load(&manifest_path)
     .map_err(|err| JoyError::new(command, "manifest_parse_error", err.to_string(), 1))?;
-  let manifest_hash = lockfile::compute_manifest_hash(&manifest_path)
-    .map_err(|err| JoyError::new(command, "lockfile_hash_failed", err.to_string(), 1))?;
-  let lockfile_path = project_root.join("joy.lock");
+  let workspace_lock_scope = if let Some(root) = options.workspace_root.as_ref() {
+    Some(load_workspace_lock_scope(command, root, options.workspace_member.as_deref())?)
+  } else {
+    None
+  };
+  let manifest_hash = if let Some(scope) = workspace_lock_scope.as_ref() {
+    compute_workspace_manifest_hash(command, scope)?
+  } else {
+    lockfile::compute_manifest_hash(&manifest_path)
+      .map_err(|err| JoyError::new(command, "lockfile_hash_failed", err.to_string(), 1))?
+  };
+  let lockfile_path = workspace_lock_scope
+    .as_ref()
+    .map(|scope| scope.root.join("joy.lock"))
+    .unwrap_or_else(|| project_root.join("joy.lock"));
   let env_layout = project_env::ensure_layout(&project_root)
     .map_err(|err| JoyError::new(command, "env_setup_failed", err.to_string(), 1))?;
   let lock_plan = evaluate_lockfile_plan(command, &lockfile_path, &manifest_hash, options)?;
-  let profile = BuildProfile::from_release_flag(options.release);
+  let profile = select_profile(options.release, workspace_lock_scope.as_ref());
 
   Ok(PipelineContext {
     project_root,
@@ -186,7 +209,87 @@ fn prepare_pipeline_context(
     env_layout,
     lock_plan,
     profile,
+    workspace_lock_scope,
   })
+}
+
+fn load_workspace_lock_scope(
+  command: &'static str,
+  workspace_root: &Path,
+  selected_member: Option<&str>,
+) -> Result<WorkspaceLockScope, JoyError> {
+  let manifest_path = workspace_root.join("joy.toml");
+  let ws = WorkspaceManifest::load(&manifest_path)
+    .map_err(|err| JoyError::new(command, "manifest_parse_error", err.to_string(), 1))?;
+  let member = selected_member.ok_or_else(|| {
+    JoyError::new(
+      command,
+      "workspace_member_required",
+      "workspace lockfile mode requires a selected workspace member",
+      1,
+    )
+  })?;
+  if !ws.workspace.members.iter().any(|m| m == member) {
+    return Err(JoyError::new(
+      command,
+      "workspace_member_not_found",
+      format!(
+        "workspace member `{member}` is not listed in `workspace.members`; available members: {}",
+        ws.workspace.members.join(", ")
+      ),
+      1,
+    ));
+  }
+  let mut members = ws.workspace.members.clone();
+  members.sort();
+  Ok(WorkspaceLockScope {
+    root: workspace_root.to_path_buf(),
+    member: member.to_string(),
+    members,
+    profile: ws.workspace.profile.clone(),
+  })
+}
+
+fn compute_workspace_manifest_hash(
+  command: &'static str,
+  scope: &WorkspaceLockScope,
+) -> Result<String, JoyError> {
+  let mut hasher = Sha256::new();
+  hash_manifest_bytes(command, &mut hasher, &scope.root, "joy.toml")?;
+  for member in &scope.members {
+    hash_manifest_bytes(command, &mut hasher, &scope.root, &format!("{member}/joy.toml"))?;
+  }
+  Ok(format!("{:x}", hasher.finalize()))
+}
+
+fn hash_manifest_bytes(
+  command: &'static str,
+  hasher: &mut Sha256,
+  workspace_root: &Path,
+  relative_path: &str,
+) -> Result<(), JoyError> {
+  let path = workspace_root.join(relative_path);
+  let bytes = fs::read(&path)
+    .map_err(|err| JoyError::io(command, "reading workspace manifest", &path, &err))?;
+  hasher.update(relative_path.as_bytes());
+  hasher.update([0u8]);
+  hasher.update(&bytes);
+  hasher.update([0u8]);
+  Ok(())
+}
+
+fn select_profile(
+  release_flag: bool,
+  workspace_lock_scope: Option<&WorkspaceLockScope>,
+) -> BuildProfile {
+  if release_flag {
+    return BuildProfile::Release;
+  }
+  let workspace_profile = workspace_lock_scope.and_then(|scope| scope.profile.as_deref());
+  match workspace_profile.map(|raw| raw.trim().to_ascii_lowercase()) {
+    Some(profile) if profile == "release" => BuildProfile::Release,
+    _ => BuildProfile::Debug,
+  }
 }
 
 /// Handle `joy build` by executing the local build pipeline and returning a CLI output payload.
@@ -201,6 +304,8 @@ pub fn handle(args: BuildArgs, runtime: RuntimeFlags) -> Result<CommandOutput, J
     update_lock: args.update_lock,
     offline: runtime.offline,
     progress: runtime.progress,
+    workspace_root: runtime.workspace_root.clone(),
+    workspace_member: runtime.workspace_member.clone(),
   })?;
 
   Ok(CommandOutput::new(
@@ -270,6 +375,11 @@ pub(crate) fn build_project(options: BuildOptions) -> Result<BuildExecution, Joy
     ctx.profile,
     Some(&toolchain),
   )?;
+  let lockfile_packages = if let Some(scope) = ctx.workspace_lock_scope.as_ref() {
+    collect_workspace_lockfile_packages("build", scope, &native_link.lockfile_packages)?
+  } else {
+    native_link.lockfile_packages.clone()
+  };
   let mut include_dirs = collect_include_dirs(&ctx.env_layout.include_dir).map_err(|err| {
     JoyError::io("build", "reading include directories", &ctx.env_layout.include_dir, &err)
   })?;
@@ -279,11 +389,7 @@ pub(crate) fn build_project(options: BuildOptions) -> Result<BuildExecution, Joy
   include_dirs.extend(target_include_dirs);
   include_dirs.sort();
   include_dirs.dedup();
-  validate_locked_package_metadata_if_needed(
-    "build",
-    &ctx.lock_plan,
-    &native_link.lockfile_packages,
-  )?;
+  validate_locked_package_metadata_if_needed("build", &ctx.lock_plan, &lockfile_packages)?;
   write_dependency_graph_artifact(
     "build",
     &ctx.env_layout.state_dir,
@@ -336,7 +442,7 @@ pub(crate) fn build_project(options: BuildOptions) -> Result<BuildExecution, Joy
     ctx.lock_plan.clone(),
     &ctx.lockfile_path,
     &ctx.manifest_hash,
-    &native_link.lockfile_packages,
+    &lockfile_packages,
   )?;
 
   Ok(BuildExecution {
@@ -378,12 +484,13 @@ pub(crate) fn sync_project(options: BuildOptions) -> Result<SyncExecution, JoyEr
     ctx.profile,
     None,
   )?;
+  let lockfile_packages = if let Some(scope) = ctx.workspace_lock_scope.as_ref() {
+    collect_workspace_lockfile_packages("sync", scope, &native_link.lockfile_packages)?
+  } else {
+    native_link.lockfile_packages.clone()
+  };
 
-  validate_locked_package_metadata_if_needed(
-    "sync",
-    &ctx.lock_plan,
-    &native_link.lockfile_packages,
-  )?;
+  validate_locked_package_metadata_if_needed("sync", &ctx.lock_plan, &lockfile_packages)?;
   write_dependency_graph_artifact(
     "sync",
     &ctx.env_layout.state_dir,
@@ -409,7 +516,7 @@ pub(crate) fn sync_project(options: BuildOptions) -> Result<SyncExecution, JoyEr
     ctx.lock_plan.clone(),
     &ctx.lockfile_path,
     &ctx.manifest_hash,
-    &native_link.lockfile_packages,
+    &lockfile_packages,
   )?;
 
   Ok(SyncExecution {
@@ -451,6 +558,12 @@ struct CompiledLockMetadata {
 }
 
 #[derive(Debug, Clone)]
+struct GenericLinkInference {
+  libs: Vec<String>,
+  linkage: Option<String>,
+}
+
+#[derive(Debug, Clone)]
 struct ResolvedDependencyStage {
   recipes: RecipeStore,
   resolved: resolver::ResolvedGraph,
@@ -487,10 +600,20 @@ fn materialize_dependencies(
   let resolved_stage = resolve_dependency_stage(command, manifest)?;
   let PrefetchedDependencyStage { all_by_key, build_by_key } =
     prefetch_dependency_stage(command, &resolved_stage)?;
-  let has_compiled = resolved_stage
-    .build_order_ids
-    .iter()
-    .any(|id| resolved_stage.resolved.package(id).is_some_and(|pkg| !pkg.header_only));
+  let has_compiled = resolved_stage.build_order_ids.iter().any(|id| {
+    let Some(pkg) = resolved_stage.resolved.package(id) else {
+      return false;
+    };
+    if !pkg.header_only {
+      return true;
+    }
+    if resolved_stage.recipes.get(&pkg.id).is_some() {
+      return false;
+    }
+    build_by_key
+      .get(&(pkg.id.to_string(), pkg.requested_rev.clone()))
+      .is_some_and(|fetched| is_generic_cmake_candidate(&fetched.source_dir))
+  });
   let (compiled_stage, discovered_toolchain) = if has_compiled {
     let discovered = match toolchain {
       Some(existing) => existing.clone(),
@@ -593,38 +716,6 @@ fn build_compiled_dependency_stage(
       .resolved
       .package(id)
       .expect("build_order_ids must correspond to resolved packages");
-    if pkg.header_only {
-      continue;
-    }
-
-    let Some(recipe) = resolved_stage.recipes.get(&pkg.id) else {
-      return Err(JoyError::new(
-        command,
-        "missing_recipe",
-        format!("compiled dependency `{}` requires a curated recipe", pkg.id),
-        1,
-      ));
-    };
-    let Some(cmake_recipe) = recipe.cmake.as_ref() else {
-      return Err(JoyError::new(
-        command,
-        "missing_cmake_metadata",
-        format!("recipe `{}` is missing `[cmake]` metadata", recipe.id),
-        1,
-      ));
-    };
-    let Some(link_recipe) = recipe.link.as_ref() else {
-      return Err(JoyError::new(
-        command,
-        "missing_link_metadata",
-        format!("recipe `{}` is missing `[link]` metadata", recipe.id),
-        1,
-      ));
-    };
-    if link_recipe.libs.is_empty() {
-      continue;
-    }
-
     let fetched = prefetched_for_build
       .remove(&(pkg.id.to_string(), pkg.requested_rev.clone()))
       .ok_or_else(|| {
@@ -635,16 +726,82 @@ fn build_compiled_dependency_stage(
           1,
         )
       })?;
+    let recipe = resolved_stage.recipes.get(&pkg.id);
+    let generic_cmake = recipe.is_none() && is_generic_cmake_candidate(&fetched.source_dir);
+    if pkg.header_only && !generic_cmake {
+      continue;
+    }
 
-    let recipe_file =
-      resolved_stage.recipes.root_dir().join("packages").join(format!("{}.toml", recipe.slug));
-    let recipe_contents = fs::read_to_string(&recipe_file)
-      .map_err(|err| JoyError::io(command, "reading recipe file", &recipe_file, &err))?;
-    let preferred_linkage = link_recipe.preferred_linkage.unwrap_or(RecipeLinkage::Static);
+    let (source_dir, configure_args, build_targets, header_roots, recipe_content_hash, link_libs) =
+      if let Some(recipe) = recipe {
+        let Some(cmake_recipe) = recipe.cmake.as_ref() else {
+          return Err(JoyError::new(
+            command,
+            "missing_cmake_metadata",
+            format!("recipe `{}` is missing `[cmake]` metadata", recipe.id),
+            1,
+          ));
+        };
+        let Some(link_recipe) = recipe.link.as_ref() else {
+          return Err(JoyError::new(
+            command,
+            "missing_link_metadata",
+            format!("recipe `{}` is missing `[link]` metadata", recipe.id),
+            1,
+          ));
+        };
+        if link_recipe.libs.is_empty() {
+          continue;
+        }
+
+        let recipe_file =
+          resolved_stage.recipes.root_dir().join("packages").join(format!("{}.toml", recipe.slug));
+        let recipe_contents = fs::read_to_string(&recipe_file)
+          .map_err(|err| JoyError::io(command, "reading recipe file", &recipe_file, &err))?;
+        let source_dir = if let Some(fetch) = recipe.fetch.as_ref() {
+          if fetch.subdir.trim().is_empty() {
+            fetched.source_dir.clone()
+          } else {
+            fetched.source_dir.join(&fetch.subdir)
+          }
+        } else {
+          fetched.source_dir.clone()
+        };
+        (
+          source_dir,
+          cmake_recipe.configure_args.clone(),
+          cmake_recipe.build_targets.clone(),
+          recipe.include_roots().to_vec(),
+          abi::hash_recipe_contents(&recipe_contents),
+          link_recipe.libs.clone(),
+        )
+      } else {
+        if !generic_cmake {
+          return Err(JoyError::new(
+            command,
+            "missing_recipe",
+            format!(
+              "compiled dependency `{}` requires a curated recipe or a top-level CMakeLists.txt",
+              pkg.id
+            ),
+            1,
+          ));
+        }
+        (
+          fetched.source_dir.clone(),
+          Vec::new(),
+          Vec::new(),
+          infer_header_roots_from_source_dir(&fetched.source_dir),
+          abi::hash_recipe_contents("generic-cmake-v1"),
+          Vec::new(),
+        )
+      };
+
+    let preferred_linkage = RecipeLinkage::Static;
     let abi_hash = abi::compute_abi_hash(&abi::AbiHashInput {
       package_id: pkg.id.to_string(),
       resolved_commit: pkg.resolved_commit.clone(),
-      recipe_content_hash: abi::hash_recipe_contents(&recipe_contents),
+      recipe_content_hash,
       compiler_kind: toolchain.compiler.kind.as_str().to_string(),
       compiler_version: toolchain.compiler.version.clone(),
       target_triple: target_triple_guess(toolchain.compiler.kind),
@@ -661,30 +818,13 @@ fn build_compiled_dependency_stage(
       },
       cxxflags: Vec::new(),
       ldflags: Vec::new(),
-      recipe_configure_args: cmake_recipe.configure_args.clone(),
+      recipe_configure_args: configure_args.clone(),
       env: Default::default(),
     });
-    stage.compiled_lock_metadata.insert(
-      pkg.id.to_string(),
-      CompiledLockMetadata {
-        abi_hash: abi_hash.clone(),
-        libs: link_recipe.libs.clone(),
-        linkage: Some(linkage_name(preferred_linkage)),
-      },
-    );
 
     let layout = cache
       .ensure_compiled_build_layout(&abi_hash)
       .map_err(|err| JoyError::new(command, "cache_setup_failed", err.to_string(), 1))?;
-    let source_dir = if let Some(fetch) = recipe.fetch.as_ref() {
-      if fetch.subdir.trim().is_empty() {
-        fetched.source_dir.clone()
-      } else {
-        fetched.source_dir.join(&fetch.subdir)
-      }
-    } else {
-      fetched.source_dir.clone()
-    };
 
     let cmake_result = cmake::build_into_cache(&cmake::CmakeBuildRequest {
       source_dir,
@@ -692,14 +832,28 @@ fn build_compiled_dependency_stage(
       profile,
       compiler_kind: toolchain.compiler.kind,
       compiler_path: toolchain.compiler.path.clone(),
-      configure_args: cmake_recipe.configure_args.clone(),
-      build_targets: cmake_recipe.build_targets.clone(),
-      header_roots: recipe.include_roots().to_vec(),
+      configure_args,
+      build_targets,
+      header_roots,
     })
     .map_err(|err| JoyError::new(command, "cmake_build_failed", err.to_string(), 1))?;
+    let inferred = if link_libs.is_empty() {
+      infer_generic_link_libraries(command, &layout.lib_dir, pkg.id.as_str())?
+    } else {
+      GenericLinkInference { libs: link_libs, linkage: Some(linkage_name(preferred_linkage)) }
+    };
     let lib_install =
-      linking::install_compiled_libraries(project_lib_dir, &layout.lib_dir, &link_recipe.libs)
+      linking::install_compiled_libraries(project_lib_dir, &layout.lib_dir, &inferred.libs)
         .map_err(|err| JoyError::new(command, "library_install_failed", err.to_string(), 1))?;
+
+    stage.compiled_lock_metadata.insert(
+      pkg.id.to_string(),
+      CompiledLockMetadata {
+        abi_hash: abi_hash.clone(),
+        libs: inferred.libs.clone(),
+        linkage: inferred.linkage,
+      },
+    );
 
     if !cmake_result.cache_hit {
       stage.built_packages.push(pkg.id.to_string());
@@ -1065,6 +1219,10 @@ fn assemble_lockfile_packages(
     packages.push(lockfile::LockedPackage {
       id: pkg.id.to_string(),
       source: dependency_source_name(&pkg.source).to_string(),
+      source_git: None,
+      source_path: None,
+      source_url: None,
+      source_checksum_sha256: None,
       registry: pkg.registry.clone(),
       source_package: pkg.source_package.clone(),
       requested_rev: pkg.requested_rev.clone(),
@@ -1076,7 +1234,7 @@ fn assemble_lockfile_packages(
       metadata_source,
       package_manifest_digest,
       declared_deps_source,
-      header_only: pkg.header_only,
+      header_only: pkg.header_only && !compiled_lock_metadata.contains_key(pkg.id.as_str()),
       header_roots,
       deps: resolved.dependency_ids(pkg.id.as_str()).unwrap_or_default(),
       abi_hash,
@@ -1086,6 +1244,45 @@ fn assemble_lockfile_packages(
   }
 
   packages.sort_by(|a, b| a.id.cmp(&b.id));
+  Ok(packages)
+}
+
+fn collect_workspace_lockfile_packages(
+  command: &'static str,
+  scope: &WorkspaceLockScope,
+  selected_member_packages: &[lockfile::LockedPackage],
+) -> Result<Vec<lockfile::LockedPackage>, JoyError> {
+  let mut merged = BTreeMap::<(String, String), lockfile::LockedPackage>::new();
+  for pkg in selected_member_packages {
+    merged.insert((pkg.id.clone(), pkg.requested_rev.clone()), pkg.clone());
+  }
+
+  for member in &scope.members {
+    if member == &scope.member {
+      continue;
+    }
+    let manifest_path = scope.root.join(member).join("joy.toml");
+    let member_manifest = Manifest::load(&manifest_path)
+      .map_err(|err| JoyError::new(command, "manifest_parse_error", err.to_string(), 1))?;
+    if member_manifest.dependencies.is_empty() {
+      continue;
+    }
+    let resolved_stage = resolve_dependency_stage(command, &member_manifest)?;
+    let prefetched_stage = prefetch_dependency_stage(command, &resolved_stage)?;
+    let member_packages = assemble_lockfile_packages(
+      command,
+      &resolved_stage.resolved,
+      &resolved_stage.recipes,
+      &prefetched_stage.all_by_key,
+      &BTreeMap::new(),
+    )?;
+    for pkg in member_packages {
+      merged.entry((pkg.id.clone(), pkg.requested_rev.clone())).or_insert(pkg);
+    }
+  }
+
+  let mut packages = merged.into_values().collect::<Vec<_>>();
+  sort_locked_packages(&mut packages);
   Ok(packages)
 }
 
@@ -1106,6 +1303,88 @@ fn infer_header_roots_from_source_dir(source_dir: &Path) -> Vec<String> {
   }
 
   roots
+}
+
+fn is_generic_cmake_candidate(source_dir: &Path) -> bool {
+  source_dir.join("CMakeLists.txt").is_file()
+}
+
+fn infer_generic_link_libraries(
+  command: &'static str,
+  cache_lib_dir: &Path,
+  package_id: &str,
+) -> Result<GenericLinkInference, JoyError> {
+  let mut libs = BTreeSet::<String>::new();
+  let mut saw_static = false;
+  let mut saw_shared = false;
+  let entries = fs::read_dir(cache_lib_dir).map_err(|err| {
+    JoyError::io(command, "reading cached library directory", cache_lib_dir, &err)
+  })?;
+  for entry in entries {
+    let entry =
+      entry.map_err(|err| JoyError::new(command, "library_install_failed", err.to_string(), 1))?;
+    let path = entry.path();
+    if !path.is_file() {
+      continue;
+    }
+    let Some(name) = path.file_name().and_then(|v| v.to_str()) else {
+      continue;
+    };
+    let Some((lib, shared)) = parse_generic_library_name(name) else {
+      continue;
+    };
+    libs.insert(lib);
+    if shared {
+      saw_shared = true;
+    } else {
+      saw_static = true;
+    }
+  }
+
+  if libs.is_empty() {
+    return Err(JoyError::new(
+      command,
+      "generic_cmake_no_libraries",
+      format!(
+        "generic CMake fallback built `{package_id}`, but no linkable libraries were discovered in `{}`",
+        cache_lib_dir.display()
+      ),
+      1,
+    ));
+  }
+
+  let linkage = match (saw_static, saw_shared) {
+    (true, false) => Some("static".to_string()),
+    (false, true) => Some("shared".to_string()),
+    _ => None,
+  };
+  Ok(GenericLinkInference { libs: libs.into_iter().collect(), linkage })
+}
+
+fn parse_generic_library_name(file_name: &str) -> Option<(String, bool)> {
+  if let Some(stem) = file_name.strip_prefix("lib").and_then(|s| s.strip_suffix(".a")) {
+    return (!stem.is_empty()).then(|| (stem.to_string(), false));
+  }
+  if let Some(stem) = file_name.strip_prefix("lib").and_then(|s| s.strip_suffix(".so")) {
+    return (!stem.is_empty()).then(|| (stem.to_string(), true));
+  }
+  if let Some(prefix) = file_name.strip_prefix("lib")
+    && let Some((stem, _rest)) = prefix.split_once(".so.")
+  {
+    return (!stem.is_empty()).then(|| (stem.to_string(), true));
+  }
+  if let Some(stem) = file_name.strip_prefix("lib").and_then(|s| s.strip_suffix(".dylib")) {
+    return (!stem.is_empty()).then(|| (stem.to_string(), true));
+  }
+  if let Some(stem) = file_name.strip_suffix(".dll") {
+    let normalized = stem.strip_prefix("lib").unwrap_or(stem);
+    return (!normalized.is_empty()).then(|| (normalized.to_string(), true));
+  }
+  if let Some(stem) = file_name.strip_suffix(".lib") {
+    let normalized = stem.strip_prefix("lib").unwrap_or(stem);
+    return (!normalized.is_empty()).then(|| (normalized.to_string(), false));
+  }
+  None
 }
 
 fn lockfile_metadata_provenance(
@@ -1136,6 +1415,9 @@ fn dependency_source_name(source: &crate::manifest::DependencySource) -> &'stati
   match source {
     crate::manifest::DependencySource::Github => "github",
     crate::manifest::DependencySource::Registry => "registry",
+    crate::manifest::DependencySource::Git => "git",
+    crate::manifest::DependencySource::Path => "path",
+    crate::manifest::DependencySource::Archive => "archive",
   }
 }
 
@@ -1529,4 +1811,35 @@ fn map_toolchain_error(command: &'static str, err: toolchain::ToolchainError) ->
     },
   };
   JoyError::new(command, code, message, 1)
+}
+
+#[cfg(test)]
+mod tests {
+  use std::fs;
+
+  use tempfile::TempDir;
+
+  use super::{infer_generic_link_libraries, parse_generic_library_name};
+
+  #[test]
+  fn parses_generic_library_names_from_common_artifacts() {
+    assert_eq!(parse_generic_library_name("libfmt.a"), Some(("fmt".to_string(), false)));
+    assert_eq!(parse_generic_library_name("libfmt.so"), Some(("fmt".to_string(), true)));
+    assert_eq!(parse_generic_library_name("libfmt.so.11"), Some(("fmt".to_string(), true)));
+    assert_eq!(parse_generic_library_name("libfmt.dylib"), Some(("fmt".to_string(), true)));
+    assert_eq!(parse_generic_library_name("fmt.lib"), Some(("fmt".to_string(), false)));
+    assert_eq!(parse_generic_library_name("fmt.dll"), Some(("fmt".to_string(), true)));
+    assert_eq!(parse_generic_library_name("README.md"), None);
+  }
+
+  #[test]
+  fn infers_generic_link_libraries_and_linkage() {
+    let temp = TempDir::new().expect("tempdir");
+    fs::write(temp.path().join("libfmt.a"), []).expect("libfmt");
+    fs::write(temp.path().join("libz.a"), []).expect("libz");
+    let inferred =
+      infer_generic_link_libraries("build", temp.path(), "acme/generic").expect("infer libraries");
+    assert_eq!(inferred.libs, vec!["fmt".to_string(), "z".to_string()]);
+    assert_eq!(inferred.linkage.as_deref(), Some("static"));
+  }
 }

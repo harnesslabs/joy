@@ -345,6 +345,39 @@ target_include_directories(fmt PUBLIC ${CMAKE_CURRENT_SOURCE_DIR}/include)
   Some((remote_base, bare_repo, commit))
 }
 
+fn setup_local_github_remote_generic_cmake_fixture() -> Option<(TempDir, PathBuf, String)> {
+  if !git_is_available() {
+    eprintln!("skipping test: git is not available");
+    return None;
+  }
+
+  let remote_base = TempDir::new().expect("remote base");
+  let files = [
+    (
+      "include/gencmake/gencmake.h",
+      r#"#pragma once
+const char* joy_generic_message();
+"#,
+    ),
+    (
+      "gencmake.cpp",
+      r#"const char* joy_generic_message() { return "hello-from-generic-cmake"; }
+"#,
+    ),
+    (
+      "CMakeLists.txt",
+      r#"cmake_minimum_required(VERSION 3.16)
+project(gencmake LANGUAGES CXX)
+add_library(gencmake STATIC gencmake.cpp)
+target_include_directories(gencmake PUBLIC ${CMAKE_CURRENT_SOURCE_DIR}/include)
+"#,
+    ),
+  ];
+  let (bare_repo, commit) =
+    setup_local_github_remote_in_base(remote_base.path(), "acme/gencmake", &files)?;
+  Some((remote_base, bare_repo, commit))
+}
+
 fn run_git<const N: usize>(cwd: Option<&Path>, args: [&str; N]) -> std::io::Result<()> {
   let mut cmd = ProcessCommand::new("git");
   if let Some(dir) = cwd {
@@ -821,6 +854,93 @@ int main() {
 }
 
 #[test]
+fn build_and_run_with_local_compiled_generic_cmake_dependency() {
+  if !compiled_build_tools_available_for_test() {
+    eprintln!("skipping test: compiler/ninja/cmake not available");
+    return;
+  }
+
+  let temp = TempDir::new().expect("tempdir");
+  init_project(&temp);
+  let Some((remote_base, _bare_repo, generic_commit)) =
+    setup_local_github_remote_generic_cmake_fixture()
+  else {
+    return;
+  };
+  let joy_home = temp.path().join("joy-home");
+
+  let mut add = cargo_bin_cmd!("joy");
+  add
+    .current_dir(temp.path())
+    .env("JOY_GITHUB_BASE", remote_base.path())
+    .env("JOY_HOME", &joy_home)
+    .args(["--json", "add", "acme/gencmake"])
+    .assert()
+    .success();
+
+  fs::write(
+    temp.path().join("src/main.cpp"),
+    r#"#include <gencmake/gencmake.h>
+#include <iostream>
+
+int main() {
+  std::cout << joy_generic_message() << std::endl;
+  return 0;
+}
+"#,
+  )
+  .expect("write main.cpp");
+
+  let mut build = cargo_bin_cmd!("joy");
+  let build_assert = build
+    .current_dir(temp.path())
+    .env("JOY_GITHUB_BASE", remote_base.path())
+    .env("JOY_HOME", &joy_home)
+    .args(["--json", "build"])
+    .assert()
+    .success();
+  let build_payload = json_stdout(&build_assert.get_output().stdout);
+  assert_eq!(build_payload["ok"], true);
+  assert!(
+    build_payload["data"]["link_libs"]
+      .as_array()
+      .expect("link_libs")
+      .iter()
+      .any(|v| v.as_str() == Some("gencmake"))
+  );
+  let lock = read_lockfile_toml(&temp);
+  let packages = lock["packages"].as_array().expect("packages array");
+  let generic_pkg = packages
+    .iter()
+    .find(|pkg| pkg.get("id").and_then(|v| v.as_str()) == Some("acme/gencmake"))
+    .expect("generic package in lockfile");
+  assert_eq!(generic_pkg["source"].as_str(), Some("github"));
+  assert_eq!(generic_pkg["resolved_commit"].as_str(), Some(generic_commit.as_str()));
+  assert!(generic_pkg.get("recipe").is_none());
+  assert_eq!(generic_pkg["header_only"].as_bool(), Some(false));
+  assert!(
+    generic_pkg["libs"]
+      .as_array()
+      .expect("libs array")
+      .iter()
+      .any(|v| v.as_str() == Some("gencmake"))
+  );
+
+  let mut run = cargo_bin_cmd!("joy");
+  let run_assert = run
+    .current_dir(temp.path())
+    .env("JOY_GITHUB_BASE", remote_base.path())
+    .env("JOY_HOME", &joy_home)
+    .args(["--json", "run"])
+    .assert()
+    .success();
+  let run_payload = json_stdout(&run_assert.get_output().stdout);
+  assert_eq!(run_payload["ok"], true);
+  let stdout = run_payload["data"]["stdout"].as_str().expect("stdout string");
+  assert_eq!(stdout.replace("\r\n", "\n"), "hello-from-generic-cmake\n");
+}
+
+#[test]
 fn build_populates_lockfile_package_records_for_header_only_dependency() {
   if !build_tools_available_for_test() {
     eprintln!("skipping test: compiler/ninja not available");
@@ -1202,6 +1322,7 @@ fn metadata_and_why_and_tree_locked_use_graph_and_lockfile_state() {
   assert_eq!(metadata_payload["command"], "metadata");
   assert_eq!(metadata_payload["data"]["artifacts"]["graph_present"], true);
   assert_eq!(metadata_payload["data"]["lockfile"]["present"], true);
+  assert!(metadata_payload["data"]["editor_extension_gate"].is_object());
   let graph_packages =
     metadata_payload["data"]["graph"]["packages"].as_array().expect("graph packages");
   assert!(
@@ -1404,6 +1525,11 @@ fn doctor_reports_missing_graph_and_compile_db_for_project_with_dependencies() {
   assert_eq!(payload["data"]["project"]["direct_dependency_count"], 1);
   assert_eq!(payload["data"]["artifacts"]["dependency_graph"]["present"], false);
   assert_eq!(payload["data"]["artifacts"]["root_compile_commands"]["present"], false);
+  assert!(payload["data"]["editor_extension_gate"].is_object());
+  assert_eq!(
+    payload["data"]["editor_extension_gate"]["strategy"].as_str(),
+    Some("cli_compile_db_first")
+  );
   assert!(
     payload["data"]["project_warnings"]
       .as_array()
@@ -2318,11 +2444,13 @@ fn outdated_source_filter_can_exclude_github_without_registry_config() {
   else {
     return;
   };
+  let joy_home = temp.path().join("joy-home");
 
   let mut add = cargo_bin_cmd!("joy");
   add
     .current_dir(temp.path())
     .env("JOY_GITHUB_BASE", remote_base.path())
+    .env("JOY_HOME", &joy_home)
     .args(["add", "harnesslabs/igneous"])
     .assert()
     .success();
@@ -2331,6 +2459,7 @@ fn outdated_source_filter_can_exclude_github_without_registry_config() {
   let assert = outdated
     .current_dir(temp.path())
     .env("JOY_GITHUB_BASE", remote_base.path())
+    .env("JOY_HOME", &joy_home)
     .args(["--json", "outdated", "--sources", "registry"])
     .assert()
     .success();
@@ -2867,4 +2996,224 @@ members = ["apps/app"]
   assert!(member.join("joy.toml").is_file());
   let member_manifest = fs::read_to_string(member.join("joy.toml")).expect("read member manifest");
   assert!(member_manifest.contains("\"nlohmann/json\""));
+}
+
+#[test]
+fn workspace_root_add_writes_lockfile_once_at_workspace_root() {
+  let temp = TempDir::new().expect("tempdir");
+  let member_a = temp.path().join("apps").join("a");
+  let member_b = temp.path().join("apps").join("b");
+  fs::create_dir_all(&member_a).expect("member a dir");
+  fs::create_dir_all(&member_b).expect("member b dir");
+  init_project_at(&member_a);
+  init_project_at(&member_b);
+  fs::write(
+    temp.path().join("joy.toml"),
+    r#"[workspace]
+members = ["apps/a", "apps/b"]
+"#,
+  )
+  .expect("write workspace manifest");
+
+  let Some((remote_base, _bare_repo, _commit)) = setup_local_github_remote("nlohmann/json") else {
+    return;
+  };
+  let joy_home = temp.path().join("joy-home");
+
+  let mut add = cargo_bin_cmd!("joy");
+  add
+    .current_dir(temp.path())
+    .env("JOY_GITHUB_BASE", remote_base.path())
+    .env("JOY_HOME", &joy_home)
+    .args(["-p", "apps/a", "add", "nlohmann/json"])
+    .assert()
+    .success();
+
+  assert!(
+    temp.path().join("joy.lock").is_file(),
+    "workspace lockfile should be rooted at workspace"
+  );
+  assert!(
+    !member_a.join("joy.lock").exists(),
+    "member lockfile should not be written when command is routed from workspace root"
+  );
+  assert!(!member_b.join("joy.lock").exists(), "other member lockfile should remain absent");
+
+  let mut sync_a_locked = cargo_bin_cmd!("joy");
+  sync_a_locked
+    .current_dir(temp.path())
+    .env("JOY_GITHUB_BASE", remote_base.path())
+    .env("JOY_HOME", &joy_home)
+    .args(["--json", "-p", "apps/a", "sync", "--locked"])
+    .assert()
+    .success();
+
+  let mut sync_b_locked = cargo_bin_cmd!("joy");
+  sync_b_locked
+    .current_dir(temp.path())
+    .env("JOY_GITHUB_BASE", remote_base.path())
+    .env("JOY_HOME", &joy_home)
+    .args(["--json", "-p", "apps/b", "sync", "--locked"])
+    .assert()
+    .success();
+}
+
+#[test]
+fn workspace_locked_sync_detects_other_member_manifest_drift() {
+  let temp = TempDir::new().expect("tempdir");
+  let member_a = temp.path().join("apps").join("a");
+  let member_b = temp.path().join("apps").join("b");
+  fs::create_dir_all(&member_a).expect("member a dir");
+  fs::create_dir_all(&member_b).expect("member b dir");
+  init_project_at(&member_a);
+  init_project_at(&member_b);
+  fs::write(
+    temp.path().join("joy.toml"),
+    r#"[workspace]
+members = ["apps/a", "apps/b"]
+"#,
+  )
+  .expect("write workspace manifest");
+
+  let Some((remote_base, _bare_repo, _commit)) = setup_local_github_remote("nlohmann/json") else {
+    return;
+  };
+  let joy_home = temp.path().join("joy-home");
+
+  let mut add = cargo_bin_cmd!("joy");
+  add
+    .current_dir(temp.path())
+    .env("JOY_GITHUB_BASE", remote_base.path())
+    .env("JOY_HOME", &joy_home)
+    .args(["-p", "apps/a", "add", "nlohmann/json"])
+    .assert()
+    .success();
+  assert!(temp.path().join("joy.lock").is_file(), "workspace lockfile should exist");
+
+  let member_b_manifest = member_b.join("joy.toml");
+  let mut member_b_raw = fs::read_to_string(&member_b_manifest).expect("read member b manifest");
+  member_b_raw.push_str("\"fmtlib/fmt\" = { source = \"github\", rev = \"HEAD\" }\n");
+  fs::write(&member_b_manifest, member_b_raw).expect("write member b manifest");
+
+  let mut locked_sync = cargo_bin_cmd!("joy");
+  let assert = locked_sync
+    .current_dir(temp.path())
+    .env("JOY_GITHUB_BASE", remote_base.path())
+    .env("JOY_HOME", &joy_home)
+    .args(["--json", "-p", "apps/a", "sync", "--locked"])
+    .assert()
+    .failure();
+  let payload = json_stdout(&assert.get_output().stdout);
+  assert_eq!(payload["error"]["code"], "lockfile_stale");
+}
+
+#[test]
+fn workspace_profile_release_defaults_sync_profile_without_release_flag() {
+  let temp = TempDir::new().expect("tempdir");
+  let member = temp.path().join("apps").join("app");
+  fs::create_dir_all(&member).expect("member dir");
+  init_project_at(&member);
+  fs::write(
+    temp.path().join("joy.toml"),
+    r#"[workspace]
+members = ["apps/app"]
+default_member = "apps/app"
+profile = "release"
+"#,
+  )
+  .expect("write workspace manifest");
+
+  let joy_home = temp.path().join("joy-home");
+  let mut sync = cargo_bin_cmd!("joy");
+  let assert = sync
+    .current_dir(temp.path())
+    .env("JOY_HOME", &joy_home)
+    .args(["--json", "sync"])
+    .assert()
+    .success();
+  let payload = json_stdout(&assert.get_output().stdout);
+  assert_eq!(payload["command"], "sync");
+  assert_eq!(payload["data"]["workspace_member"], "apps/app");
+  assert_eq!(payload["data"]["profile"], "release");
+}
+
+#[test]
+fn verify_emits_sbom_and_reports_non_failing_advisories() {
+  let temp = TempDir::new().expect("tempdir");
+  init_project(&temp);
+  let Some((remote_base, _bare_repo, _commit)) = setup_local_github_remote("nlohmann/json") else {
+    return;
+  };
+  let joy_home = temp.path().join("joy-home");
+
+  let mut add = cargo_bin_cmd!("joy");
+  add
+    .current_dir(temp.path())
+    .env("JOY_GITHUB_BASE", remote_base.path())
+    .env("JOY_HOME", &joy_home)
+    .args(["add", "nlohmann/json"])
+    .assert()
+    .success();
+
+  let mut verify = cargo_bin_cmd!("joy");
+  let assert = verify
+    .current_dir(temp.path())
+    .env("JOY_GITHUB_BASE", remote_base.path())
+    .env("JOY_HOME", &joy_home)
+    .args(["--json", "verify", "--sbom", "sbom.json"])
+    .assert()
+    .success();
+  let payload = json_stdout(&assert.get_output().stdout);
+  assert_eq!(payload["command"], "verify");
+  assert_eq!(payload["data"]["summary"]["package_count"], 1);
+  assert_eq!(payload["data"]["summary"]["failed_count"], 0);
+  let sbom_path = payload["data"]["sbom_path"].as_str().expect("sbom path");
+  assert!(Path::new(sbom_path).is_file(), "expected verify to write SBOM file at {sbom_path}");
+}
+
+#[test]
+fn verify_fails_on_lockfile_checksum_mismatch() {
+  let temp = TempDir::new().expect("tempdir");
+  init_project(&temp);
+  let Some((remote_base, _bare_repo, _commit)) = setup_local_github_remote("nlohmann/json") else {
+    return;
+  };
+  let joy_home = temp.path().join("joy-home");
+
+  let mut add = cargo_bin_cmd!("joy");
+  add
+    .current_dir(temp.path())
+    .env("JOY_GITHUB_BASE", remote_base.path())
+    .env("JOY_HOME", &joy_home)
+    .args(["add", "nlohmann/json"])
+    .assert()
+    .success();
+
+  let mut lock = read_lockfile_toml(&temp);
+  let Some(packages) = lock.get_mut("packages").and_then(|v| v.as_array_mut()) else {
+    panic!("expected packages array in lockfile");
+  };
+  let Some(pkg) = packages.get_mut(0).and_then(|v| v.as_table_mut()) else {
+    panic!("expected first lockfile package table");
+  };
+  pkg.insert("source_checksum_sha256".into(), toml::Value::String("deadbeef".to_string()));
+  write_lockfile_toml(&temp, &lock);
+
+  let mut verify = cargo_bin_cmd!("joy");
+  let assert = verify
+    .current_dir(temp.path())
+    .env("JOY_GITHUB_BASE", remote_base.path())
+    .env("JOY_HOME", &joy_home)
+    .args(["--json", "verify"])
+    .assert()
+    .failure();
+  let payload = json_stdout(&assert.get_output().stdout);
+  assert_eq!(payload["command"], "verify");
+  assert_eq!(payload["error"]["code"], "verify_failed");
+  assert!(
+    payload["error"]["message"]
+      .as_str()
+      .is_some_and(|msg| msg.contains("source checksum mismatch")),
+    "expected checksum mismatch detail in verify failure message: {payload:?}"
+  );
 }

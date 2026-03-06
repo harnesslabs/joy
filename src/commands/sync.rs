@@ -16,6 +16,8 @@ pub fn handle(args: SyncArgs, runtime: RuntimeFlags) -> Result<CommandOutput, Jo
     update_lock: args.update_lock,
     offline: runtime.offline,
     progress: runtime.progress,
+    workspace_root: runtime.workspace_root.clone(),
+    workspace_member: runtime.workspace_member.clone(),
   })?;
 
   let human_message = if let Some(toolchain) = &execution.toolchain {

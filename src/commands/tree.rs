@@ -45,7 +45,11 @@ pub fn handle(args: TreeArgs, runtime: RuntimeFlags) -> Result<CommandOutput, Jo
   let resolved = resolver::resolve_manifest(&manifest, &recipes)
     .map_err(|err| map_resolver_error("tree", err))?;
 
-  let mut roots = manifest.dependencies.keys().cloned().collect::<Vec<_>>();
+  let mut roots = manifest
+    .dependencies
+    .iter()
+    .map(|(key, spec)| spec.declared_package(key).to_string())
+    .collect::<Vec<_>>();
   roots.sort();
 
   let mut packages = resolved
@@ -66,10 +70,7 @@ pub fn handle(args: TreeArgs, runtime: RuntimeFlags) -> Result<CommandOutput, Jo
       let package_manifest_digest = overlay.and_then(|p| p.package_manifest_digest.clone());
       json!({
         "id": pkg.id.to_string(),
-        "source": match pkg.source {
-          crate::manifest::DependencySource::Github => "github",
-          crate::manifest::DependencySource::Registry => "registry",
-        },
+        "source": pkg.source.as_str(),
         "registry": pkg.registry,
         "source_package": pkg.source_package,
         "direct": pkg.direct,
@@ -112,7 +113,11 @@ fn handle_locked_tree(
   let lockfile_path = cwd.join("joy.lock");
   let lock = validate_locked_graph_lockfile("tree", manifest, manifest_path, &lockfile_path)?;
 
-  let mut roots = manifest.dependencies.keys().cloned().collect::<Vec<_>>();
+  let mut roots = manifest
+    .dependencies
+    .iter()
+    .map(|(key, spec)| spec.declared_package(key).to_string())
+    .collect::<Vec<_>>();
   roots.sort();
   let by_id = lock.packages.iter().map(|pkg| (pkg.id.clone(), pkg)).collect::<BTreeMap<_, _>>();
 
@@ -125,7 +130,7 @@ fn handle_locked_tree(
         "source": pkg.source,
         "registry": pkg.registry,
         "source_package": pkg.source_package,
-        "direct": manifest.dependencies.contains_key(&pkg.id),
+        "direct": manifest.resolve_dependency_key(&pkg.id).is_some(),
         "header_only": pkg.header_only,
         "requested_rev": pkg.requested_rev,
         "requested_requirement": pkg.requested_requirement,
