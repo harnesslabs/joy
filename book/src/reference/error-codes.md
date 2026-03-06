@@ -38,6 +38,7 @@
 - `path_exists`
 - `invalid_package_id`
 - `invalid_package_version`
+- `invalid_target`
 - `dependency_not_found`
 - `workspace_member_invalid`
 - `workspace_member_required`
