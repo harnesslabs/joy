@@ -44,6 +44,40 @@ fn setup_registry_repo() -> TempDir {
   repo
 }
 
+fn setup_registry_remote_bare() -> TempDir {
+  let seed = setup_registry_repo();
+  let bare = TempDir::new().expect("bare registry remote");
+  let output = ProcessCommand::new("git")
+    .args(["init", "--bare", bare.path().to_string_lossy().as_ref()])
+    .output()
+    .expect("git init --bare");
+  assert!(
+    output.status.success(),
+    "git init --bare failed\nstdout:\n{}\nstderr:\n{}",
+    String::from_utf8_lossy(&output.stdout),
+    String::from_utf8_lossy(&output.stderr)
+  );
+  run_git(seed.path(), ["remote", "add", "origin", bare.path().to_string_lossy().as_ref()]);
+  run_git(seed.path(), ["push", "origin", "HEAD:refs/heads/main"]);
+  let output = ProcessCommand::new("git")
+    .args([
+      "--git-dir",
+      bare.path().to_string_lossy().as_ref(),
+      "symbolic-ref",
+      "HEAD",
+      "refs/heads/main",
+    ])
+    .output()
+    .expect("set bare HEAD");
+  assert!(
+    output.status.success(),
+    "setting bare HEAD failed\nstdout:\n{}\nstderr:\n{}",
+    String::from_utf8_lossy(&output.stdout),
+    String::from_utf8_lossy(&output.stderr)
+  );
+  bare
+}
+
 fn setup_source_remote_with_tag(package: &str, tag: &str) -> Option<TempDir> {
   if !git_is_available() {
     eprintln!("skipping publish test: git is not available");
@@ -236,6 +270,80 @@ fn publish_owner_yank_roundtrip_with_local_registry() {
     .env("JOY_GITHUB_BASE", source_remote_base.path())
     .env("JOY_REGISTRY_DEFAULT", registry_repo.path())
     .args(["add", "registry:acme/widgets", "--registry", "local", "--version", "^1"])
+    .assert()
+    .success();
+}
+
+#[test]
+fn publish_owner_and_yank_support_remote_git_registry_transport() {
+  if !git_is_available() {
+    eprintln!("skipping publish test: git is not available");
+    return;
+  }
+
+  let temp = TempDir::new().expect("tempdir");
+  let registry_remote = setup_registry_remote_bare();
+  let registry_url = format!("file://{}", registry_remote.path().display());
+
+  let package_dir = temp.path().join("package");
+  fs::create_dir_all(&package_dir).expect("package dir");
+  let joy_home = temp.path().join("joy-home");
+
+  cargo_bin_cmd!("joy")
+    .current_dir(&package_dir)
+    .env("JOY_HOME", &joy_home)
+    .args(["--json", "package", "init", "acme/widgets", "--version", "1.2.3"])
+    .assert()
+    .success();
+
+  cargo_bin_cmd!("joy")
+    .current_dir(&package_dir)
+    .env("JOY_HOME", &joy_home)
+    .args(["registry", "add", "remote", &registry_url, "--project", "--default"])
+    .assert()
+    .success();
+
+  let mut publish = cargo_bin_cmd!("joy");
+  let publish_assert = publish
+    .current_dir(&package_dir)
+    .env("JOY_HOME", &joy_home)
+    .args(["--json", "publish", "--registry", "remote", "--rev", "v1.2.3"])
+    .assert()
+    .success();
+  let publish_payload = json_stdout(&publish_assert.get_output().stdout);
+  assert_eq!(publish_payload["ok"], true);
+  assert_eq!(publish_payload["data"]["registry"], "remote");
+  assert_eq!(publish_payload["data"]["git_committed"], true);
+
+  cargo_bin_cmd!("joy")
+    .current_dir(&package_dir)
+    .env("JOY_HOME", &joy_home)
+    .args(["owner", "add", "acme/widgets", "alice", "--registry", "remote"])
+    .assert()
+    .success();
+
+  let mut owner_list = cargo_bin_cmd!("joy");
+  let owner_assert = owner_list
+    .current_dir(&package_dir)
+    .env("JOY_HOME", &joy_home)
+    .args(["--json", "owner", "list", "acme/widgets", "--registry", "remote"])
+    .assert()
+    .success();
+  let owner_payload = json_stdout(&owner_assert.get_output().stdout);
+  let owners = owner_payload["data"]["owners"].as_array().expect("owners array");
+  assert!(owners.iter().any(|owner| owner.as_str() == Some("alice")));
+
+  cargo_bin_cmd!("joy")
+    .current_dir(&package_dir)
+    .env("JOY_HOME", &joy_home)
+    .args(["yank", "acme/widgets", "--version", "1.2.3", "--registry", "remote"])
+    .assert()
+    .success();
+
+  cargo_bin_cmd!("joy")
+    .current_dir(&package_dir)
+    .env("JOY_HOME", &joy_home)
+    .args(["yank", "acme/widgets", "--version", "1.2.3", "--undo", "--registry", "remote"])
     .assert()
     .success();
 }
