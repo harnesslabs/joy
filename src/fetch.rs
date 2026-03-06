@@ -5,7 +5,9 @@
 //! mirror.
 
 use semver::{Version, VersionReq};
+use sha2::{Digest, Sha256};
 use std::fs;
+use std::io::Read;
 use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicU8, Ordering};
 use std::time::Duration;
@@ -98,6 +100,32 @@ pub fn fetch_github_semver(
   fetch_github_semver_with_cache(package, version_req, &cache)
 }
 
+/// Fetch a generic git dependency using the global cache.
+pub fn fetch_git(
+  package: &PackageId,
+  source_git: &str,
+  requested_rev: &str,
+) -> Result<FetchResult, FetchError> {
+  let cache = GlobalCache::resolve()?;
+  fetch_git_with_cache(package, source_git, requested_rev, &cache)
+}
+
+/// Materialize a path dependency into a deterministic cache snapshot.
+pub fn fetch_path(package: &PackageId, source_path: &str) -> Result<FetchResult, FetchError> {
+  let cache = GlobalCache::resolve()?;
+  fetch_path_with_cache(package, source_path, &cache)
+}
+
+/// Materialize an archive dependency into the source cache after checksum validation.
+pub fn fetch_archive(
+  package: &PackageId,
+  source_url: &str,
+  expected_sha256: &str,
+) -> Result<FetchResult, FetchError> {
+  let cache = GlobalCache::resolve()?;
+  fetch_archive_with_cache(package, source_url, expected_sha256, &cache)
+}
+
 /// Fetch a GitHub shorthand package using an explicit cache layout.
 ///
 /// The requested ref is resolved to a concrete commit and the source checkout is materialized under
@@ -175,6 +203,145 @@ pub fn fetch_github_semver_with_cache(
     resolved_commit: selected.resolved_commit,
     source_dir,
     remote_url,
+    cache_hit,
+  })
+}
+
+pub fn fetch_git_with_cache(
+  package: &PackageId,
+  source_git: &str,
+  requested_rev: &str,
+  cache: &GlobalCache,
+) -> Result<FetchResult, FetchError> {
+  cache.ensure_layout()?;
+
+  let locator_key = source_locator_key(source_git);
+  let mirror_dir = cache
+    .git_root
+    .join("git")
+    .join(package.owner())
+    .join(package.repo())
+    .join(format!("{locator_key}.git"));
+  let requested = if requested_rev.trim().is_empty() { "HEAD" } else { requested_rev };
+  if runtime_offline_enabled() && !mirror_dir.exists() {
+    return Err(FetchError::OfflineCacheMiss {
+      package: package.to_string(),
+      requested_rev: requested.to_string(),
+      mirror_dir,
+    });
+  }
+  ensure_mirror(source_git, &mirror_dir)?;
+
+  let resolved_commit = resolve_commit(&mirror_dir, requested)?;
+  let source_dir = cache
+    .src_root
+    .join("git")
+    .join(package.owner())
+    .join(package.repo())
+    .join(locator_key)
+    .join(&resolved_commit);
+  let cache_hit = source_dir.exists();
+  if !cache_hit {
+    materialize_checkout(&mirror_dir, &source_dir, &resolved_commit, cache.tmp_dir())?;
+  }
+
+  Ok(FetchResult {
+    package: package.clone(),
+    requested_rev: requested.to_string(),
+    requested_requirement: None,
+    resolved_version: None,
+    resolved_commit,
+    source_dir,
+    remote_url: source_git.to_string(),
+    cache_hit,
+  })
+}
+
+pub fn fetch_path_with_cache(
+  package: &PackageId,
+  source_path: &str,
+  cache: &GlobalCache,
+) -> Result<FetchResult, FetchError> {
+  cache.ensure_layout()?;
+  let source_dir = resolve_input_path(source_path)?;
+  if !source_dir.is_dir() {
+    return Err(FetchError::Io {
+      action: "reading path dependency".into(),
+      path: source_dir,
+      source: std::io::Error::new(std::io::ErrorKind::NotFound, "path dependency is missing"),
+    });
+  }
+
+  let digest = hash_path_sha256(&source_dir)?;
+  let commit = format!("sha256:{digest}");
+  let cached_dir =
+    cache.src_root.join("path").join(package.owner()).join(package.repo()).join(&digest);
+  let cache_hit = cached_dir.exists();
+  if !cache_hit {
+    mirror_path_dependency(&source_dir, &cached_dir, cache.tmp_dir())?;
+  }
+
+  Ok(FetchResult {
+    package: package.clone(),
+    requested_rev: source_dir.display().to_string(),
+    requested_requirement: None,
+    resolved_version: None,
+    resolved_commit: commit,
+    source_dir: cached_dir,
+    remote_url: source_dir.display().to_string(),
+    cache_hit,
+  })
+}
+
+pub fn fetch_archive_with_cache(
+  package: &PackageId,
+  source_url: &str,
+  expected_sha256: &str,
+  cache: &GlobalCache,
+) -> Result<FetchResult, FetchError> {
+  cache.ensure_layout()?;
+  let normalized_checksum = normalize_sha256(expected_sha256)?;
+  let locator_key = source_locator_key(source_url);
+  let archive_file = cache
+    .archives_root
+    .join(package.owner())
+    .join(package.repo())
+    .join(format!("{locator_key}.tar.gz"));
+  let extracted_dir = cache
+    .src_root
+    .join("archive")
+    .join(package.owner())
+    .join(package.repo())
+    .join(&locator_key)
+    .join(&normalized_checksum);
+  let cache_hit = extracted_dir.exists();
+  if !cache_hit {
+    if runtime_offline_enabled() && !archive_file.exists() {
+      return Err(FetchError::OfflineCacheMiss {
+        package: package.to_string(),
+        requested_rev: source_url.to_string(),
+        mirror_dir: archive_file,
+      });
+    }
+    materialize_archive_snapshot(
+      package,
+      source_url,
+      &normalized_checksum,
+      &archive_file,
+      &extracted_dir,
+      cache.tmp_dir(),
+    )?;
+  }
+
+  let tree_hash = hash_path_sha256(&extracted_dir)?;
+  Ok(FetchResult {
+    package: package.clone(),
+    requested_rev: source_url.to_string(),
+    requested_requirement: None,
+    resolved_version: None,
+    resolved_commit: format!("sha256:{tree_hash}"),
+    source_dir: extracted_dir,
+    remote_url: source_url.to_string(),
     cache_hit,
   })
 }
@@ -456,6 +623,396 @@ fn materialize_checkout(
   result
 }
 
+fn source_locator_key(raw: &str) -> String {
+  let mut hasher = Sha256::new();
+  hasher.update(raw.as_bytes());
+  let digest = hasher.finalize();
+  let hex = format!("{digest:x}");
+  hex.chars().take(24).collect()
+}
+
+fn resolve_input_path(raw: &str) -> Result<PathBuf, FetchError> {
+  let candidate = Path::new(raw);
+  let path = if candidate.is_absolute() {
+    candidate.to_path_buf()
+  } else {
+    std::env::current_dir().map_err(FetchError::Runtime)?.join(candidate)
+  };
+  Ok(path.canonicalize().unwrap_or(path))
+}
+
+fn normalize_sha256(raw: &str) -> Result<String, FetchError> {
+  let normalized = raw.trim().to_ascii_lowercase();
+  let valid = normalized.len() == 64 && normalized.chars().all(|ch| ch.is_ascii_hexdigit());
+  if !valid {
+    return Err(FetchError::InvalidChecksum {
+      checksum: raw.to_string(),
+      reason: "expected 64 lowercase/uppercase hex characters".to_string(),
+    });
+  }
+  Ok(normalized)
+}
+
+fn materialize_archive_snapshot(
+  package: &PackageId,
+  source_url: &str,
+  expected_sha256: &str,
+  archive_file: &Path,
+  dest_dir: &Path,
+  tmp_root: &Path,
+) -> Result<(), FetchError> {
+  if let Some(parent) = archive_file.parent() {
+    fs::create_dir_all(parent).map_err(|source| FetchError::Io {
+      action: "creating archive cache parent".into(),
+      path: parent.to_path_buf(),
+      source,
+    })?;
+  }
+  if let Some(parent) = dest_dir.parent() {
+    fs::create_dir_all(parent).map_err(|source| FetchError::Io {
+      action: "creating archive source cache parent".into(),
+      path: parent.to_path_buf(),
+      source,
+    })?;
+  }
+  fs::create_dir_all(tmp_root).map_err(|source| FetchError::Io {
+    action: "creating cache tmp dir".into(),
+    path: tmp_root.to_path_buf(),
+    source,
+  })?;
+
+  if archive_file.exists() {
+    let existing = hash_file_sha256(archive_file)?;
+    if existing != expected_sha256 {
+      if runtime_offline_enabled() {
+        return Err(FetchError::ChecksumMismatch {
+          package: package.to_string(),
+          expected: expected_sha256.to_string(),
+          actual: existing,
+        });
+      }
+      fs::remove_file(archive_file).map_err(|source| FetchError::Io {
+        action: "removing stale archive cache file".into(),
+        path: archive_file.to_path_buf(),
+        source,
+      })?;
+    }
+  }
+
+  if !archive_file.exists() {
+    if runtime_offline_enabled() {
+      return Err(FetchError::OfflineNetworkDisabled {
+        action: format!("downloading archive for {}", package.as_str()),
+        url: source_url.to_string(),
+      });
+    }
+    download_archive_to_file(source_url, archive_file)?;
+  }
+
+  let actual_checksum = hash_file_sha256(archive_file)?;
+  if actual_checksum != expected_sha256 {
+    return Err(FetchError::ChecksumMismatch {
+      package: package.to_string(),
+      expected: expected_sha256.to_string(),
+      actual: actual_checksum,
+    });
+  }
+
+  let nonce = SystemTime::now().duration_since(UNIX_EPOCH).map(|dur| dur.as_nanos()).unwrap_or(0);
+  let tmp_extract =
+    tmp_root.join(format!("archive-{}-{}-{nonce}", std::process::id(), package.repo()));
+  if tmp_extract.exists() {
+    fs_ops::remove_path_if_exists(&tmp_extract).map_err(|source| FetchError::Io {
+      action: "cleaning archive temp directory".into(),
+      path: tmp_extract.clone(),
+      source,
+    })?;
+  }
+  fs::create_dir_all(&tmp_extract).map_err(|source| FetchError::Io {
+    action: "creating archive temp directory".into(),
+    path: tmp_extract.clone(),
+    source,
+  })?;
+
+  let result = (|| {
+    emit_progress(&format!(
+      "Extracting archive dependency `{}` into cache ({})",
+      package.as_str(),
+      dest_dir.display()
+    ));
+    extract_archive_file(archive_file, &tmp_extract)?;
+    let extracted_root = collapse_archive_root(&tmp_extract)?;
+    if dest_dir.exists() {
+      fs_ops::remove_path_if_exists(dest_dir).map_err(|source| FetchError::Io {
+        action: "removing stale extracted archive".into(),
+        path: dest_dir.to_path_buf(),
+        source,
+      })?;
+    }
+    fs::rename(extracted_root, dest_dir).map_err(|source| FetchError::Io {
+      action: "moving extracted archive into cache".into(),
+      path: dest_dir.to_path_buf(),
+      source,
+    })?;
+    Ok::<(), FetchError>(())
+  })();
+
+  if tmp_extract.exists() {
+    let _ = fs_ops::remove_path_if_exists(&tmp_extract);
+  }
+  result
+}
+
+fn download_archive_to_file(source_url: &str, archive_file: &Path) -> Result<(), FetchError> {
+  emit_progress(&format!(
+    "Downloading archive source from `{source_url}` into {}",
+    archive_file.display()
+  ));
+  if source_url.starts_with("file://") {
+    let local = PathBuf::from(source_url.trim_start_matches("file://"));
+    let bytes = fs::read(&local).map_err(|source| FetchError::Io {
+      action: "reading local archive file".into(),
+      path: local.clone(),
+      source,
+    })?;
+    fs::write(archive_file, bytes).map_err(|source| FetchError::Io {
+      action: "writing archive cache file".into(),
+      path: archive_file.to_path_buf(),
+      source,
+    })?;
+    return Ok(());
+  }
+  let local = Path::new(source_url);
+  if local.exists() {
+    let bytes = fs::read(local).map_err(|source| FetchError::Io {
+      action: "reading local archive file".into(),
+      path: local.to_path_buf(),
+      source,
+    })?;
+    fs::write(archive_file, bytes).map_err(|source| FetchError::Io {
+      action: "writing archive cache file".into(),
+      path: archive_file.to_path_buf(),
+      source,
+    })?;
+    return Ok(());
+  }
+
+  let response = reqwest::blocking::get(source_url)?.error_for_status()?;
+  let bytes = response.bytes()?;
+  fs::write(archive_file, &bytes).map_err(|source| FetchError::Io {
+    action: "writing archive cache file".into(),
+    path: archive_file.to_path_buf(),
+    source,
+  })?;
+  Ok(())
+}
+
+fn extract_archive_file(archive_file: &Path, out_dir: &Path) -> Result<(), FetchError> {
+  let name =
+    archive_file.file_name().and_then(|v| v.to_str()).unwrap_or_default().to_ascii_lowercase();
+  if !(name.ends_with(".tar.gz") || name.ends_with(".tgz")) {
+    return Err(FetchError::UnsupportedArchiveFormat {
+      archive: archive_file.to_path_buf(),
+      expected: ".tar.gz or .tgz".to_string(),
+    });
+  }
+  let file = fs::File::open(archive_file).map_err(|source| FetchError::Io {
+    action: "opening archive cache file".into(),
+    path: archive_file.to_path_buf(),
+    source,
+  })?;
+  let decoder = flate2::read::GzDecoder::new(file);
+  let mut archive = tar::Archive::new(decoder);
+  archive.unpack(out_dir).map_err(|source| FetchError::Io {
+    action: "extracting archive cache file".into(),
+    path: out_dir.to_path_buf(),
+    source,
+  })
+}
+
+fn collapse_archive_root(extract_dir: &Path) -> Result<PathBuf, FetchError> {
+  let mut entries = fs::read_dir(extract_dir)
+    .map_err(|source| FetchError::Io {
+      action: "scanning extracted archive root".into(),
+      path: extract_dir.to_path_buf(),
+      source,
+    })?
+    .filter_map(Result::ok)
+    .map(|entry| entry.path())
+    .collect::<Vec<_>>();
+  entries.sort();
+  if entries.len() == 1 && entries[0].is_dir() {
+    Ok(entries.remove(0))
+  } else {
+    Ok(extract_dir.to_path_buf())
+  }
+}
+
+fn mirror_path_dependency(
+  source_dir: &Path,
+  dest_dir: &Path,
+  tmp_root: &Path,
+) -> Result<(), FetchError> {
+  if let Some(parent) = dest_dir.parent() {
+    fs::create_dir_all(parent).map_err(|source| FetchError::Io {
+      action: "creating path source cache parent".into(),
+      path: parent.to_path_buf(),
+      source,
+    })?;
+  }
+  fs::create_dir_all(tmp_root).map_err(|source| FetchError::Io {
+    action: "creating cache tmp dir".into(),
+    path: tmp_root.to_path_buf(),
+    source,
+  })?;
+
+  let nonce = SystemTime::now().duration_since(UNIX_EPOCH).map(|dur| dur.as_nanos()).unwrap_or(0);
+  let tmp_dir = tmp_root.join(format!(
+    "path-mirror-{}-{}-{nonce}",
+    std::process::id(),
+    source_dir.file_name().and_then(|v| v.to_str()).unwrap_or("src")
+  ));
+  if tmp_dir.exists() {
+    fs_ops::remove_path_if_exists(&tmp_dir).map_err(|source| FetchError::Io {
+      action: "cleaning path mirror temp dir".into(),
+      path: tmp_dir.clone(),
+      source,
+    })?;
+  }
+
+  let result = (|| {
+    copy_dir_recursive(source_dir, &tmp_dir)?;
+    if dest_dir.exists() {
+      fs_ops::remove_path_if_exists(dest_dir).map_err(|source| FetchError::Io {
+        action: "removing stale path mirror".into(),
+        path: dest_dir.to_path_buf(),
+        source,
+      })?;
+    }
+    fs::rename(&tmp_dir, dest_dir).map_err(|source| FetchError::Io {
+      action: "moving path mirror into cache".into(),
+      path: dest_dir.to_path_buf(),
+      source,
+    })?;
+    Ok::<(), FetchError>(())
+  })();
+
+  if result.is_err() && tmp_dir.exists() {
+    let _ = fs_ops::remove_path_if_exists(&tmp_dir);
+  }
+  result
+}
+
+fn copy_dir_recursive(src: &Path, dst: &Path) -> Result<(), FetchError> {
+  fs::create_dir_all(dst).map_err(|source| FetchError::Io {
+    action: "creating mirrored directory".into(),
+    path: dst.to_path_buf(),
+    source,
+  })?;
+  for entry in fs::read_dir(src).map_err(|source| FetchError::Io {
+    action: "reading source directory".into(),
+    path: src.to_path_buf(),
+    source,
+  })? {
+    let entry = entry.map_err(|source| FetchError::Io {
+      action: "reading source directory entry".into(),
+      path: src.to_path_buf(),
+      source,
+    })?;
+    let path = entry.path();
+    let dest = dst.join(entry.file_name());
+    let metadata = entry.metadata().map_err(|source| FetchError::Io {
+      action: "reading source metadata".into(),
+      path: path.clone(),
+      source,
+    })?;
+    if metadata.is_dir() {
+      copy_dir_recursive(&path, &dest)?;
+    } else if metadata.is_file() {
+      fs::copy(&path, &dest).map_err(|source| FetchError::Io {
+        action: "copying source file".into(),
+        path: dest.clone(),
+        source,
+      })?;
+    }
+  }
+  Ok(())
+}
+
+fn hash_file_sha256(path: &Path) -> Result<String, FetchError> {
+  let mut file = fs::File::open(path).map_err(|source| FetchError::Io {
+    action: "opening file for hashing".into(),
+    path: path.to_path_buf(),
+    source,
+  })?;
+  let mut hasher = Sha256::new();
+  let mut buf = [0u8; 64 * 1024];
+  loop {
+    let read = file.read(&mut buf).map_err(|source| FetchError::Io {
+      action: "reading file for hashing".into(),
+      path: path.to_path_buf(),
+      source,
+    })?;
+    if read == 0 {
+      break;
+    }
+    hasher.update(&buf[..read]);
+  }
+  Ok(format!("{:x}", hasher.finalize()))
+}
+
+fn hash_path_sha256(path: &Path) -> Result<String, FetchError> {
+  let mut files = Vec::<String>::new();
+  collect_files_recursive(path, path, &mut files)?;
+  files.sort();
+  let mut hasher = Sha256::new();
+  for rel in files {
+    let abs = path.join(&rel);
+    let bytes = fs::read(&abs).map_err(|source| FetchError::Io {
+      action: "reading source file for hashing".into(),
+      path: abs.clone(),
+      source,
+    })?;
+    hasher.update(rel.as_bytes());
+    hasher.update([0u8]);
+    hasher.update(bytes);
+    hasher.update([0u8]);
+  }
+  Ok(format!("{:x}", hasher.finalize()))
+}
+
+fn collect_files_recursive(
+  root: &Path,
+  current: &Path,
+  out: &mut Vec<String>,
+) -> Result<(), FetchError> {
+  for entry in fs::read_dir(current).map_err(|source| FetchError::Io {
+    action: "reading source directory for hashing".into(),
+    path: current.to_path_buf(),
+    source,
+  })? {
+    let entry = entry.map_err(|source| FetchError::Io {
+      action: "reading directory entry for hashing".into(),
+      path: current.to_path_buf(),
+      source,
+    })?;
+    let path = entry.path();
+    let metadata = entry.metadata().map_err(|source| FetchError::Io {
+      action: "reading metadata for hashing".into(),
+      path: path.clone(),
+      source,
+    })?;
+    if metadata.is_dir() {
+      collect_files_recursive(root, &path, out)?;
+    } else if metadata.is_file() {
+      let rel =
+        path.strip_prefix(root).unwrap_or(path.as_path()).to_string_lossy().replace('\\', "/");
+      out.push(rel);
+    }
+  }
+  Ok(())
+}
+
 fn emit_progress(message: &str) {
   if runtime_progress_enabled() {
     progress_detail_tty(message);
@@ -540,6 +1097,12 @@ pub enum FetchError {
     #[source]
     source: std::io::Error,
   },
+  #[error("invalid sha256 checksum `{checksum}`: {reason}")]
+  InvalidChecksum { checksum: String, reason: String },
+  #[error("archive/source checksum mismatch for `{package}`: expected {expected}, actual {actual}")]
+  ChecksumMismatch { package: String, expected: String, actual: String },
+  #[error("unsupported archive format for `{archive}` (expected {expected})")]
+  UnsupportedArchiveFormat { archive: PathBuf, expected: String },
   #[error("failed to create tokio runtime for parallel fetch: {0}")]
   Runtime(std::io::Error),
   #[error("{0}")]
@@ -598,6 +1161,18 @@ impl FetchError {
     matches!(self, Self::VersionNotFound { .. })
   }
 
+  pub fn is_invalid_checksum(&self) -> bool {
+    matches!(self, Self::InvalidChecksum { .. })
+  }
+
+  pub fn is_checksum_mismatch(&self) -> bool {
+    matches!(self, Self::ChecksumMismatch { .. })
+  }
+
+  pub fn is_unsupported_archive_format(&self) -> bool {
+    matches!(self, Self::UnsupportedArchiveFormat { .. })
+  }
+
   pub fn is_transient_network(&self) -> bool {
     match self {
       Self::Http(err) => err.is_timeout() || err.is_connect() || err.is_request(),
@@ -635,6 +1210,9 @@ impl FetchError {
       | Self::OfflineNetworkDisabled { .. }
       | Self::InvalidVersionReq { .. }
       | Self::VersionNotFound { .. }
+      | Self::InvalidChecksum { .. }
+      | Self::ChecksumMismatch { .. }
+      | Self::UnsupportedArchiveFormat { .. }
       | Self::GlobalCache(_)
       | Self::Io { .. }
       | Self::Runtime(_)

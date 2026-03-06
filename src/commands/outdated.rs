@@ -1,5 +1,6 @@
 use semver::Version;
 use serde_json::json;
+use std::collections::BTreeMap;
 use std::env;
 
 use super::dependency_common::map_registry_error;
@@ -19,6 +20,9 @@ enum OutdatedSources {
   All,
   Registry,
   Github,
+  Git,
+  Path,
+  Archive,
 }
 
 impl From<OutdatedSourceArg> for OutdatedSources {
@@ -27,6 +31,9 @@ impl From<OutdatedSourceArg> for OutdatedSources {
       OutdatedSourceArg::All => Self::All,
       OutdatedSourceArg::Registry => Self::Registry,
       OutdatedSourceArg::Github => Self::Github,
+      OutdatedSourceArg::Git => Self::Git,
+      OutdatedSourceArg::Path => Self::Path,
+      OutdatedSourceArg::Archive => Self::Archive,
     }
   }
 }
@@ -37,6 +44,9 @@ impl OutdatedSources {
       Self::All => true,
       Self::Registry => source == "registry",
       Self::Github => source == "github",
+      Self::Git => source == "git",
+      Self::Path => source == "path",
+      Self::Archive => source == "archive",
     }
   }
 
@@ -45,6 +55,9 @@ impl OutdatedSources {
       Self::All => "all",
       Self::Registry => "registry",
       Self::Github => "github",
+      Self::Git => "git",
+      Self::Path => "path",
+      Self::Archive => "archive",
     }
   }
 }
@@ -81,7 +94,7 @@ pub fn handle(args: OutdatedArgs, runtime: RuntimeFlags) -> Result<CommandOutput
   roots.sort();
 
   let sources = OutdatedSources::from(args.sources);
-  let mut registry_store = None::<RegistryStore>;
+  let mut registry_stores = BTreeMap::<String, RegistryStore>::new();
 
   let mut rows = lock
     .packages
@@ -89,7 +102,7 @@ pub fn handle(args: OutdatedArgs, runtime: RuntimeFlags) -> Result<CommandOutput
     .filter(|pkg| sources.includes(pkg.source.as_str()))
     .map(|pkg| {
       let direct = manifest.resolve_dependency_key(&pkg.id).is_some();
-      compute_outdated_row(pkg, direct, &mut registry_store)
+      compute_outdated_row(pkg, direct, &cwd, &mut registry_stores)
     })
     .collect::<Result<Vec<_>, JoyError>>()?;
   rows.sort_by(|a, b| a.id.cmp(&b.id));
@@ -98,11 +111,14 @@ pub fn handle(args: OutdatedArgs, runtime: RuntimeFlags) -> Result<CommandOutput
     rows.iter().filter(|row| row.newer_compatible || row.newer_available).collect::<Vec<_>>();
   let registry_rows = rows.iter().filter(|row| row.source == "registry").count();
   let github_rows = rows.iter().filter(|row| row.source == "github").count();
-  let unsupported_rows = rows.iter().filter(|row| row.status == "unsupported_source").count();
+  let git_rows = rows.iter().filter(|row| row.source == "git").count();
+  let path_rows = rows.iter().filter(|row| row.source == "path").count();
+  let archive_rows = rows.iter().filter(|row| row.source == "archive").count();
+  let unsupported_rows = rows.iter().filter(|row| row.status == "unknown_source").count();
   let direct_count = rows.iter().filter(|row| row.direct).count();
   let transitive_count = rows.len().saturating_sub(direct_count);
 
-  let human = render_human_outdated(&rows, outdated_rows.len(), unsupported_rows, sources);
+  let human = render_human_outdated(&rows, outdated_rows.len(), sources);
 
   Ok(CommandOutput::new(
     "outdated",
@@ -119,6 +135,9 @@ pub fn handle(args: OutdatedArgs, runtime: RuntimeFlags) -> Result<CommandOutput
         "transitive_count": transitive_count,
         "registry_backed_count": registry_rows,
         "github_backed_count": github_rows,
+        "git_backed_count": git_rows,
+        "path_backed_count": path_rows,
+        "archive_backed_count": archive_rows,
         "outdated_count": outdated_rows.len(),
         "unsupported_count": unsupported_rows,
       },
@@ -170,34 +189,208 @@ impl OutdatedRow {
 fn compute_outdated_row(
   pkg: &lockfile::LockedPackage,
   direct: bool,
-  registry_store: &mut Option<RegistryStore>,
+  project_root: &std::path::Path,
+  registry_stores: &mut BTreeMap<String, RegistryStore>,
 ) -> Result<OutdatedRow, JoyError> {
   match pkg.source.as_str() {
-    "registry" => compute_registry_outdated_row(pkg, direct, registry_store),
+    "registry" => compute_registry_outdated_row(pkg, direct, project_root, registry_stores),
     "github" => Ok(compute_github_outdated_row(pkg, direct)),
-    _ => Ok(OutdatedRow {
-      id: pkg.id.clone(),
-      direct,
-      source: pkg.source.clone(),
-      registry: pkg.registry.clone(),
-      source_package: pkg.source_package.clone(),
-      requested_requirement: pkg.requested_requirement.clone(),
-      resolved_version: pkg.resolved_version.clone(),
-      latest_compatible: None,
-      latest_available: None,
-      newer_compatible: false,
-      newer_available: false,
-      status: "unsupported_source".into(),
-      check_method: "unknown".into(),
-      note: Some(format!("Unsupported dependency source `{}` for `joy outdated`", pkg.source)),
-    }),
+    "git" => Ok(compute_git_outdated_row(pkg, direct)),
+    "path" => Ok(compute_path_outdated_row(pkg, direct)),
+    "archive" => Ok(compute_archive_outdated_row(pkg, direct)),
+    _ => Ok(
+      base_row(pkg, direct)
+        .status("unknown_source", "unknown")
+        .note(format!("Unknown dependency source `{}` for `joy outdated`", pkg.source)),
+    ),
+  }
+}
+
+#[derive(Debug, Clone)]
+struct OutdatedRowBuilder(OutdatedRow);
+
+impl OutdatedRowBuilder {
+  fn status(mut self, status: &str, check_method: &str) -> Self {
+    self.0.status = status.to_string();
+    self.0.check_method = check_method.to_string();
+    self
+  }
+
+  fn latest_available(mut self, value: Option<String>) -> Self {
+    self.0.latest_available = value;
+    self
+  }
+
+  fn outdated(mut self, outdated: bool) -> Self {
+    self.0.newer_available = outdated;
+    self
+  }
+
+  fn note(mut self, note: impl Into<String>) -> OutdatedRow {
+    self.0.note = Some(note.into());
+    self.0
+  }
+
+  fn build(self) -> OutdatedRow {
+    self.0
+  }
+}
+
+fn base_row(pkg: &lockfile::LockedPackage, direct: bool) -> OutdatedRowBuilder {
+  OutdatedRowBuilder(OutdatedRow {
+    id: pkg.id.clone(),
+    direct,
+    source: pkg.source.clone(),
+    registry: pkg.registry.clone(),
+    source_package: pkg.source_package.clone(),
+    requested_requirement: pkg.requested_requirement.clone(),
+    resolved_version: pkg.resolved_version.clone(),
+    latest_compatible: None,
+    latest_available: None,
+    newer_compatible: false,
+    newer_available: false,
+    status: "unknown".into(),
+    check_method: "unknown".into(),
+    note: None,
+  })
+}
+
+fn parse_or_synthetic_package_id(raw: &str) -> Result<PackageId, JoyError> {
+  if let Ok(package) = PackageId::parse(raw) {
+    return Ok(package);
+  }
+  let mut slug = String::new();
+  for ch in raw.chars() {
+    if ch.is_ascii_alphanumeric() || matches!(ch, '_' | '-' | '.') {
+      slug.push(ch);
+    } else {
+      slug.push('_');
+    }
+  }
+  let slug = slug.trim_matches('_');
+  let slug = if slug.is_empty() { "dep" } else { slug };
+  PackageId::parse(&format!("local/{slug}"))
+    .map_err(|err| JoyError::new("outdated", "invalid_package_id", err.to_string(), 1))
+}
+
+fn compute_git_outdated_row(pkg: &lockfile::LockedPackage, direct: bool) -> OutdatedRow {
+  let package = match parse_or_synthetic_package_id(&pkg.id) {
+    Ok(package) => package,
+    Err(err) => {
+      return base_row(pkg, direct).status("invalid_package_id", "git_rev").note(err.message);
+    },
+  };
+  let Some(source_git) = pkg.source_git.as_deref() else {
+    return base_row(pkg, direct)
+      .status("invalid_source_metadata", "git_rev")
+      .note("missing `source_git` metadata in lockfile");
+  };
+  let requested_rev = if pkg.requested_rev.trim().is_empty() { "HEAD" } else { &pkg.requested_rev };
+  match fetch::fetch_git(&package, source_git, requested_rev) {
+    Ok(fetched) => {
+      let outdated = fetched.resolved_commit != pkg.resolved_commit;
+      base_row(pkg, direct)
+        .status(if outdated { "outdated_commit" } else { "up_to_date" }, "git_rev")
+        .latest_available(Some(fetched.resolved_commit.clone()))
+        .outdated(outdated)
+        .note(format!(
+          "requested rev `{requested_rev}` currently resolves to `{}`",
+          fetched.resolved_commit
+        ))
+    },
+    Err(err) if err.is_offline_cache_miss() || err.is_offline_network_disabled() => {
+      base_row(pkg, direct).status("git_lookup_unavailable", "git_rev").note(err.to_string())
+    },
+    Err(err) => base_row(pkg, direct).status("git_lookup_failed", "git_rev").note(err.to_string()),
+  }
+}
+
+fn compute_path_outdated_row(pkg: &lockfile::LockedPackage, direct: bool) -> OutdatedRow {
+  let package = match parse_or_synthetic_package_id(&pkg.id) {
+    Ok(package) => package,
+    Err(err) => {
+      return base_row(pkg, direct).status("invalid_package_id", "path_hash").note(err.message);
+    },
+  };
+  let Some(source_path) = pkg.source_path.as_deref() else {
+    return base_row(pkg, direct)
+      .status("invalid_source_metadata", "path_hash")
+      .note("missing `source_path` metadata in lockfile");
+  };
+  match fetch::fetch_path(&package, source_path) {
+    Ok(fetched) => {
+      let outdated = fetched.resolved_commit != pkg.resolved_commit;
+      base_row(pkg, direct)
+        .status(if outdated { "outdated_path_content" } else { "up_to_date" }, "path_hash")
+        .latest_available(Some(fetched.resolved_commit))
+        .outdated(outdated)
+        .build()
+    },
+    Err(err) if err.is_offline_cache_miss() || err.is_offline_network_disabled() => {
+      base_row(pkg, direct).status("path_lookup_unavailable", "path_hash").note(err.to_string())
+    },
+    Err(err) => {
+      base_row(pkg, direct).status("path_lookup_failed", "path_hash").note(err.to_string())
+    },
+  }
+}
+
+fn compute_archive_outdated_row(pkg: &lockfile::LockedPackage, direct: bool) -> OutdatedRow {
+  let package = match parse_or_synthetic_package_id(&pkg.id) {
+    Ok(package) => package,
+    Err(err) => {
+      return base_row(pkg, direct)
+        .status("invalid_package_id", "archive_checksum")
+        .note(err.message);
+    },
+  };
+  let Some(source_url) = pkg.source_url.as_deref() else {
+    return base_row(pkg, direct)
+      .status("invalid_source_metadata", "archive_checksum")
+      .note("missing `source_url` metadata in lockfile");
+  };
+  let Some(sha256) = pkg.source_checksum_sha256.as_deref() else {
+    return base_row(pkg, direct)
+      .status("invalid_source_metadata", "archive_checksum")
+      .note("missing `source_checksum_sha256` metadata in lockfile");
+  };
+  match fetch::fetch_archive(&package, source_url, sha256) {
+    Ok(fetched) => {
+      let outdated = fetched.resolved_commit != pkg.resolved_commit;
+      base_row(pkg, direct)
+        .status(
+          if outdated { "outdated_archive_content" } else { "up_to_date" },
+          "archive_checksum",
+        )
+        .latest_available(Some(fetched.resolved_commit))
+        .outdated(outdated)
+        .build()
+    },
+    Err(err) if err.is_checksum_mismatch() => base_row(pkg, direct)
+      .status("archive_checksum_mismatch", "archive_checksum")
+      .note(err.to_string()),
+    Err(err) if err.is_invalid_checksum() => {
+      base_row(pkg, direct).status("invalid_checksum", "archive_checksum").note(err.to_string())
+    },
+    Err(err) if err.is_unsupported_archive_format() => base_row(pkg, direct)
+      .status("archive_format_unsupported", "archive_checksum")
+      .note(err.to_string()),
+    Err(err) if err.is_offline_cache_miss() || err.is_offline_network_disabled() => {
+      base_row(pkg, direct)
+        .status("archive_lookup_unavailable", "archive_checksum")
+        .note(err.to_string())
+    },
+    Err(err) => base_row(pkg, direct)
+      .status("archive_lookup_failed", "archive_checksum")
+      .note(err.to_string()),
   }
 }
 
 fn compute_registry_outdated_row(
   pkg: &lockfile::LockedPackage,
   direct: bool,
-  registry_store: &mut Option<RegistryStore>,
+  project_root: &std::path::Path,
+  registry_stores: &mut BTreeMap<String, RegistryStore>,
 ) -> Result<OutdatedRow, JoyError> {
   let current_version = match pkg.resolved_version.as_deref() {
     Some(v) if !v.trim().is_empty() => Some(Version::parse(v).map_err(|err| {
@@ -211,12 +404,13 @@ fn compute_registry_outdated_row(
     _ => None,
   };
 
-  let store = if let Some(store) = registry_store.as_ref() {
+  let registry_name = pkg.registry.as_deref().unwrap_or("default").to_string();
+  let store = if let Some(store) = registry_stores.get(&registry_name) {
     store.clone()
   } else {
-    let loaded =
-      RegistryStore::load_default().map_err(|err| map_registry_error("outdated", err))?;
-    *registry_store = Some(loaded.clone());
+    let loaded = RegistryStore::load_named_for_project(&registry_name, Some(project_root))
+      .map_err(|err| map_registry_error("outdated", err))?;
+    registry_stores.insert(registry_name.clone(), loaded.clone());
     loaded
   };
 
@@ -483,7 +677,6 @@ fn compose_github_note(
 fn render_human_outdated(
   rows: &[OutdatedRow],
   outdated_count: usize,
-  unsupported_count: usize,
   sources: OutdatedSources,
 ) -> String {
   if rows.is_empty() {
@@ -499,8 +692,7 @@ fn render_human_outdated(
     HumanMessageBuilder::new(format!("Found {outdated_count} outdated dependencies"))
   }
   .kv("package count", rows.len().to_string())
-  .kv("sources", sources.as_str())
-  .kv("unsupported", unsupported_count.to_string());
+  .kv("sources", sources.as_str());
 
   for row in rows {
     if !(row.newer_compatible || row.newer_available) {
@@ -514,12 +706,6 @@ fn render_human_outdated(
       "- {} ({scope}, {}, {}): current {current}, compatible {compat}, latest {latest} [{}]",
       row.id, row.source, row.check_method, row.status
     ));
-  }
-
-  if outdated_count == 0 && unsupported_count > 0 {
-    builder = builder.hint(
-      "Some dependencies use unsupported sources for update checks; see JSON `status`/`note` for details",
-    );
   }
 
   builder.build()

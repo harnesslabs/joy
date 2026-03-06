@@ -15,7 +15,9 @@ use thiserror::Error;
 
 use crate::fetch;
 use crate::lockfile;
-use crate::manifest::{DependencyRequirementRef, DependencySource, Manifest, ManifestDocument};
+use crate::manifest::{
+  DependencyRequirementRef, DependencySource, DependencySpec, Manifest, ManifestDocument,
+};
 use crate::package_id::{PackageId, PackageIdError};
 use crate::recipes::RecipeStore;
 use crate::registry::{self, RegistryRequirement};
@@ -25,6 +27,10 @@ use crate::registry::{self, RegistryRequirement};
 pub struct ResolvedPackage {
   pub id: PackageId,
   pub source: DependencySource,
+  pub source_git: Option<String>,
+  pub source_path: Option<String>,
+  pub source_url: Option<String>,
+  pub source_checksum_sha256: Option<String>,
   pub registry: Option<String>,
   pub source_package: Option<String>,
   pub requested_rev: String,
@@ -95,11 +101,27 @@ pub fn resolve_manifest(
   manifest: &Manifest,
   recipes: &RecipeStore,
 ) -> Result<ResolvedGraph, ResolverError> {
+  let project_root = std::env::current_dir().ok();
+  let mut direct_source_meta = BTreeMap::<String, DirectSourceMeta>::new();
+  for (raw_id, spec) in &manifest.dependencies {
+    let package = resolve_dependency_package_id(raw_id, spec)?;
+    direct_source_meta.insert(
+      package.to_string(),
+      DirectSourceMeta {
+        registry: spec.registry.clone(),
+        source_git: spec.git.clone(),
+        source_path: spec.path.clone(),
+        source_url: spec.url.clone(),
+        source_checksum_sha256: spec.sha256.clone(),
+      },
+    );
+  }
+
   let mut registry_store =
     if manifest.dependencies.values().any(|spec| matches!(spec.source, DependencySource::Registry))
     {
       Some(
-        registry::RegistryStore::load_default()
+        registry::RegistryStore::load_default_for_project(project_root.as_deref())
           .map_err(|source| ResolverError::RegistryLoad { source })?,
       )
     } else {
@@ -111,6 +133,10 @@ pub fn resolve_manifest(
         let fetched = fetch::fetch_github(package, requested_rev)
           .map_err(|source| ResolverError::Fetch { package: package.to_string(), source })?;
         Ok(ResolvedSelection {
+          source_git: None,
+          source_path: None,
+          source_url: None,
+          source_checksum_sha256: None,
           registry: None,
           source_package: None,
           requested_rev: fetched.requested_rev,
@@ -124,6 +150,10 @@ pub fn resolve_manifest(
         let fetched = fetch::fetch_github_semver(package, version_req)
           .map_err(|source| ResolverError::Fetch { package: package.to_string(), source })?;
         Ok(ResolvedSelection {
+          source_git: None,
+          source_path: None,
+          source_url: None,
+          source_checksum_sha256: None,
           registry: None,
           source_package: None,
           requested_rev: fetched.requested_rev,
@@ -137,11 +167,19 @@ pub fn resolve_manifest(
     DependencySource::Registry => {
       if registry_store.is_none() {
         registry_store = Some(
-          registry::RegistryStore::load_default()
+          registry::RegistryStore::load_default_for_project(project_root.as_deref())
             .map_err(|source| ResolverError::RegistryLoad { source })?,
         );
       }
       let store = registry_store.as_ref().expect("registry store must be loaded");
+      let direct_registry =
+        direct_source_meta.get(package.as_str()).and_then(|meta| meta.registry.as_deref());
+      let store = if let Some(name) = direct_registry {
+        registry::RegistryStore::load_named_for_project(name, project_root.as_deref())
+          .map_err(|source| ResolverError::RegistryLoad { source })?
+      } else {
+        store.clone()
+      };
       let registry_requirement = match request {
         ResolveRequest::Version(req) => RegistryRequirement::Semver(req.as_str()),
         ResolveRequest::Rev(rev) => RegistryRequirement::ExactVersion(rev.as_str()),
@@ -166,6 +204,10 @@ pub fn resolve_manifest(
         release.manifest.as_ref(),
       )?;
       Ok(ResolvedSelection {
+        source_git: None,
+        source_path: None,
+        source_url: None,
+        source_checksum_sha256: None,
         registry: Some(release.registry),
         source_package: Some(release.source_package),
         requested_rev: fetched.requested_rev,
@@ -175,10 +217,97 @@ pub fn resolve_manifest(
         declared_deps,
       })
     },
-    DependencySource::Git | DependencySource::Path | DependencySource::Archive => {
-      Err(ResolverError::UnsupportedSource {
-        dependency: package.to_string(),
-        source_kind: source.as_str().to_string(),
+    DependencySource::Git => {
+      let source_git = direct_source_meta
+        .get(package.as_str())
+        .and_then(|meta| meta.source_git.as_deref())
+        .ok_or_else(|| ResolverError::MissingSourceField {
+          dependency: package.to_string(),
+          source_kind: source.as_str().to_string(),
+          field: "git",
+        })?;
+      let rev = match request {
+        ResolveRequest::Rev(rev) => rev.as_str(),
+        ResolveRequest::Version(_) => {
+          return Err(ResolverError::MissingSourceField {
+            dependency: package.to_string(),
+            source_kind: source.as_str().to_string(),
+            field: "rev",
+          });
+        },
+      };
+      let fetched = fetch::fetch_git(package, source_git, rev)
+        .map_err(|source| ResolverError::Fetch { package: package.to_string(), source })?;
+      Ok(ResolvedSelection {
+        source_git: Some(source_git.to_string()),
+        source_path: None,
+        source_url: None,
+        source_checksum_sha256: None,
+        registry: None,
+        source_package: None,
+        requested_rev: fetched.requested_rev,
+        requested_requirement: None,
+        resolved_version: None,
+        resolved_commit: fetched.resolved_commit,
+        declared_deps: package_manifest_declared_dependencies(package, &fetched.source_dir)?,
+      })
+    },
+    DependencySource::Path => {
+      let source_path = direct_source_meta
+        .get(package.as_str())
+        .and_then(|meta| meta.source_path.as_deref())
+        .ok_or_else(|| ResolverError::MissingSourceField {
+          dependency: package.to_string(),
+          source_kind: source.as_str().to_string(),
+          field: "path",
+        })?;
+      let fetched = fetch::fetch_path(package, source_path)
+        .map_err(|source| ResolverError::Fetch { package: package.to_string(), source })?;
+      Ok(ResolvedSelection {
+        source_git: None,
+        source_path: Some(source_path.to_string()),
+        source_url: None,
+        source_checksum_sha256: None,
+        registry: None,
+        source_package: None,
+        requested_rev: fetched.requested_rev,
+        requested_requirement: None,
+        resolved_version: None,
+        resolved_commit: fetched.resolved_commit,
+        declared_deps: package_manifest_declared_dependencies(package, &fetched.source_dir)?,
+      })
+    },
+    DependencySource::Archive => {
+      let source_url = direct_source_meta
+        .get(package.as_str())
+        .and_then(|meta| meta.source_url.as_deref())
+        .ok_or_else(|| ResolverError::MissingSourceField {
+          dependency: package.to_string(),
+          source_kind: source.as_str().to_string(),
+          field: "url",
+        })?;
+      let source_checksum_sha256 = direct_source_meta
+        .get(package.as_str())
+        .and_then(|meta| meta.source_checksum_sha256.as_deref())
+        .ok_or_else(|| ResolverError::MissingSourceField {
+          dependency: package.to_string(),
+          source_kind: source.as_str().to_string(),
+          field: "sha256",
+        })?;
+      let fetched = fetch::fetch_archive(package, source_url, source_checksum_sha256)
+        .map_err(|source| ResolverError::Fetch { package: package.to_string(), source })?;
+      Ok(ResolvedSelection {
+        source_git: None,
+        source_path: None,
+        source_url: Some(source_url.to_string()),
+        source_checksum_sha256: Some(source_checksum_sha256.to_string()),
+        registry: None,
+        source_package: None,
+        requested_rev: fetched.requested_rev,
+        requested_requirement: None,
+        resolved_version: None,
+        resolved_commit: fetched.resolved_commit,
+        declared_deps: package_manifest_declared_dependencies(package, &fetched.source_dir)?,
       })
     },
   })
@@ -202,6 +331,10 @@ where
     };
     let resolved_commit = resolve_commit(package, requested)?;
     Ok(ResolvedSelection {
+      source_git: None,
+      source_path: None,
+      source_url: None,
+      source_checksum_sha256: None,
       registry: None,
       source_package: None,
       requested_rev: requested.to_string(),
@@ -233,25 +366,11 @@ where
   let mut queue = VecDeque::<PendingDependency>::new();
 
   for (raw_id, spec) in &manifest.dependencies {
-    if !spec.source.requires_canonical_package_id() {
-      return Err(ResolverError::UnsupportedSource {
-        dependency: raw_id.clone(),
-        source_kind: spec.source.as_str().to_string(),
-      });
-    }
-    let declared = spec.declared_package(raw_id);
-    let package = PackageId::parse(declared).map_err(|source| ResolverError::InvalidPackageId {
-      package: declared.to_string(),
-      source,
-    })?;
+    let package = resolve_dependency_package_id(raw_id, spec)?;
     queue.push_back(PendingDependency {
       package,
       source: spec.source.clone(),
-      request: match manifest.dependency_requirement(raw_id.as_str()) {
-        Some(DependencyRequirementRef::Version(version)) => ResolveRequest::Version(version.into()),
-        Some(DependencyRequirementRef::Rev(rev)) => ResolveRequest::Rev(rev.into()),
-        None => ResolveRequest::Rev("HEAD".into()),
-      },
+      request: initial_request_for_dependency(raw_id, spec, manifest),
       dependent: None,
       direct: true,
       requested_by: None,
@@ -291,12 +410,28 @@ where
       if existing.source_package.is_none() && selection.source_package.is_some() {
         existing.source_package = selection.source_package.clone();
       }
+      if existing.source_git.is_none() && selection.source_git.is_some() {
+        existing.source_git = selection.source_git.clone();
+      }
+      if existing.source_path.is_none() && selection.source_path.is_some() {
+        existing.source_path = selection.source_path.clone();
+      }
+      if existing.source_url.is_none() && selection.source_url.is_some() {
+        existing.source_url = selection.source_url.clone();
+      }
+      if existing.source_checksum_sha256.is_none() && selection.source_checksum_sha256.is_some() {
+        existing.source_checksum_sha256 = selection.source_checksum_sha256.clone();
+      }
       existing_idx
     } else {
       let recipe = recipes.get(&pending.package);
       let node = ResolvedPackage {
         id: pending.package.clone(),
         source: pending.source.clone(),
+        source_git: selection.source_git.clone(),
+        source_path: selection.source_path.clone(),
+        source_url: selection.source_url.clone(),
+        source_checksum_sha256: selection.source_checksum_sha256.clone(),
         registry: selection.registry.clone(),
         source_package: selection.source_package.clone(),
         requested_rev,
@@ -390,6 +525,10 @@ struct DeclaredDependency {
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 struct ResolvedSelection {
+  source_git: Option<String>,
+  source_path: Option<String>,
+  source_url: Option<String>,
+  source_checksum_sha256: Option<String>,
   registry: Option<String>,
   source_package: Option<String>,
   requested_rev: String,
@@ -506,6 +645,93 @@ fn registry_manifest_declared_dependencies(
   Ok(declared)
 }
 
+#[derive(Debug, Clone, Default)]
+struct DirectSourceMeta {
+  registry: Option<String>,
+  source_git: Option<String>,
+  source_path: Option<String>,
+  source_url: Option<String>,
+  source_checksum_sha256: Option<String>,
+}
+
+fn resolve_dependency_package_id(
+  raw_id: &str,
+  spec: &DependencySpec,
+) -> Result<PackageId, ResolverError> {
+  let declared = spec.declared_package(raw_id);
+  if spec.source.requires_canonical_package_id() {
+    return PackageId::parse(declared)
+      .map_err(|source| ResolverError::InvalidPackageId { package: declared.to_string(), source });
+  }
+
+  if let Ok(package) = PackageId::parse(declared) {
+    return Ok(package);
+  }
+  if matches!(spec.source, DependencySource::Git)
+    && let Some(locator) = spec.git.as_deref()
+    && let Some(package) = infer_git_package_id(locator)
+  {
+    return Ok(package);
+  }
+
+  synthetic_local_package_id(raw_id).map_err(|source| ResolverError::InvalidPackageId {
+    package: format!("local/{raw_id}"),
+    source,
+  })
+}
+
+fn initial_request_for_dependency(
+  raw_id: &str,
+  spec: &DependencySpec,
+  manifest: &Manifest,
+) -> ResolveRequest {
+  match spec.source {
+    DependencySource::Github | DependencySource::Registry | DependencySource::Git => {
+      match manifest.dependency_requirement(raw_id) {
+        Some(DependencyRequirementRef::Version(version)) => ResolveRequest::Version(version.into()),
+        Some(DependencyRequirementRef::Rev(rev)) => ResolveRequest::Rev(rev.into()),
+        None => ResolveRequest::Rev("HEAD".into()),
+      }
+    },
+    DependencySource::Path => {
+      ResolveRequest::Rev(spec.path.clone().unwrap_or_else(|| "<path>".to_string()))
+    },
+    DependencySource::Archive => {
+      ResolveRequest::Rev(spec.url.clone().unwrap_or_else(|| "<archive>".to_string()))
+    },
+  }
+}
+
+fn infer_git_package_id(locator: &str) -> Option<PackageId> {
+  let trimmed = locator.trim().trim_end_matches('/').trim_end_matches(".git");
+  let base = trimmed
+    .strip_prefix("ssh://")
+    .or_else(|| trimmed.strip_prefix("https://"))
+    .or_else(|| trimmed.strip_prefix("http://"))
+    .unwrap_or(trimmed);
+  let parts = base.split('/').filter(|p| !p.is_empty()).collect::<Vec<_>>();
+  if parts.len() < 2 {
+    return None;
+  }
+  let repo = parts[parts.len() - 1];
+  let owner = parts[parts.len() - 2];
+  PackageId::parse(&format!("{owner}/{repo}")).ok()
+}
+
+fn synthetic_local_package_id(raw: &str) -> Result<PackageId, PackageIdError> {
+  let mut slug = String::new();
+  for ch in raw.chars() {
+    if ch.is_ascii_alphanumeric() || matches!(ch, '_' | '-' | '.') {
+      slug.push(ch);
+    } else {
+      slug.push('_');
+    }
+  }
+  let slug = slug.trim_matches('_');
+  let slug = if slug.is_empty() { "dep" } else { slug };
+  PackageId::parse(&format!("local/{slug}"))
+}
+
 #[derive(Debug, Error)]
 pub enum ResolverError {
   #[error("invalid package id `{package}`: {source}")]
@@ -535,6 +761,10 @@ pub enum ResolverError {
     "dependency `{dependency}` uses source `{source_kind}` which is not yet supported by resolver"
   )]
   UnsupportedSource { dependency: String, source_kind: String },
+  #[error(
+    "dependency `{dependency}` uses source `{source_kind}` but is missing required `{field}` metadata"
+  )]
+  MissingSourceField { dependency: String, source_kind: String, field: &'static str },
   #[error(
     "registry package `{package}` currently maps to `{source_package}`, but alias package coordinates are not supported yet"
   )]
@@ -690,6 +920,10 @@ include_roots = ["include"]
     let resolved =
       resolve_manifest_with_selector(&manifest, &recipes, |pkg, _source, request| match request {
         ResolveRequest::Version(req) if pkg.as_str() == "fmtlib/fmt" => Ok(ResolvedSelection {
+          source_git: None,
+          source_path: None,
+          source_url: None,
+          source_checksum_sha256: None,
           registry: None,
           source_package: None,
           requested_rev: "v11.1.2".into(),
@@ -798,6 +1032,10 @@ packages = [{ id = "cycle/a", rev = "HEAD" }]
       match (pkg.as_str(), request) {
         ("harnesslabs/igneous", ResolveRequest::Rev(rev)) if rev == "HEAD" => {
           Ok(ResolvedSelection {
+            source_git: None,
+            source_path: None,
+            source_url: None,
+            source_checksum_sha256: None,
             registry: None,
             source_package: None,
             requested_rev: "HEAD".into(),
@@ -812,6 +1050,10 @@ packages = [{ id = "cycle/a", rev = "HEAD" }]
           })
         },
         ("xsimd/xsimd", ResolveRequest::Rev(rev)) if rev == "HEAD" => Ok(ResolvedSelection {
+          source_git: None,
+          source_path: None,
+          source_url: None,
+          source_checksum_sha256: None,
           registry: None,
           source_package: None,
           requested_rev: "HEAD".into(),
@@ -857,6 +1099,10 @@ packages = [{ id = "curated/transitive", rev = "v1" }]
       match (pkg.as_str(), request) {
         ("harnesslabs/igneous", ResolveRequest::Rev(rev)) if rev == "HEAD" => {
           Ok(ResolvedSelection {
+            source_git: None,
+            source_path: None,
+            source_url: None,
+            source_checksum_sha256: None,
             registry: None,
             source_package: None,
             requested_rev: "HEAD".into(),
@@ -871,6 +1117,10 @@ packages = [{ id = "curated/transitive", rev = "v1" }]
           })
         },
         ("curated/transitive", ResolveRequest::Rev(rev)) if rev == "v1" => Ok(ResolvedSelection {
+          source_git: None,
+          source_path: None,
+          source_url: None,
+          source_checksum_sha256: None,
           registry: None,
           source_package: None,
           requested_rev: "v1".into(),

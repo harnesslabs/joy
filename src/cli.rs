@@ -580,6 +580,9 @@ pub enum OutdatedSourceArg {
   All,
   Registry,
   Github,
+  Git,
+  Path,
+  Archive,
 }
 
 #[derive(Debug, Args)]
@@ -825,6 +828,24 @@ mod tests {
     let cli = Cli::parse_from(["joy", "outdated", "--sources", "github"]);
     match cli.command {
       Commands::Outdated(args) => assert_eq!(args.sources, OutdatedSourceArg::Github),
+      other => panic!("expected outdated, got {other:?}"),
+    }
+
+    let cli = Cli::parse_from(["joy", "outdated", "--sources", "git"]);
+    match cli.command {
+      Commands::Outdated(args) => assert_eq!(args.sources, OutdatedSourceArg::Git),
+      other => panic!("expected outdated, got {other:?}"),
+    }
+
+    let cli = Cli::parse_from(["joy", "outdated", "--sources", "path"]);
+    match cli.command {
+      Commands::Outdated(args) => assert_eq!(args.sources, OutdatedSourceArg::Path),
+      other => panic!("expected outdated, got {other:?}"),
+    }
+
+    let cli = Cli::parse_from(["joy", "outdated", "--sources", "archive"]);
+    match cli.command {
+      Commands::Outdated(args) => assert_eq!(args.sources, OutdatedSourceArg::Archive),
       other => panic!("expected outdated, got {other:?}"),
     }
   }
